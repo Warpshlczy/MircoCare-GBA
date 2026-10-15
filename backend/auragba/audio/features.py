@@ -423,12 +423,40 @@ def _extract_opensmile(audio: AudioData) -> AcousticFeatures:
     vector = {name: float(row.get(name, 0.0)) for name in FUNCTIONAL_NAMES}
     for key, value in row.items():  # keep extra openSMILE columns too
         vector.setdefault(str(key), float(value))
-    summary = {k: float(row.get(k, 0.0)) for k in (
-        "F0semitoneFrom27.5Hz_sma3nz_amean", "jitterLocal_sma3nz_amean", "shimmerLocaldB_sma3nz_amean",
-        "HNRdBACF_sma3nz_amean", "F1frequency_sma3nz_amean", "F2frequency_sma3nz_amean",
-        "loudness_sma3_amean",
-    )}
-    return AcousticFeatures(vector=vector, summary=summary, backend="opensmile", speech_ratio=1.0)
+    # 节律 / 发声时长类特征（语速、停顿、voiced 占比）openSMILE 不直接产出，
+    # 仍用 numpy VAD 分支计算 —— 这样两个后端的 summary 键完全一致，
+    # 下游 baseline.py 的 TRACKED 表与手工权重表才不会静默丢指标。
+    try:
+        analysis = _analyse_vector(audio.samples.astype(np.float64), audio.sample_rate)
+        _, np_summary = _build_vector(analysis, audio.sample_rate)
+        voiced_ratio = float(len(analysis["voiced"])) / max(int(analysis["n_frames"]), 1)  # type: ignore[arg-type]
+    except Exception:  # pragma: no cover
+        np_summary, voiced_ratio = {}, 1.0
+    summary = dict(np_summary)
+
+    # 声学质量类用 openSMILE 覆盖（比 numpy 近似更准）
+    def g(key: str) -> float:
+        return float(row.get(key, 0.0))
+
+    st = g("F0semitoneFrom27.5Hz_sma3nz_amean")
+    f0_hz = 27.5 * (2.0 ** (st / 12.0)) if st else 0.0   # 半音 -> Hz
+    f0_cv = g("F0semitoneFrom27.5Hz_sma3nz_stddevNorm")
+    sh_db = g("shimmerLocaldB_sma3nz_amean")
+    summary.update({
+        "f0_mean_hz": f0_hz,
+        "f0_std_hz": f0_hz * f0_cv,
+        "f0_cv": f0_cv,
+        "jitter_local": g("jitterLocal_sma3nz_amean"),
+        "shimmer_local": 10.0 ** (sh_db / 20.0) if sh_db else 0.0,  # dB -> 比值
+        "hnr_db": g("HNRdBACF_sma3nz_amean"),
+        "f1_hz": g("F1frequency_sma3nz_amean"),
+        "f2_hz": g("F2frequency_sma3nz_amean"),
+        "f3_hz": g("F3frequency_sma3nz_amean"),
+        "loudness_db_mean": g("loudness_sma3_amean"),
+        "speech_ratio": voiced_ratio,
+        "voiced_ratio": voiced_ratio,
+    })
+    return AcousticFeatures(vector=vector, summary=summary, backend="opensmile", speech_ratio=voiced_ratio)
 
 
 def extract_features(audio: AudioData) -> AcousticFeatures:

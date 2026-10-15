@@ -14,10 +14,11 @@ from pathlib import Path
 
 # Provenance stamps — every screening result and audit record carries these so
 # historical data can be re-scored reproducibly (see audit.py).
-ENGINE_VERSION = "aura-engine-0.1.0"
-FEATURE_SET_VERSION = "egemaps88-approx-v1"
+ENGINE_VERSION = "aura-engine-0.2.0"
+# v2: 装了 openSMILE 后走真 eGeMAPS（v1 是 numpy 近似），summary 键在两个后端下已统一
+FEATURE_SET_VERSION = "egemaps88-v2"
 NLP_SET_VERSION = "nlp-metrics-v1"
-FUSION_VERSION = "latefusion-v1"
+FUSION_VERSION = "latefusion-v2"  # 权重与阈值已在 322 人上交叉拟合校准(0.2/0.8)
 
 
 def _env_float(name: str, default: float) -> float:

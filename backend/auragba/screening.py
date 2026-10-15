@@ -21,7 +21,9 @@ from .audit import AuditLog, audit_log
 from .config import ENGINE_VERSION, FEATURE_SET_VERSION, FUSION_VERSION, settings
 from .contract import AuditRef, BaselineReport, MetricZScore, ScreeningResult, ScreeningSession
 from .economics import estimate as estimate_economics
+from .model import acoustic as model_acoustic
 from .model import late_fusion, score_acoustic, score_semantic
+from .model import semantic as model_semantic
 from .nlp import analyse_linguistics, coherence, transcribe
 from .privacy import input_digest, purge
 from .store import Store, store as default_store
@@ -141,6 +143,13 @@ def run_screening(
             "acoustic": acoustic.score,
             "semantic": None if semantic is None else semantic.score,
             "baselineSufficient": baseline.sufficient,
+            # 模型来源指纹：换模型后历史分数仍可追溯是哪个文件打的
+            "models": {
+                "acoustic": acoustic.model,
+                "semantic": None if semantic is None else semantic.model,
+                "acousticFile": model_acoustic.model_fingerprint(),
+                "semanticFile": model_semantic.model_fingerprint(),
+            },
         },
     )
     result.audit = AuditRef(seq=ref["seq"], hash=ref["hash"])

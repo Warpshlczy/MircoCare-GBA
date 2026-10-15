@@ -48,6 +48,7 @@ _clf_loaded = False
 class _Loaded:
     model: object | None = None
     feature_order: list[str] | None = None
+    error: str | None = None
 
 
 def _load_clf() -> _Loaded | None:
@@ -55,7 +56,10 @@ def _load_clf() -> _Loaded | None:
     if _clf_loaded:
         return _clf
     _clf_loaded = True
-    if not _MODEL_PATH or not os.path.exists(_MODEL_PATH):
+    if not _MODEL_PATH:
+        return None
+    if not os.path.exists(_MODEL_PATH):
+        print(f"[auragba][WARN] AURA_SEMANTIC_MODEL={_MODEL_PATH} 不存在，退回手工权重兜底")
         return None
     try:
         import joblib  # type: ignore
@@ -63,9 +67,26 @@ def _load_clf() -> _Loaded | None:
         model = joblib.load(_MODEL_PATH)
         order = list(getattr(model, "feature_names_in_", [])) or None
         _clf = _Loaded(model=model, feature_order=order)
-    except Exception:
-        _clf = None
+    except Exception as exc:
+        _clf = _Loaded(error=f"{type(exc).__name__}: {exc}")
+        print(f"[auragba][WARN] AURA_SEMANTIC_MODEL={_MODEL_PATH} 加载失败，"
+              f"已退回手工权重兜底: {_clf.error}")
     return _clf
+
+
+def model_fingerprint() -> dict:
+    """模型文件指纹，供审计链记录分数来源。"""
+    import hashlib
+
+    info = {"path": _MODEL_PATH, "sha256_8": None, "loaded": False, "error": None}
+    loaded = _load_clf()
+    if _MODEL_PATH and os.path.exists(_MODEL_PATH):
+        with open(_MODEL_PATH, "rb") as f:
+            info["sha256_8"] = hashlib.sha256(f.read()).hexdigest()[:8]
+    if loaded is not None:
+        info["loaded"] = loaded.model is not None
+        info["error"] = loaded.error
+    return info
 
 
 def _z(value: float, name: str) -> float:
@@ -95,6 +116,12 @@ def score_semantic(metrics: dict[str, float], coherence: float | None = None) ->
         except Exception:
             pass
 
+    # 配了模型却没吃上时，把失败写进标签，避免"以为在跑真模型"
+    if _MODEL_PATH and (loaded is None or loaded.model is None):
+        fallback_label = f"linear-interpretable(LOAD-FAILED:{os.path.basename(_MODEL_PATH)})"
+    else:
+        fallback_label = "linear-interpretable"
+
     contributions: list[BiomarkerContribution] = []
     total = _BIAS
     for name, weight in _WEIGHTS.items():
@@ -114,4 +141,4 @@ def score_semantic(metrics: dict[str, float], coherence: float | None = None) ->
             )
         )
     score = float(1.0 / (1.0 + np.exp(-total)))
-    return StreamScore(stream="semantic", score=score, model="linear-interpretable", contributions=contributions)
+    return StreamScore(stream="semantic", score=score, model=fallback_label, contributions=contributions)

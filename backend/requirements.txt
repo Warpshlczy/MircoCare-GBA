@@ -17,3 +17,12 @@ python-multipart>=0.0.9          # multipart WAV/FLAC upload for /screening/anal
 # sentence-transformers>=2.5     # semantic-coherence embeddings
 # lightgbm>=4.0                  # acoustic-stream classifier
 # scikit-learn>=1.4              # semantic-stream classifier
+
+# --- 已训练模型必须装的依赖 ---------------------------------------------------
+# models/ 里的两个真模型靠它们加载；不装则静默退回手工权重（演示时看不出来）。
+# opensmile>=2.5                 # 训练/推理特征同分布（否则声学模型吃错位特征）
+# faster-whisper>=1.0            # 语义流不装就彻底离线
+# jieba>=0.42                    # TTR / 名动比
+# lightgbm>=4.0                  # 加载 models/acoustic_lgbm.txt
+# scikit-learn>=1.4 + joblib     # 加载 models/semantic_lr.joblib
+# 一次性装齐: pip install opensmile faster-whisper jieba lightgbm scikit-learn joblib

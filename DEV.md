@@ -440,8 +440,10 @@ python3 selfcheck.py                          # 可运行断言自检 → selfch
 ```text
 backend/
 ├── requirements.txt            # 核心依赖（重依赖以注释形式给出，见下）
-├── .env.example                # 隐私模式 / 基线段长 / 融合权重 / 风险阈值 / CORS 等
-├── selfcheck.py                # 纯断言自检（88 槽位 / VAD / NLP / 融合 / 基线 / 审计 / 全链路）
+├── .env.example / .env         # 模型路径 / 隐私模式 / 基线段长 / 融合权重 / 风险阈值 / CORS
+├── selfcheck.py                # 纯断言自检（双后端特征槽位 / VAD / NLP / 融合 / 基线 / 审计 / 全链路）
+├── scripts/                    # 训练与评估（离线）：train_acoustic / train_semantic / eval_fusion
+├── models/                     # 训练产物：acoustic_lgbm.txt、semantic_lr.joblib、whisper-small/
 └── auragba/
     ├── config.py               # ENGINE_VERSION / FEATURE_SET_VERSION / 阈值与设置
     ├── contract.py             # Pydantic v2 契约（字段名严格镜像前端 camelCase）
@@ -461,7 +463,7 @@ backend/
     │   ├── metrics.py          # TTR / MATTR / 名动比 / 句长均值与方差 / 填充词比
     │   └── coherence.py        # 数字人提问 ↔ 长者回答的语义连贯度（sentence-transformers 优先）
     ├── model/
-    │   ├── acoustic.py         # 流 A：LightGBM/XGBoost 优先，否则可解释 logistic（含逐特征贡献度）
+    │   ├── acoustic.py         # 流 A：LightGBM/XGBoost 优先，否则可解释 logistic（真模型用 SHAP、兜底用手工权重，均含逐特征贡献度）
     │   ├── semantic.py         # 流 B：文本分类器（sklearn 优先，否则 logistic）
     │   └── fusion.py           # 晚期融合：加权归一化得到 0.0–1.0 综合风险指数
     └── api/

@@ -3,19 +3,27 @@
 Python / FastAPI 服务：通过分析长者日常对话语音中的**数字生物标志物**，做轻度认知障碍（MCI）与阿尔茨海默病（AD）的早期筛查，并向家属 / 护理员同步。前端契约见仓库根目录 [DEV.md](../DEV.md) §8。
 
 > **非诊断设备。** 输出仅用于演示、评估与人工复核，不做任何自动化临床决策。
+> 内置模型虽在公开数据集上训练，但**未经临床验证**，效力边界见「已训练模型」一节。
 
 ## 快速开始
 
 ```bash
 cd backend
 python3 -m pip install -r requirements.txt        # 核心依赖
-uvicorn auragba.main:app --reload --port 8000     # 启动 API
+# 加载 models/ 下的真实模型所需（不装则自动退回纯 numpy 兜底实现）
+python3 -m pip install opensmile faster-whisper jieba lightgbm scikit-learn joblib
+uvicorn auragba.main:app --env-file .env --reload --port 8000     # 启动 API
 python3 selfcheck.py                              # 可运行断言自检 → selfcheck: OK
 ```
 
 - 交互式文档：`http://localhost:8000/docs`
 - 元信息根路由：`GET /`
-- 本机 Python 3.13；核心依赖为 `fastapi / uvicorn / pydantic / numpy / python-multipart`。
+- 本机 Python 3.13；核心依赖为 `fastapi / uvicorn / pydantic / numpy / python-multipart`；
+  启用真实模型另需 `opensmile / faster-whisper / jieba / lightgbm / scikit-learn / joblib`。
+
+> **`--env-file .env` 不能省**：仓库内的 `.env` 指向训练好的双流模型、本地 Whisper，
+> 以及在 322 人上校准过的融合权重（0.2/0.8）与风险阈值（0.409/0.521）。不带它启动会
+> 回落 `config.py` 的默认值（0.5/0.5、0.45/0.65）——跑的是未校准配置，且两个模型都不加载。
 
 ## 与前端联调
 
@@ -49,13 +57,37 @@ python3 selfcheck.py                              # 可运行断言自检 → se
 
 ## 环境变量
 
-见 [.env.example](.env.example)：`AURA_PRIVACY_MODE`、`AURA_BASELINE_DAYS`、`AURA_FUSION_W_ACOUSTIC`、`AURA_FUSION_W_SEMANTIC`、`AURA_RISK_WATCH`、`AURA_RISK_ELEVATED`、`AURA_DATA_DIR`、`AURA_CORS_ORIGINS`。均为可选，未设置时用默认值。
+见 [.env.example](.env.example)（模板）与仓库内已配置好的 [.env](.env)。均为可选，未设置时用 `config.py` 的默认值。
+
+| 变量 | 说明 | 默认值 |
+|---|---|---|
+| `AURA_ACOUSTIC_MODEL` | 声学流模型路径（`./models/acoustic_lgbm.txt`） | 空 → 手工权重兜底 |
+| `AURA_SEMANTIC_MODEL` | 语义流模型路径（`./models/semantic_lr.joblib`） | 空 → 手工权重兜底 |
+| `AURA_WHISPER_MODEL` | Whisper 模型名或本地目录（`./models/whisper-small`） | `tiny` |
+| `AURA_PRIVACY_MODE` | `extract-and-burn` / `vector-only` | `extract-and-burn` |
+| `AURA_BASELINE_DAYS` | 个人基线窗口（天） | 14 |
+| `AURA_FUSION_W_ACOUSTIC` / `AURA_FUSION_W_SEMANTIC` | 双流融合权重（自动归一） | 0.5 / 0.5 |
+| `AURA_RISK_WATCH` / `AURA_RISK_ELEVATED` | 风险分档切点 | 0.45 / 0.65 |
+| `AURA_DATA_DIR` | 假名存储 / 审计日志目录 | `./.data` |
+| `AURA_CORS_ORIGINS` | 允许的 CORS 源（逗号分隔） | `*` |
+
+`.env` 里写的是**校准值**（融合 0.2/0.8、阈值 0.409/0.521），与上表中的保守默认值不同——
+校准来源见「已训练模型」一节。
 
 ## 目录结构
 
 ```text
 backend/
-├── requirements.txt   .env.example   selfcheck.py
+├── requirements.txt   .env.example   .env   selfcheck.py
+├── scripts/                 # 训练与评估（离线运行，非服务依赖）
+│   ├── train_acoustic_model.py    # eGeMAPS 特征 -> LightGBM
+│   ├── train_semantic_model.py    # 语言学特征 -> LogisticRegression
+│   └── eval_fusion.py             # 端到端融合评估 + 阈值校准
+├── models/                  # 训练产物（.env 指向它们；*_report.json 为评估指标）
+│   ├── acoustic_lgbm.txt          semantic_lr.joblib
+│   └── whisper-small/             # 本地 ASR 权重（离线可用）
+├── data/                    # 训练数据集（**gitignored**，仅 scripts/ 使用，不参与运行时）
+│   └── Alzheimer-s-disease-datasets-master/
 └── auragba/
     ├── config.py            # 版本号 / 阈值 / 环境设置
     ├── contract.py          # Pydantic v2 契约（字段名镜像前端 camelCase）
@@ -68,7 +100,7 @@ backend/
     ├── main.py              # FastAPI 工厂 + CORS + 路由装配
     ├── audio/  io.py · vad.py · features.py      # WAV 解码 / 能量 VAD / eGeMAPS 88 维
     ├── nlp/    asr.py · metrics.py · coherence.py # ASR / TTR·名动比·句长方差 / 语义连贯度
-    ├── model/  acoustic.py · semantic.py · fusion.py # 双流分类 + 晚期融合
+    ├── model/  acoustic.py · semantic.py · fusion.py # 双流分类（模型指纹 / SHAP 贡献）+ 晚期融合
     └── api/    contract_routes.py · insight_routes.py
 ```
 
@@ -77,14 +109,78 @@ backend/
 1. **非侵入式数字生物标志物** — `audio/features.py`（F0、Jitter、Shimmer、F1/F2、发音/停顿比）+ `nlp/`（TTR、名动比、语义连贯度）。
 2. **隐私保护管线** — `privacy.py`：`extract-and-burn`（特征提取后原始音频归零）、`vector-only` 摄入、PII 擦除、加盐 SHA256 假名化。
 3. **个人基线动态追踪** — `baseline.py`：与长者专属 14 天历史基线做 Z-score 对比，而非总体固定阈值。
-4. **STEMB 与 SaMD** — `economics.py`（QALY / 成本）+ `audit.py`（防篡改审计链）。
+4. **STEMB 与 SaMD** — `economics.py`（QALY / 成本）+ `audit.py`（防篡改审计链）；
+   每条筛查记录还会写入**模型来源指纹**（`screening.py`：模型文件路径、SHA256 前 8 位、是否加载成功），
+   使历史分数在换模型后仍可追溯「是哪个模型文件打的」。
 
 ## 依赖与降级（重要）
 
-本机**未安装** `librosa` / `soundfile` / `opensmile` / `scikit-learn` / `lightgbm` / `xgboost` / `sentence-transformers` / `jieba`，因此音频与 NLP 均以**纯 numpy 优雅降级**实现：自相关基频、Levinson-Durbin LPC 共振峰、Mel 滤波器组 + DCT 求 MFCC、正则分词、Jaccard 连贯度、可解释 logistic 打分。每个回退点用 `ponytail:` 注释标明天花板与升级路径 —— 安装对应依赖后自动切换到正式实现（openSMILE eGeMAPS / Whisper / LightGBM / sentence-transformers）。
+引擎有两条运行路径，按「已装依赖 + 环境变量」自动切换：
+
+| 环节 | 真模型路径（`.env` 默认） | 纯 numpy 兜底 |
+|---|---|---|
+| 声学特征 | openSMILE 真 eGeMAPS（88 维 + 附加列） | 自相关基频、Levinson-Durbin LPC 共振峰、Mel 滤波器组 + DCT 求 MFCC |
+| 声学打分 | LightGBM booster + SHAP 逐项贡献 | 手工权重可解释 logistic |
+| ASR | 本地 Whisper（`models/whisper-small`） | 无转写 → 语义流缺席 |
+| 语义打分 | LogisticRegression（`semantic_lr.joblib`） | 手工权重可解释 logistic |
+| 中文 NLP | jieba 分词 / 词性 | 正则分词 |
+| 语义连贯度 | sentence-transformers 句向量 | Jaccard 相似度 |
+
+缺少任一依赖或模型路径为空时，引擎**优雅降级**到纯 numpy 实现，服务照常启动。
+每个回退点用 `ponytail:` 注释标明天花板与升级路径 —— 装齐依赖即自动切换到正式实现。
+
+两条路径的**特征摘要键已统一**：`audio/features.py` 把 openSMILE 的 eGeMAPS 原名归一为
+snake_case 规范键，并补上 openSMILE 不直接产出的 VAD 节律特征（语速、停顿、voiced 占比）。
+因此下游 `baseline.py` 的 `TRACKED` 表与手工权重表在两种后端下行为一致，不会静默丢指标。
+
+> **装了 openSMILE 才与训练数据同分布**：声学模型是用真 eGeMAPS 训练的，
+> 拿 numpy 近似特征喂它会错位。语义流则相反——不装 Whisper 就彻底没有转写输入。
+>
+> **不会静默退回**：模型路径已设但加载失败时会打印 `[auragba][WARN]`，
+> 并把 `LOAD-FAILED` 写进分数标签与审计指纹，避免「以为在跑真模型其实在跑兜底」。
 
 `asr.transcribe_via_remote_api` **故意抛 `NotImplementedError`**（LLM/ASR 远程 API 按要求放空）。
 
+## 已训练模型（非临床验证）
+
+`models/` 下的双流模型在中文阿尔茨海默语音数据集 `lzy1012/Alzheimer-s-disease-datasets`
+（322–323 名被试，AD 与 MCI 均归为阳性）上训练，指标见同目录 `*_report.json`：
+
+| 流 | 模型 | 特征 | CV5 AUC | LOO AUC |
+|---|---|---|---|---|
+| 声学 | LightGBM（`acoustic_lgbm.txt`） | eGeMAPS 88 维 | 0.604 | 0.653 |
+| 语义 | LogisticRegression（`semantic_lr.joblib`） | TTR / MATTR / 名动比 / 句长方差 / filler 比 | 0.708 | 0.698 |
+| **融合**（0.2/0.8 校准） | — | 双流 late fusion | **AUC 0.717** | — |
+
+`scripts/eval_fusion.py` 在 322 人上交叉拟合校准出 `.env` 里的四个数字：
+融合权重 0.2/0.8、`WATCH=0.409`、`ELEVATED=0.521`。watch 档敏感度 0.863、特异性 0.396——
+**筛查取向**：宁可多提示转介，也不漏掉疑似个案。
+
+复现训练：
+
+```bash
+python scripts/train_acoustic_model.py     # -> models/acoustic_lgbm.txt + 训练报告
+python scripts/train_semantic_model.py     # -> models/semantic_lr.joblib + 训练报告
+python scripts/eval_fusion.py              # -> models/fusion_eval_report.json
+```
+
+数据集默认读取 `backend/data/Alzheimer-s-disease-datasets-master/`；它**不入库**（`.gitignore`），
+放在别处时用 `AURA_DATASET_DIR` 指过去：
+
+```bash
+AURA_DATASET_DIR=/path/to/Alzheimer-s-disease-datasets-master python scripts/train_acoustic_model.py
+```
+
+> **效力边界（对外讲述务必诚实）**：单一数据集、样本 322 人、阳性占比 66%，
+> AUC ≈ 0.72 属弱信号；融合后 F1 与「全预测阳性」的基率基线相当，
+> 因此应讲 **AUC 与敏感度**，不要讲 F1。该评估是离线复现线上链路，**不是临床验证**。
+
 ## 自检覆盖
 
-`selfcheck.py` 断言覆盖：eGeMAPS 88 槽位固定、特征有限性、WAV 往返、能量 VAD、NLP 指标、语义连贯度、双流打分、融合权重归一、基线不足/异常标记、健康经济估算、隐私擦除与内存归零、审计链防篡改、以及全链路端到端编排。
+`selfcheck.py` 断言覆盖：特征有限性、WAV 往返、能量 VAD、NLP 指标、语义连贯度、双流打分、融合权重归一、基线不足/异常标记、健康经济估算、隐私擦除与内存归零、审计链防篡改、以及全链路端到端编排。
+
+引擎现在兼容两种特征后端，因此相关断言按后端分支校验：
+
+- `backend` 为 `numpy` 或 `opensmile` 均通过；特征数断言为 **≥ 88**（openSMILE 会附带额外列）；
+- 两个后端都必须产出同一套规范摘要键，且 `speech_ratio` 是真实 VAD 比值而非硬编码；
+- 可解释贡献分解只在兜底路径（`linear-interpretable`）断言；真模型路径改验 booster 标签。

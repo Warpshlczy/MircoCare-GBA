@@ -60,12 +60,22 @@ assert len(set(FUNCTIONAL_NAMES)) == 88, "functional names must be unique"
 
 audio = _tone(2.0, 150.0, gap=(0.6, 0.9))
 feats = extract_features(audio)
-assert feats.backend == "numpy", f"expected numpy backend, got {feats.backend}"
-assert len(feats.vector) == 88, "must emit 88 functionals"
+# 装了 opensmile 时走真 eGeMAPS，未装时降级为 numpy 近似 —— 两者都合法。
+# 注意：线上装了 opensmile 才能与训练数据(真 eGeMAPS)同分布。
+assert feats.backend in ("numpy", "opensmile"), f"unexpected backend {feats.backend}"
+assert len(feats.vector) >= 88, "must emit at least the 88 core functionals"
 assert all(np.isfinite(list(feats.vector.values()))), "no NaN/Inf in the feature vector"
+# 两个后端都必须暴露同一套 snake_case 规范摘要键，
+# 否则 baseline.py 的 TRACKED 表与手工权重表会静默丢指标。
+for key in ("f0_mean_hz", "f0_cv", "jitter_local", "shimmer_local", "hnr_db",
+            "f1_hz", "f2_hz", "articulation_rate", "speech_rate", "pause_ratio",
+            "mean_pause_s", "voiced_ratio", "loudness_db_mean", "duration_s"):
+    assert key in feats.summary, f"missing canonical summary key {key} (backend={feats.backend})"
+    assert np.isfinite(feats.summary[key]), f"{key} must be finite"
 assert 120 < feats.summary["f0_mean_hz"] < 200, f"F0 tracking failed: {feats.summary['f0_mean_hz']}"
 assert feats.summary["jitter_local"] >= 0 and feats.summary["shimmer_local"] >= 0
 assert 0.0 <= feats.summary["pause_ratio"] <= 1.0
+assert 0.0 <= feats.speech_ratio <= 1.0, "speech_ratio must be a real VAD ratio, not hardcoded"
 
 silent = extract_features(AudioData(np.zeros(SR, dtype=np.float32), SR, 1.0, "synth"))
 assert silent.vector["loudness_sma3_amean"] <= 0.0 or True  # must not raise
@@ -97,7 +107,12 @@ assert coherence("", "随意答一句") == 1.0
 # --- streams + fusion ---------------------------------------------------------
 ac = score_acoustic(feats.summary, feats.vector)
 assert 0.0 <= ac.score <= 1.0 and ac.stream == "acoustic"
-assert any(c.direction in ("risk", "protective") for c in ac.contributions), "contributions must be returned"
+# 可解释贡献分解只存在于回退路径；装了真模型（AURA_ACOUSTIC_MODEL）时走
+# booster 分支，按设计不产 contributions，不应伪造。
+if ac.model == "linear-interpretable":
+    assert any(c.direction in ("risk", "protective") for c in ac.contributions), "contributions must be returned"
+else:
+    assert ac.model.startswith(("lightgbm:", "xgboost:")), f"unexpected acoustic model: {ac.model}"
 
 sem = score_semantic(ling.metrics, 0.8)
 assert sem is not None and 0.0 <= sem.score <= 1.0
@@ -151,7 +166,8 @@ with tempfile.TemporaryDirectory() as tmp:
                            device_id="dev-check", question="今日身体点呀?", store=st, audit=lg)
     assert 0.0 <= result.riskIndex <= 1.0 and result.notForDiagnosis is True
     assert result.audioDiscarded is True, "extract-and-burn must discard the audio buffer"
-    assert len(result.acousticFeatures) == 88 and result.audit.seq == 0
+    # openSMILE 后端会附带额外的 openSMILE 列（>=88），numpy 后端恰好 88
+    assert len(result.acousticFeatures) >= 88 and result.audit.seq == 0
     assert lg.verify() is True
     dumped = result.model_dump()
     for key in ("riskIndex", "riskBand", "acousticStream", "engineVersion", "featureSetVersion"):

@@ -26,6 +26,21 @@ backend/.data/
 .env.local
 *.env
 
+# Trained models & local model zoo (≈464 MB — NEVER commit; whisper model.bin alone
+# is 483 MB and exceeds GitHub's 100 MB per-file hard limit).
+# Regenerate with: python scripts/train_acoustic_model.py / train_semantic_model.py
+backend/models/
+# Extension-level safety net, in case a model is dropped somewhere else.
+*.bin
+*.joblib
+
+# Training dataset (third-party clone: patient-derived TSV/CSV feature files).
+# Lives in backend/data/ — outside the auragba package tree. Never committed;
+# re-download it, or set AURA_DATASET_DIR if you keep it elsewhere.
+backend/data/
+# Safety net: still ignored if someone re-extracts the zip into the package dir.
+backend/auragba/Alzheimer-s-disease-datasets-master/
+
 # Reference / third-party clones (not part of this project)
 .research/
 
