@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Next.js build output
+web/.next/
+web/out/
+web/tsconfig.tsbuildinfo
+next-env.d.ts
+
+# Android / Capacitor build artifacts
+web/android/.gradle/
+web/android/build/
+web/android/app/build/
+web/android/capacitor-cordova-android-plugins/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Local runtime data & secrets
+backend/.data/
+.env
+.env.local
+*.env
+
+# Reference / third-party clones (not part of this project)
+.research/
+
+# IDE / editor local config
+.trae/
+.vscode/
+.idea/
+
+# OS
+.DS_Store

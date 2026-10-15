@@ -1,0 +1,19 @@
+# AuraGBA backend — core runtime (sufficient to boot the API and run selfcheck).
+fastapi>=0.110
+uvicorn[standard]>=0.27
+pydantic>=2.5
+numpy>=1.26
+python-multipart>=0.0.9          # multipart WAV/FLAC upload for /screening/analyze
+
+# --- Optional heavy AI extras -------------------------------------------------
+# The pipeline degrades gracefully when these are absent (see each module's
+# `ponytail:` note). Install the ones you need:
+#
+# opensmile>=2.5                 # real 88-dim eGeMAPS functionals
+# soundfile>=0.12                # FLAC / non-PCM audio (stdlib `wave` covers WAV)
+# librosa>=0.10                  # alternative acoustic front-end
+# faster-whisper>=1.0            # local Cantonese/Mandarin Whisper-Tiny ASR
+# jieba>=0.42                    # Chinese tokenization + POS (noun/verb ratio)
+# sentence-transformers>=2.5     # semantic-coherence embeddings
+# lightgbm>=4.0                  # acoustic-stream classifier
+# scikit-learn>=1.4              # semantic-stream classifier

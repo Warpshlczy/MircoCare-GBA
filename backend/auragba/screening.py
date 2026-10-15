@@ -1,0 +1,175 @@
+"""Screening orchestrator — audio in, auditable risk estimate out.
+
+    audio -> VAD trim -> (acoustic features) -> ASR -> linguistic metrics
+          -> semantic coherence -> dual-stream scores -> late fusion
+          -> personal-baseline Z -> health-economics -> SaMD audit record
+
+The raw audio is discarded ("提取即焚") as soon as the derived features exist.
+Only derived numbers, a pseudonymous DeviceId and a hash-chained audit entry
+survive. Never raises on bad/empty audio — it degrades to an acoustic-only,
+low-confidence result.
+"""
+
+from __future__ import annotations
+
+import time
+import uuid
+
+from . import baseline as baseline_mod
+from .audio import AudioData, extract_features, frame_rms_db, energy_vad, load_audio
+from .audit import AuditLog, audit_log
+from .config import ENGINE_VERSION, FEATURE_SET_VERSION, FUSION_VERSION, settings
+from .contract import AuditRef, BaselineReport, MetricZScore, ScreeningResult, ScreeningSession
+from .economics import estimate as estimate_economics
+from .model import late_fusion, score_acoustic, score_semantic
+from .nlp import analyse_linguistics, coherence, transcribe
+from .privacy import input_digest, purge
+from .store import Store, store as default_store
+
+
+def _flat_metrics(summary: dict[str, float], ling: dict[str, float], coh: float) -> dict[str, float]:
+    """The single flat metric bag baseline tracking and storage both consume."""
+    flat = {k: float(v) for k, v in summary.items()}
+    for key in ("ttr", "mattr", "sentence_len_variance", "filler_ratio", "mean_sentence_len"):
+        flat[key] = float(ling.get(key, 0.0))
+    flat["coherence"] = float(coh)
+    return flat
+
+
+def _baseline_report(device_id: str, flat: dict[str, float], store: Store) -> BaselineReport:
+    since = int((time.time() - settings.baseline_days * 86_400) * 1000)
+    history = store.history(device_id, "screening_metrics", since_ms=since)
+    rows, sufficient, note = baseline_mod.compute_baseline([h.get("metrics", {}) for h in history], flat)
+    return BaselineReport(
+        deviceId=device_id,
+        windowDays=settings.baseline_days,
+        samples=len(history),
+        sufficient=sufficient,
+        metrics=[
+            MetricZScore(
+                name=r.name, value=r.value, baselineMean=r.mean, baselineStd=r.std,
+                z=r.z, direction=r.direction, flag=r.flag,
+            )
+            for r in rows
+        ],
+        note=note,
+    )
+
+
+def run_screening(
+    *,
+    data: bytes,
+    filename: str,
+    locale: str,
+    device_id: str,
+    question: str = "",
+    store: Store | None = None,
+    audit: AuditLog | None = None,
+) -> ScreeningResult:
+    store = store or default_store
+    audit = audit or audit_log
+    started = time.time()
+    result_id = f"scr-{int(started * 1000)}-{uuid.uuid4().hex[:6]}"
+
+    # extract-and-burn: hold audio only in a mutable buffer we can zero out.
+    buffer = bytearray(data) if settings.burn_audio else None
+    audio: AudioData = load_audio(data, filename)
+    frames_db = frame_rms_db(audio.samples, audio.sample_rate)
+    vad = energy_vad(frames_db)
+    hop_s = 0.010
+    trim_start = int(vad.segments[0][0] * hop_s * audio.sample_rate) if vad.segments else 0
+    trim_end = int(vad.segments[-1][1] * hop_s * audio.sample_rate) if vad.segments else audio.samples.size
+    trimmed = audio.samples[trim_start:trim_end] if trim_end > trim_start else audio.samples
+    trimmed_audio = AudioData(trimmed, audio.sample_rate, trimmed.size / audio.sample_rate, audio.source)
+
+    features = extract_features(trimmed_audio)
+
+    asr = transcribe(trimmed_audio, locale)
+    ling = analyse_linguistics(asr.text)
+    coh = coherence(question, asr.text)
+
+    acoustic = score_acoustic(features.summary, features.vector)
+    semantic = score_semantic(ling.metrics, coh)
+    fusion = late_fusion(acoustic, semantic)
+
+    flat = _flat_metrics(features.summary, ling.metrics, coh)
+    baseline = _baseline_report(device_id, flat, store)
+    economics = estimate_economics(fusion.risk_index, fusion.band) if fusion.band != "low" else None
+    audio_discarded = purge(buffer)
+
+    result = ScreeningResult(
+        id=result_id,
+        at=int(started * 1000),
+        locale=locale,  # type: ignore[arg-type]
+        privacyMode=settings.privacy_mode,
+        audioDiscarded=audio_discarded,
+        durationMs=audio.duration_ms,
+        speechRatio=float(vad.ratio),
+        acousticFeatures=features.vector,
+        acousticSummary=features.summary,
+        asr={
+            "engine": asr.engine, "available": asr.available, "language": asr.language,
+            "textLength": len(asr.text), "confidence": asr.confidence, "note": asr.note,
+            # NB: the transcript itself is NOT stored — only its derived metrics.
+        },
+        linguisticMetrics=ling.metrics,
+        coherence=coh,
+        acousticStream=acoustic,
+        semanticStream=semantic,
+        riskIndex=fusion.risk_index,
+        riskBand=fusion.band,  # type: ignore[arg-type]
+        fusionWeights=fusion.weights,
+        baseline=baseline,
+        economics=economics,
+        engineVersion=ENGINE_VERSION,
+        featureSetVersion=FEATURE_SET_VERSION,
+        notForDiagnosis=True,
+        audit={"seq": -1, "hash": ""},
+    )
+
+    ref = audit.append(
+        kind="screening",
+        device_id=device_id,
+        engine_version=ENGINE_VERSION,
+        feature_set_version=FEATURE_SET_VERSION,
+        fusion_version=FUSION_VERSION,
+        input_digest=input_digest(device_id, str(result.at), f"{audio.duration_ms:.0f}"),
+        output={
+            "riskIndex": fusion.risk_index,
+            "riskBand": fusion.band,
+            "weights": fusion.weights,
+            "acoustic": acoustic.score,
+            "semantic": None if semantic is None else semantic.score,
+            "baselineSufficient": baseline.sufficient,
+        },
+    )
+    result.audit = AuditRef(seq=ref["seq"], hash=ref["hash"])
+
+    store.record(device_id, "screening_metrics", {"at": result.at, "metrics": flat})
+    store.record(
+        device_id,
+        "screening_results",
+        {"at": result.at, "id": result.id, "riskIndex": fusion.risk_index, "riskBand": fusion.band},
+    )
+    return result
+
+
+def ingest_session(session: ScreeningSession, device_id: str, store: Store | None = None) -> None:
+    """Vector-only ingestion for the frontend contract endpoint.
+
+    Accepts pre-computed on-device features (no audio ever arrives) and feeds the
+    same personal-baseline store.
+    """
+    store = store or default_store
+    flat = {k: float(v) for k, v in session.features.items()}
+    flat["speech_ratio"] = float(session.speechRatio)
+    store.record(device_id, "screening_metrics", {"at": session.startedAt, "metrics": flat})
+    store.record(
+        device_id,
+        "screening_sessions",
+        {
+            "at": session.startedAt, "id": session.id, "durationMs": session.durationMs,
+            "speechRatio": session.speechRatio, "trimmedStartMs": session.trimmedStartMs,
+            "trimmedEndMs": session.trimmedEndMs,
+        },
+    )

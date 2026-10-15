@@ -1,0 +1,60 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  /* elderly-first: body copy is never below 24px */
+  font-size: 1.5rem;
+  line-height: 1.7;
+  background: theme("colors.aura.bg");
+  color: theme("colors.aura.deep");
+  -webkit-font-smoothing: antialiased;
+}
+
+/* High-contrast mode, toggled by adding .hc on <body>. */
+.hc {
+  background: #000 !important;
+  color: #fff !important;
+}
+.hc img {
+  filter: contrast(1.2);
+}
+
+/* Always show a big focus ring.
+   ponytail: this deliberately covers :focus and not just :focus-visible. Two reasons:
+   (1) :focus-visible's "was that keyboard intent?" heuristic is the fragile part — measured
+   not to fire for programmatic/automated focus, so the ring silently vanishes;
+   (2) for elderly / switch-access users, showing where focus is at ALL times is the wanted
+   behaviour, not a wart. !important is needed because the per-component Tailwind
+   `focus:outline-none` utility (specificity 0,2,0) otherwise wins over this rule (0,1,0). */
+:focus,
+:focus-visible {
+  outline: 5px solid theme("colors.aura.warm") !important;
+  outline-offset: 3px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+@media print {
+  body {
+    background: #fff;
+    color: #000;
+  }
+}

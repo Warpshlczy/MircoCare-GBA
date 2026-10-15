@@ -1,0 +1,13 @@
+{
+  "name": "AuraGBA 湾区灵犀",
+  "short_name": "湾区灵犀",
+  "description": "零 UI 语音长者关怀助手（粤港澳大湾区）",
+  "lang": "zh-HK",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#FFF7EC",
+  "theme_color": "#F4A259",
+  "categories": ["health", "lifestyle", "medical"]
+}
