@@ -44,8 +44,8 @@ build/
 # NOTE: .workbuddy/memory/*.md is intentionally tracked — it is the team's
 # shared work log — so it is explicitly re-included below.
 .workbuddy/*
-!.workbuddy/memory/
-!.workbuddy/memory/**
+.workbuddy/memory/
+.workbuddy/memory/**
 
 # Local runtime data & secrets
 backend/.data/
