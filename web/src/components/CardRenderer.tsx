@@ -63,7 +63,7 @@ function CardBody({ data }: { data: CardData }) {
         <dl className="mt-3 grid grid-cols-2 gap-2">
           {data.rows.map((r) => (
             <div key={r.label}>
-              <dt className="text-2xl font-bold text-aura-warm">{r.label}</dt>
+              <dt className="text-2xl font-bold text-aura-ink hc:text-yellow-300">{r.label}</dt>
               <dd className="text-3xl font-semibold text-aura-deep hc:text-white">{r.value}</dd>
             </div>
           ))}

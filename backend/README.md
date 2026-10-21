@@ -21,9 +21,10 @@ python3 selfcheck.py                              # 可运行断言自检 → se
 - 本机 Python 3.13；核心依赖为 `fastapi / uvicorn / pydantic / numpy / python-multipart`；
   启用真实模型另需 `opensmile / faster-whisper / jieba / lightgbm / scikit-learn / joblib`。
 
-> **`--env-file .env` 不能省**：仓库内的 `.env` 指向训练好的双流模型、本地 Whisper，
-> 以及在 322 人上校准过的融合权重（0.2/0.8）与风险阈值（0.409/0.521）。不带它启动会
-> 回落 `config.py` 的默认值（0.5/0.5、0.45/0.65）——跑的是未校准配置，且两个模型都不加载。
+> **`--env-file .env` 建议带上**：`.env`（同本机例子见 `.env.example`）指向训练好的双流模型、
+> 本地 Whisper，以及在 322 人上校准过的融合权重（0.2/0.8）与风险阈值（0.409/0.521）。
+> 不带它启动会回落 `config.py` 的默认值（0.5/0.5、0.45/0.65）——跑的是未校准配置，且两个模型都不加载。
+> 新环境先执行 `cp .env.example .env`，校准值已写在 example 里。
 
 ## 与前端联调
 
@@ -55,9 +56,52 @@ python3 selfcheck.py                              # 可运行断言自检 → se
 | `GET /audit/screening` | SaMD 审计日志（校验 hash 链完整性） |
 | `GET /health` | 引擎版本 / 特征集版本 / 运行状态 |
 
+## 模型产物共享（协作必读）
+
+`models/`、`data/`、`.env` **都不入库**（`.gitignore:25/32/40`），克隆下来的仓库只有代码。因此合作者之间按下面流程传递产物。
+
+### A. 打包方（有训练产物的人）
+
+```bash
+cd backend
+# 只打小体积产物；whisper-small 另打（约 460MB）
+zip -r auragba-models.zip models/ -x "models/whisper-small/*"
+zip -r auragba-whisper.zip models/whisper-small
+cp .env.example .env            # example 已含 322 人校准值，直接用
+python scripts/doctor.py        # 自检：确认待分享产物齐全
+```
+
+把 zip 放到网盘 / Release附件（**不要直接 commit**：`whisper-small/model.bin` 单文件 483MB，超过 GitHub 100MB 硬限制）。
+
+### B. 接收方
+
+```bash
+cd backend
+python -m venv .venv && ./.venv/Scripts/python.exe -m pip install -r requirements.txt
+./.venv/Scripts/python.exe -m pip install opensmile faster-whisper jieba lightgbm scikit-learn joblib
+# 解开 zip 到 backend/models/，然后
+cp .env.example .env
+./.venv/Scripts/python.exe scripts/doctor.py        # 应显示两个模型 OK + sha256
+./.venv/Scripts/python.exe selfcheck.py             # selfcheck: OK
+uvicorn auragba.main:app --env-file .env --reload --port 8000
+```
+
+> **不确定本机缺什么时先跑 `python scripts/doctor.py`**：它会逐项列出 Core 依赖、重依赖、
+> `models/` 产物（含 SHA256 前 8 位，与审计链里的模型指纹对齐）、`data/` 数据集与 `.env` 是否用了校准值。
+
+### C. 校验一致性（防止「以为在跑真模型其实在跑兜底」）
+
+两边跑 `doctor.py` 后比对 `acoustic_lgbm.txt` 的 `sha256:` 前 8 位——该值与
+`screening.py` 写入审计记录的 `models.acousticFile.sha256_8` 同源，历史分数因此可追溯。
+
+---
+
 ## 环境变量
 
-见 [.env.example](.env.example)（模板）与仓库内已配置好的 [.env](.env)。均为可选，未设置时用 `config.py` 的默认值。
+见 [.env.example](.env.example)（模板）。**均为可选**，未设置时用 `config.py` 的默认值。
+
+> `.env.example` 里已经写入**校准值**（融合 0.2/0.8、阈值 0.409/0.521），`cp .env.example .env` 即复现附录中的行为；
+> 直接不设变量跑，则回到 `config.py` 的保守默认（0.5/0.5、0.45/0.65）——那是未校准配置。
 
 | 变量 | 说明 | 默认值 |
 |---|---|---|
@@ -82,7 +126,8 @@ backend/
 ├── scripts/                 # 训练与评估（离线运行，非服务依赖）
 │   ├── train_acoustic_model.py    # eGeMAPS 特征 -> LightGBM
 │   ├── train_semantic_model.py    # 语言学特征 -> LogisticRegression
-│   └── eval_fusion.py             # 端到端融合评估 + 阈值校准
+│   ├── eval_fusion.py             # 端到端融合评估 + 阈值校准
+│   └── doctor.py                  # 环境/产物体检（协作排障第一步）
 ├── models/                  # 训练产物（.env 指向它们；*_report.json 为评估指标）
 │   ├── acoustic_lgbm.txt          semantic_lr.joblib
 │   └── whisper-small/             # 本地 ASR 权重（离线可用）

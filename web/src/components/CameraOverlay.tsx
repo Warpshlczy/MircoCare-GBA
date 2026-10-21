@@ -63,7 +63,7 @@ export function CameraOverlay({ open, locale, onCapture, onClose }: Props) {
           />
           <button
             onClick={onClose}
-            className="absolute right-6 top-6 rounded-2xl bg-white/90 px-5 py-3 text-2xl font-bold text-black"
+            className="elderly-tap absolute right-6 top-6 inline-flex items-center justify-center rounded-2xl bg-white/90 px-5 py-3 text-2xl font-bold text-black"
           >
             {t(locale, "cameraClose")}
           </button>

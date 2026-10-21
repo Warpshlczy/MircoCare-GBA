@@ -422,14 +422,14 @@ export default function Page() {
       <div className="flex w-full flex-wrap items-center justify-center gap-2">
         <button
           onClick={scheduleDemoReminder}
-          className="rounded-2xl bg-white px-4 py-2 text-2xl font-bold text-aura-deep"
+          className="elderly-tap inline-flex items-center justify-center rounded-2xl bg-white px-5 py-3 text-2xl font-bold text-aura-deep"
         >
           {t(locale, "reminderTitle")}
         </button>
         <button
           onClick={() => setHc((v) => !v)}
           aria-pressed={hc}
-          className={`rounded-2xl px-4 py-2 text-2xl font-bold ${
+          className={`elderly-tap inline-flex items-center justify-center rounded-2xl px-5 py-3 text-2xl font-bold ${
             hc ? "bg-aura-accent text-white" : "bg-white text-aura-deep"
           }`}
         >
@@ -440,7 +440,7 @@ export default function Page() {
         <button
           onClick={() => setLocale((l) => (l === "zh-CN" ? "zh-HK" : "zh-CN"))}
           aria-label={t(locale, "langOther")}
-          className="rounded-2xl bg-white px-4 py-2 text-2xl font-bold text-aura-deep"
+          className="elderly-tap inline-flex items-center justify-center rounded-2xl bg-white px-5 py-3 text-2xl font-bold text-aura-deep"
         >
           {t(locale, "langOther")}
         </button>
@@ -493,13 +493,13 @@ export default function Page() {
           <div className="flex flex-wrap gap-2">
             <button
               onClick={() => setCardOpen(true)}
-              className="rounded-2xl bg-aura-bg px-4 py-2 text-2xl font-bold text-aura-deep hc:bg-neutral-800 hc:text-white"
+              className="elderly-tap inline-flex items-center justify-center rounded-2xl bg-aura-bg px-5 py-3 text-2xl font-bold text-aura-deep hc:bg-neutral-800 hc:text-white"
             >
               {t(locale, "healthCardTitle")}
             </button>
             <button
               onClick={() => setCameraOpen(true)}
-              className="rounded-2xl bg-aura-bg px-4 py-2 text-2xl font-bold text-aura-deep hc:bg-neutral-800 hc:text-white"
+              className="elderly-tap inline-flex items-center justify-center rounded-2xl bg-aura-bg px-5 py-3 text-2xl font-bold text-aura-deep hc:bg-neutral-800 hc:text-white"
             >
               {t(locale, "cameraTitle")}
             </button>
@@ -512,7 +512,7 @@ export default function Page() {
                 else void bridge()?.stopBackgroundWake();
               }}
               aria-pressed={wakeOn}
-              className={`rounded-2xl px-4 py-2 text-2xl font-bold ${
+              className={`elderly-tap inline-flex items-center justify-center rounded-2xl px-5 py-3 text-2xl font-bold ${
                 wakeOn ? "bg-aura-accent text-white" : "bg-aura-bg text-aura-deep hc:bg-neutral-800 hc:text-white"
               }`}
             >
@@ -526,11 +526,11 @@ export default function Page() {
               onChange={(e) => setText(e.target.value)}
               placeholder={t(locale, "typeHere")}
               aria-label={t(locale, "typeHere")}
-              className="min-w-0 flex-1 rounded-2xl border-4 border-aura-deep bg-aura-bg px-4 py-3 text-2xl font-bold text-aura-deep hc:border-white hc:bg-neutral-800 hc:text-white"
+              className="elderly-tap min-w-0 flex-1 rounded-2xl border-4 border-aura-deep bg-aura-bg px-4 py-3 text-2xl font-bold text-aura-deep hc:border-white hc:bg-neutral-800 hc:text-white"
             />
             <button
               type="submit"
-              className="rounded-2xl bg-aura-deep px-6 py-3 text-2xl font-extrabold text-white hc:bg-yellow-300 hc:text-black"
+              className="elderly-tap inline-flex items-center justify-center rounded-2xl bg-aura-deep px-6 py-3 text-2xl font-extrabold text-white hc:bg-yellow-300 hc:text-black"
             >
               {t(locale, "send")}
             </button>

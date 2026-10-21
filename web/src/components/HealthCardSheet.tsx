@@ -77,7 +77,7 @@ export function HealthCardSheet({ open, card, locale, onClose }: Props) {
 function Field({ label, value, wide }: { label: string; value: string; wide?: boolean }) {
   return (
     <div className={wide ? "sm:col-span-2" : ""}>
-      <div className="text-2xl font-bold text-aura-warm">{label}</div>
+      <div className="text-2xl font-bold text-aura-ink">{label}</div>
       <div className="text-3xl font-semibold">{value}</div>
     </div>
   );

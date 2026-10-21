@@ -86,8 +86,12 @@ export function ReminderOverlay({ item, locale, escalation, onTaken, onSnooze }:
         </button>
       </div>
 
+      {/* 适老化：NFC 提示同时是按钮，触控目标需 >=44x44px（规范最低值） */}
       {NFC_SUPPORTED ? (
-        <button onClick={onTap} className="text-2xl underline text-aura-deep hc:text-white">
+        <button
+          onClick={onTap}
+          className="elderly-tap inline-flex items-center justify-center rounded-2xl px-5 py-3 text-2xl font-bold underline text-aura-deep hc:text-white"
+        >
           {scanning ? t(locale, "nfcScanning") : t(locale, "nfcTapHint")}
         </button>
       ) : (

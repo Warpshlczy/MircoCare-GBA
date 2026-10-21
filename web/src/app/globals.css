@@ -19,6 +19,29 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* 适老化规范：行距 >= 1.3 倍字号、段落间距 >= 1.3 倍行距。
+   body 已是 1.7；这里补齐列表/描述块，并给相邻段落真实的段落间距。 */
+p,
+li,
+dd,
+dt {
+  line-height: 1.7;
+}
+p + p,
+p + ul,
+p + ol,
+ul + p,
+ol + p {
+  margin-top: 1.4em; /* > 1.3 x (1.7 - 1) 行距 */
+}
+
+/* 适老化规范：小控件（语言/高对比/提醒等次要按钮）触控目标 >= 60x60dp，
+   避免长者手抖点不中。工具类，只作用于显式标记的元素。 */
+.elderly-tap {
+  min-height: 60px;
+  min-width: 60px;
+}
+
 /* High-contrast mode, toggled by adding .hc on <body>. */
 .hc {
   background: #000 !important;
