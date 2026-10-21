@@ -6,7 +6,17 @@ node_modules/
 web/.next/
 web/out/
 web/tsconfig.tsbuildinfo
+# Any incremental TS build info, wherever it lands.
+*.tsbuildinfo
 next-env.d.ts
+# Vercel / Turbopack local caches
+.vercel/
+.turbo/
+
+# Runtime logs (uploads, uvicorn, adb logcat dumps). *.log is only scoped
+# inside web/android/.gitignore, so the repo root needs its own rule.
+*.log
+logs/
 
 # Android / Capacitor build artifacts
 web/android/.gradle/
@@ -19,12 +29,42 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+# Test / coverage / packaging artifacts
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+coverage.xml
+*.egg-info/
+dist/
+build/
+
+# WorkBuddy local runtime state (sessions, caches, scratch files).
+# NOTE: .workbuddy/memory/*.md is intentionally tracked — it is the team's
+# shared work log — so it is explicitly re-included below.
+.workbuddy/*
+!.workbuddy/memory/
+!.workbuddy/memory/**
 
 # Local runtime data & secrets
 backend/.data/
 .env
 .env.local
 *.env
+# Env variants such as .env.production / .env.development (NOT matched by
+# the `*.env` rule, which only matches names ENDING in ".env").
+.env.*
+# Keep the committed template — it carries the calibrated default config.
+!.env.example
+!backend/.env.example
+# Certificates / private keys
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
 
 # Trained models & local model zoo (≈464 MB — NEVER commit; whisper model.bin alone
 # is 483 MB and exceeds GitHub's 100 MB per-file hard limit).
@@ -51,3 +91,15 @@ backend/auragba/Alzheimer-s-disease-datasets-master/
 
 # OS
 .DS_Store
+# Windows
+Thumbs.db
+ehthumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# Editor / tooling temp files
+*.bak
+*.tmp
+*.swp
+*.swo
+*~
