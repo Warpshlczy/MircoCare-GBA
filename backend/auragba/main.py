@@ -52,9 +52,9 @@ def root() -> dict:
         "docs": "/docs",
         "contract": [
             "POST /gait/windows", "POST /screening/sessions", "POST /sos", "GET /health-card/me",
-            "POST /assistant/chat (501)", "POST /agent/cards (501)", "POST /telemetry/events",
-            "POST /conversation/turns", "POST /medication/plan (501)",
-            "POST /reminders/escalate",
+            "POST /assistant/chat (configurable)", "POST /agent/cards (configurable)",
+            "POST /telemetry/events", "POST /conversation/turns",
+            "POST /medication/plan (configurable)", "POST /reminders/escalate",
         ],
         "auth": ["POST /auth/register", "POST /auth/pairing-code", "POST /auth/pair"],
         "insight": ["POST /screening/analyze", "GET /baseline/me", "GET /economics/me", "GET /audit/screening"],

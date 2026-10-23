@@ -39,14 +39,14 @@ python3 selfcheck.py                              # 可运行断言自检 → se
 | 2 | `POST /screening/sessions` | 筛查会话（vector-only 摄入） | 204 |
 | 3 | `POST /sos` | 紧急求助事件 | 204 |
 | 4 | `GET /health-card/me` | 长者健康卡 | 200 |
-| 5 | `POST /assistant/chat` | 数字人对话编排 | **501（LLM 放空）** |
-| 6 | `POST /agent/cards` | Agent 卡片规划 | **501（LLM 放空）** |
+| 5 | `POST /assistant/chat` | 数字人对话编排 | ⚙️ 已实现；未配置 501 |
+| 6 | `POST /agent/cards` | Agent 卡片规划 | ⚙️ 已实现；未配置 501 |
 | 7 | `POST /telemetry/events` | 批量埋点（服务端二次脱敏） | 204 |
 | 8 | `POST /conversation/turns` | 会话记忆归档（按假名设备） | 204 |
-| 9 | `POST /medication/plan` | 用药计划生成 | **501（LLM 放空）** |
+| 9 | `POST /medication/plan` | 用药计划生成 | ⚙️ 已实现；未配置 501 |
 | 10 | `POST /reminders/escalate` | 提醒超时事件 + 家属 outbox | 204 |
 
-返回 **501** 的 3 个 LLM 端点与前端 3 个抛 `NOT_IMPLEMENTED` 的函数一一对应，前端会自动回退到本地卡片工厂 / 本地提醒，联调不报错。
+> 三个 LLM 端点默认关闭（`AURA_LLM_ENABLED=false`）。未配置返回 501，上游失败/非法 JSON 返回 502，额度用尽返回 429；前端会回退本地卡片/提醒。天气由 Open-Meteo 提供，无需 Key。
 
 **附加洞察端点**（非前端必需）
 
@@ -118,6 +118,15 @@ uvicorn auragba.main:app --env-file .env --reload --port 8000
 | `AURA_RISK_WATCH` / `AURA_RISK_ELEVATED` | 风险分档切点 | 0.45 / 0.65 |
 | `AURA_DATA_DIR` | 假名存储 / 审计日志目录 | `./.data` |
 | `AURA_CORS_ORIGINS` | 允许的 CORS 源（逗号分隔，禁止 `*`） | `http://localhost:3000,http://localhost:8000` |
+| `AURA_LLM_ENABLED` | 是否启用三个 LLM 端点 | `false` |
+| `AURA_LLM_BASE_URL` | OpenAI-compatible 基址 | `https://api.deepseek.com/v1` |
+| `AURA_LLM_API_KEY` | 模型 API Key（本地 Ollama 可留空） | 空 |
+| `AURA_LLM_MODEL` | 模型名 | `deepseek-chat` |
+| `AURA_LLM_TIMEOUT_S` | 单次 LLM 超时（秒） | 15 |
+| `AURA_LLM_MAX_TOKENS` | 单次最大输出 token | 400 |
+| `AURA_LLM_DAILY_QUOTA` | 每设备每日调用上限（0 = 不限） | 200 |
+| `AURA_WEATHER_ENABLED` | 是否使用 Open-Meteo 实时天气 | `true` |
+| `AURA_WEATHER_TTL_S` | 天气缓存秒数 | 600 |
 
 `.env` 里写的是**校准值**（融合 0.2/0.8、阈值 0.409/0.521），与上表中的保守默认值不同——
 校准来源见「已训练模型」一节。
@@ -153,6 +162,7 @@ backend/
     ├── audio/  io.py · vad.py · features.py      # WAV 解码 / 能量 VAD / eGeMAPS 88 维
     ├── nlp/    asr.py · metrics.py · coherence.py # ASR / TTR·名动比·句长方差 / 语义连贯度
     ├── model/  acoustic.py · semantic.py · fusion.py # 双流分类（模型指纹 / SHAP 贡献）+ 晚期融合
+    ├── llm/    client.py · prompts.py · safety.py · weather.py · usage.py · service.py
     └── api/    contract_routes.py · insight_routes.py · auth_routes.py · caregiver_routes.py
 ```
 
@@ -191,7 +201,8 @@ snake_case 规范键，并补上 openSMILE 不直接产出的 VAD 节律特征�
 > **不会静默退回**：模型路径已设但加载失败时会打印 `[auragba][WARN]`，
 > 并把 `LOAD-FAILED` 写进分数标签与审计指纹，避免「以为在跑真模型其实在跑兜底」。
 
-`asr.transcribe_via_remote_api` **故意抛 `NotImplementedError`**（LLM/ASR 远程 API 按要求放空）。
+`asr.transcribe_via_remote_api` **故意抛 `NotImplementedError`**（远程 ASR 仍未接入）。  
+LLM 编排是独立模块 `llm/`：默认关闭，启用后调用 OpenAI-compatible 接口；包含急救词短路、禁止诊断/荐药、药名来源校验、JSON 校验与一次修复、按设备日额度。
 
 ## 已训练模型（非临床验证）
 

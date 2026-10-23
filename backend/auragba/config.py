@@ -35,6 +35,13 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
 @dataclass(frozen=True)
 class Settings:
     """Immutable settings resolved once at import."""
@@ -60,6 +67,25 @@ class Settings:
     auth_secret: str = os.getenv("AURA_AUTH_SECRET", "")
     environment: str = os.getenv("AURA_ENV", "development")
     cookie_secure: bool = os.getenv("AURA_COOKIE_SECURE", "false").lower() == "true"
+
+    # --- Optional LLM orchestration (OpenAI-compatible) ----------------------
+    # Disabled by default: the three LLM routes keep returning 501 so the
+    # frontend's local card/reminder fallback stays the safe path.
+    llm_enabled: bool = _env_bool("AURA_LLM_ENABLED", False)
+    llm_base_url: str = os.getenv("AURA_LLM_BASE_URL", "https://api.deepseek.com/v1").rstrip("/")
+    llm_api_key: str = os.getenv("AURA_LLM_API_KEY", "")
+    llm_model: str = os.getenv("AURA_LLM_MODEL", "deepseek-chat")
+    llm_timeout_s: float = _env_float("AURA_LLM_TIMEOUT_S", 15.0)
+    llm_max_tokens: int = _env_int("AURA_LLM_MAX_TOKENS", 400)
+    llm_daily_quota: int = _env_int("AURA_LLM_DAILY_QUOTA", 200)
+
+    # --- Optional real weather (Open-Meteo, no key) -------------------------
+    weather_enabled: bool = _env_bool("AURA_WEATHER_ENABLED", True)
+    weather_ttl_s: int = _env_int("AURA_WEATHER_TTL_S", 600)
+
+    @property
+    def llm_available(self) -> bool:
+        return bool(self.llm_enabled and self.llm_base_url and self.llm_model)
 
     @property
     def burn_audio(self) -> bool:

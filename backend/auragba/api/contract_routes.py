@@ -15,16 +15,26 @@ import time
 from fastapi import APIRouter, Depends, HTTPException
 
 from ..contract import (
+    AgentCard,
     AgentIntentRequest,
     AssistantChatRequest,
     ConversationTurn,
     GaitWindow,
     HealthCard,
+    MedicationPlan,
     MedicationPlanRequest,
     ReminderEscalation,
     ScreeningSession,
     SosEvent,
     TelemetryEvent,
+)
+from ..llm import service as llm_service
+from ..llm.errors import (
+    LLMInvalidInput,
+    LLMInvalidOutput,
+    LLMNotConfigured,
+    LLMQuotaExceeded,
+    LLMUpstreamError,
 )
 from ..privacy import device_id, scrub_props, scrub_text
 from ..screening import ingest_session
@@ -47,8 +57,8 @@ _DEMO_CARD = {
 
 
 def _llm_blank(route: str) -> HTTPException:
-    """A clean, explicit 501 so the frontend's fallback path engages."""
-    return HTTPException(status_code=501, detail=f"NOT_IMPLEMENTED: {route} (LLM integration intentionally blank)")
+    """A clean 501 when no LLM is configured, so the frontend fallback engages."""
+    return HTTPException(status_code=501, detail=f"NOT_IMPLEMENTED: {route} (set AURA_LLM_ENABLED/API_KEY to enable)")
 
 
 @router.post("/gait/windows", status_code=204)
@@ -124,18 +134,40 @@ def post_reminder_escalation(e: ReminderEscalation, dev: str = Depends(device_id
 
 
 # --------------------------------------------------------------------------- #
-# LLM-dependent routes — intentionally blank (501). Do not implement.
+# LLM-dependent routes — configurable; fall back to 501/429/502 so the frontend
+# local card factory stays the safe path.
 # --------------------------------------------------------------------------- #
+def _llm_http_error(route: str, exc: Exception) -> HTTPException:
+    if isinstance(exc, LLMNotConfigured):
+        return _llm_blank(route)
+    if isinstance(exc, LLMQuotaExceeded):
+        return HTTPException(status_code=429, detail="LLM daily quota exceeded")
+    if isinstance(exc, LLMInvalidInput):
+        return HTTPException(status_code=400, detail="Invalid LLM request payload")
+    if isinstance(exc, (LLMUpstreamError, LLMInvalidOutput)):
+        return HTTPException(status_code=502, detail="LLM temporarily unavailable")
+    return HTTPException(status_code=502, detail="LLM error")
+
+
 @router.post("/assistant/chat")
-def assistant_chat(_req: AssistantChatRequest) -> dict:
-    raise _llm_blank("/assistant/chat")
+def assistant_chat(req: AssistantChatRequest, dev: str = Depends(device_id)) -> dict:
+    try:
+        return {"reply": llm_service.assistant_reply(req, dev)}
+    except (LLMNotConfigured, LLMQuotaExceeded, LLMInvalidInput, LLMUpstreamError, LLMInvalidOutput) as exc:
+        raise _llm_http_error("/assistant/chat", exc) from exc
 
 
 @router.post("/agent/cards")
-def get_agent_cards(_req: AgentIntentRequest) -> list:
-    raise _llm_blank("/agent/cards")
+def get_agent_cards(req: AgentIntentRequest, dev: str = Depends(device_id)) -> list[AgentCard]:
+    try:
+        return llm_service.plan_cards(req, dev)
+    except (LLMNotConfigured, LLMQuotaExceeded, LLMInvalidInput, LLMUpstreamError, LLMInvalidOutput) as exc:
+        raise _llm_http_error("/agent/cards", exc) from exc
 
 
 @router.post("/medication/plan")
-def get_medication_plan(_req: MedicationPlanRequest) -> dict:
-    raise _llm_blank("/medication/plan")
+def get_medication_plan(req: MedicationPlanRequest, dev: str = Depends(device_id)) -> MedicationPlan:
+    try:
+        return llm_service.plan_medication(req, dev)
+    except (LLMNotConfigured, LLMQuotaExceeded, LLMInvalidInput, LLMUpstreamError, LLMInvalidOutput) as exc:
+        raise _llm_http_error("/medication/plan", exc) from exc

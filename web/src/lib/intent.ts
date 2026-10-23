@@ -29,3 +29,16 @@ export function parseIntent(text: string): Intent {
   for (const r of RULES) for (const w of r.words) if (s.includes(w.toLowerCase())) return r.intent;
   return "unknown";
 }
+
+/**
+ * True for utterances that should get a conversational answer instead of a
+ * todo card. Kept deliberately narrow: questions and explicit "how do I..." asks.
+ */
+export function isQuestion(text: string): boolean {
+  const s = (text ?? "").trim();
+  if (!s) return false;
+  if (/[?？]\s*$/.test(s)) return true;
+  return ["点算", "點算", "怎么办", "怎麼辦", "为什么", "為什麼", "点解", "點解", "可唔可以", "能不能", "点样", "點樣"].some((w) =>
+    s.includes(w)
+  );
+}

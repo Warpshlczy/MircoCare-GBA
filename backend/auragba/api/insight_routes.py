@@ -120,6 +120,7 @@ def health() -> dict:
         "engineVersion": ENGINE_VERSION,
         "featureSetVersion": FEATURE_SET_VERSION,
         "privacyMode": settings.privacy_mode,
-        "llmIntegration": "intentionally-not-implemented",
+        "llmIntegration": "enabled" if settings.llm_available else "disabled-fallback",
+        "weather": "open-meteo" if settings.weather_enabled else "disabled",
         "notForDiagnosis": True,
     }

@@ -31,6 +31,7 @@
 | 语音筛查入口 | 工具面板 60 秒筛查 → `POST /screening/sessions`（仅 RMS/VAD 派生特征） |
 | 数据接线 | 步态窗口上传 + 启动重放；健康卡读 `/health-card/me`；家属端展示筛查次数与通知记录 |
 | SOS 诚实态 | 发送中 / 已记录 / 失败三态 + 重试 + 急救号码拨号兜底，不再假装已通知 |
+| LLM 编排 | 三个端点实现（默认关闭）：OpenAI-compatible + 急救词短路 + 禁止诊断/荐药 + JSON 校验 + 日额度；天气改 Open-Meteo |
 
 ### 三个必须补上的缺口（重点）
 
@@ -226,7 +227,7 @@ ORCATECH 的关键发现：用**个人自身前 1–3 个月数据建立个体�
 - [ ] **外部验证（新增，紧迫）**：现模型只在单一 322 人中文数据集上评估，缺泛化证据。用 **DementiaBank 中文 Lu corpus / NCMMSC2021 / JCCOCC MoCA（粤语）** 做 **cross-corpus 外部验证**，报告 AUC 掉幅——这是把「演示系统」抬到「研究原型」的最低门槛
 - [ ] **重标定（随之而来）**：外部验证后阈值（0.409/0.521）大概率需要重算；`eval_fusion.py` 的校准流程要支持多数据集联合/分语言（`zh-CN` / `zh-HK` 两套阈值）
 - [ ] 声学流的提升空间：它是拖后腿的一流（AUC 0.60 vs 语义 0.71）。考量换更大模型/更多 gadget 任务；并评估 **MOPSA 式说话人自适应**在 Whisper + 语义流上的增益（见 §1.2）
-- [ ] 接通 3 个 LLM 端点（assistantChat / getAgentCards / getMedicationPlan），内置健康安全边界（不诊断、不荐药）
+- [x] 三个 LLM 端点已实现（默认关闭）：OpenAI-compatible + 急救词短路 + 禁止诊断/荐药 + JSON 校验 + 501/502/429 回退；生产前仍需数据出境同意与模型选型
 - [ ] ASR 粤/普自适应：Whisper + prompt 自适应（MOPSA 思路，端上先跑置信度加权）
 - [ ] 试点研究设计：参照 Dodge et al. 的 reproducibility/replicability 框架，与社区/养老机构合作招募，**基线期 ≥3 个月**
 - [ ] SaMD 合规路径评估：`audit.py` 的 hash 链 + `screening.py` 的模型指纹已就位，补充 MDC 验证报告与版本化特征集（`FEATURE_SET_VERSION` 已有钩子）

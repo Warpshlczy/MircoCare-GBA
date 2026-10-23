@@ -12,6 +12,8 @@ export interface AssistantChatResponse { reply: string; }
 
 const API_BASE = (process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000").replace(/\/+$/, "");
 const TIMEOUT_MS = 4000;
+/** LLM calls are slower; the backend falls back to 501/502 if it cannot answer. */
+const LLM_TIMEOUT_MS = 15000;
 
 function deviceId(): string {
   if (typeof window === "undefined") return "ssr";
@@ -80,9 +82,9 @@ export function ensureSeniorSession(): Promise<void> {
   return seniorSession;
 }
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+async function request<T>(path: string, init: RequestInit = {}, timeoutMs = TIMEOUT_MS): Promise<T> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(`${API_BASE}${path}`, {
       ...init,
@@ -140,11 +142,19 @@ export async function postSos(e: SosEvent): Promise<void> {
 export async function getHealthCard(): Promise<HealthCard> {
   return request("/health-card/me", { method: "GET" });
 }
-export async function assistantChat(_req: AssistantChatRequest): Promise<AssistantChatResponse> {
-  throw new Error("NOT_IMPLEMENTED: /assistant/chat");
+export async function assistantChat(req: AssistantChatRequest): Promise<AssistantChatResponse> {
+  return request<AssistantChatResponse>(
+    "/assistant/chat",
+    { method: "POST", body: JSON.stringify(req) },
+    LLM_TIMEOUT_MS
+  );
 }
-export async function getAgentCards(_req: AgentIntentRequest): Promise<AgentCard[]> {
-  throw new Error("NOT_IMPLEMENTED: /agent/cards");
+export async function getAgentCards(req: AgentIntentRequest): Promise<AgentCard[]> {
+  return request<AgentCard[]>(
+    "/agent/cards",
+    { method: "POST", body: JSON.stringify(req) },
+    LLM_TIMEOUT_MS
+  );
 }
 export async function postTelemetry(events: TelemetryEvent[]): Promise<void> {
   await request<void>("/telemetry/events", { method: "POST", body: JSON.stringify(events) });
@@ -163,6 +173,10 @@ export interface ReminderEscalation {
 export async function postReminderEscalation(e: ReminderEscalation): Promise<void> {
   await request<void>("/reminders/escalate", { method: "POST", body: JSON.stringify(e) });
 }
-export async function getMedicationPlan(_req: MedicationPlanRequest): Promise<MedicationPlan> {
-  throw new Error("NOT_IMPLEMENTED: /medication/plan");
+export async function getMedicationPlan(req: MedicationPlanRequest): Promise<MedicationPlan> {
+  return request<MedicationPlan>(
+    "/medication/plan",
+    { method: "POST", body: JSON.stringify(req) },
+    LLM_TIMEOUT_MS
+  );
 }

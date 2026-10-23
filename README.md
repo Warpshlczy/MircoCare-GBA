@@ -28,7 +28,7 @@
 | 记忆辅助 | 「记住…」保存到本机 IndexedDB；「我记低咗咩」读回最近一条；**笔记不上传** |
 | 健康与安全 | 1 分钟语音筛查（仅上报派生特征）、前台跌倒检测、SOS 三态（发送中/已记录/失败）+ 急救拨号兜底 |
 | 健康卡与家属端 | 后端健康卡 + 二维码；家属配对、风险/活动趋势、筛查次数、SOS 确认、通知记录 |
-| Agent 卡片 | 后端 Agent 优先，不可用时回退本地卡片工厂 / 原话成待办卡 |
+| Agent 卡片 | 后端 Agent 可选（OpenAI-compatible）；未配置时回退本地卡片工厂 / 原话成待办卡；天气走 Open-Meteo 实时数据 |
 
 ---
 
@@ -69,6 +69,8 @@ python selfcheck.py           # 纯断言自检 → selfcheck: OK
 ```
 
 > `uvicorn` 与 `selfcheck.py` 都要求环境里有 `AURA_AUTH_SECRET`（≥32 字节，`.env.example` 已带本地开发值）。`uvicorn` 用 `--env-file .env` 读取；直接跑 `selfcheck.py` 前请先把该变量导出到当前 shell。CORS 不接受 `*`，需写明确的来源列表。
+>
+> LLM 编排默认关闭（`AURA_LLM_ENABLED=false`），三个 LLM 端点保持 501 → 前端本地兜底。需要真实 Agent 时配置 `AURA_LLM_BASE_URL` / `AURA_LLM_API_KEY` / `AURA_LLM_MODEL`；天气使用 Open-Meteo，无需 Key。
 
 - 交互式文档：`http://localhost:8000/docs`
 - 前端通过 `NEXT_PUBLIC_API_BASE`（默认 `http://localhost:8000`）指向后端。首次加载会通过 `POST /auth/register` 建立 HttpOnly 会话；之后请求自动携带该 Cookie 与假名 `X-Device-Id` 头（原生/CLI 客户端可改用 `Authorization: Bearer`）。
@@ -96,7 +98,7 @@ npm run android      # cap open android（Android Studio 构建 APK）
 
 - **纯函数层**：`signal.ts` / `intent.ts` / `cards.ts` / `notes.ts` / `datetime.ts` / `native.ts` / `checkin.ts` —— 不触碰 `window`，可被 node 直接断言。
 - **浏览器胶水层**：`audio.ts` / `vad.ts` / `motion.ts` / `nfc.ts` / `camera.ts`。
-- **后端唯一入口**：`web/src/lib/api.ts`（10 个契约函数，7 个已接线，3 个 LLM 端点按约定返回 501 → 前端自动兜底）。
+- **后端唯一入口**：`web/src/lib/api.ts`（10 个契约函数全部接线；3 个 LLM 端点默认关闭，未配置/失败时返回 501/502 → 前端自动兜底）。
 - **原生接缝**：`lib/native.ts` + Capacitor `AuraNative` 插件（后台唤醒已实现；桌面小组件、自动前置仍为桩）。
 
 ### 后端四大理念的落地位置
@@ -115,6 +117,7 @@ npm run android      # cap open android（Android Studio 构建 APK）
 - 原始音频 / 原始传感器流**不得出端**；只上传 VAD 裁剪后的派生特征与粗粒度、无自由文本的埋点。
 - 随手记（`notes` store）与提醒数据**只保存在本机 IndexedDB**，不上传后端；埋点只记录粗粒度计数。
 - 仅使用假名 `DeviceId`，禁用 IDFA / AAID / IMEI / MAC。
+- LLM 端点默认关闭；启用时只发送 PII 擦除后的最近对话文本，不发送音频、设备标识或健康卡。使用第三方模型前需完成数据出境与同意评估。
 - Web 会话使用 HttpOnly `aura_session` Cookie；原生/CLI 可用 `Authorization: Bearer`。身份校验通过后才解析 `X-Device-Id`。
 - 埋点缓冲在本地 IndexedDB，批量上报；上报失败保留缓冲，不丢。
 - 对齐 HK PDPO、澳门个人数据保护法（PDPA）、PIPL。
@@ -149,7 +152,7 @@ npm run android      # cap open android（Android Studio 构建 APK）
 
 ## 后续方向
 
-1. 接通 3 个 LLM 端点（`assistantChat` / `getAgentCards` / `getMedicationPlan`），并内置健康安全边界。
+1. 为 LLM 端点配置生产模型与数据出境同意（代码已实现，默认关闭；未配置时 501 回退本地卡片）。
 2. 为 `notification_outbox` 接入真实推送 / 短信 / 语音外呼 provider（目前仅记录投递意图）。
 3. 在装有 JDK 17 + Android SDK 的机器上产出并装机验证 APK。
 4. 补齐 `updateHomeWidget` / `bringToForeground` 两个原生桩，并加原生定时通知。

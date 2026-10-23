@@ -13,7 +13,7 @@ import {
   G,
 } from "./lib/signal.ts";
 import { t } from "./lib/i18n.ts";
-import { parseIntent } from "./lib/intent.ts";
+import { parseIntent, isQuestion } from "./lib/intent.ts";
 import { localCardsFor, followupCard, todoCardFromUtterance } from "./lib/cards.ts";
 import {
   latestNote,
@@ -165,6 +165,11 @@ assert.equal(magnitude(3, 4, 0), 5);
   assert.equal(parseIntent("帮我记住钥匙喺抽屉"), "note");
   assert.equal(parseIntent("我记低咗咩"), "recall");
   assert.equal(parseIntent("blah blah"), "unknown");
+  // conversational questions are routed to assistantChat instead of a todo card
+  assert.equal(isQuestion("点算呀？"), true);
+  assert.equal(isQuestion("为什么会这样"), true);
+  assert.equal(isQuestion("钥匙喺抽屉"), false);
+  assert.equal(isQuestion(""), false);
 }
 
 // --- memory notes (pure) -----------------------------------------------------

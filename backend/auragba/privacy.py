@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from typing import Any
+from typing import Any, overload
 
 from fastapi import Cookie, Header, HTTPException
 
@@ -69,9 +69,23 @@ def scrub_props(props: dict[str, Any] | None) -> dict[str, Any]:
     return clean
 
 
+@overload
+def scrub_text(text: str, *, keep: bool = False) -> str: ...
+
+
+@overload
+def scrub_text(text: None, *, keep: bool = False) -> None: ...
+
+
 def scrub_text(text: str | None, *, keep: bool = False) -> str | None:
-    """Redact PII inside free text when it must be stored (never audio)."""
-    if text is None or keep:
+    """Redact PII inside free text when it must be stored (never audio).
+
+    The overloads preserve the input type for static checkers: a ``str`` input
+    always yields a ``str``, so callers can slice the result safely.
+    """
+    if text is None:
+        return None
+    if keep:
         return text
     out = text
     for pat in _PII_PATTERNS:

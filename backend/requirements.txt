@@ -4,6 +4,7 @@ uvicorn[standard]>=0.27
 pydantic>=2.5
 numpy>=1.26
 python-multipart>=0.0.9          # multipart WAV/FLAC upload for /screening/analyze
+httpx>=0.27                     # optional LLM + Open-Meteo weather client
 
 # --- Optional heavy AI extras -------------------------------------------------
 # The pipeline degrades gracefully when these are absent (see each module's

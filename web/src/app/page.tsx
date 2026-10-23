@@ -19,10 +19,10 @@ import {
   createAmplitudeMeter,
   sttSupported,
 } from "@/lib/audio";
-import { parseIntent } from "@/lib/intent";
+import { parseIntent, isQuestion } from "@/lib/intent";
 import { localCardsFor, followupCard, photoCard, todoCardFromUtterance } from "@/lib/cards";
 import { latestNote, noteCard, noteFromUtterance, recallCard } from "@/lib/notes";
-import { createPairingCode, ensureSeniorSession, getAgentCards, getHealthCard, getMedicationPlan, postConversationMemory, postReminderEscalation } from "@/lib/api";
+import { assistantChat, createPairingCode, ensureSeniorSession, getAgentCards, getHealthCard, getMedicationPlan, postConversationMemory, postReminderEscalation } from "@/lib/api";
 import { all, get, put } from "@/lib/db";
 import { shouldCheckIn } from "@/lib/checkin";
 import { flush, track } from "@/lib/analytics";
@@ -259,6 +259,34 @@ export default function Page() {
         return;
       }
 
+      // Free-form questions get a short spoken reply; failures fall through to
+      // the normal card/todo path so the senior is never blocked.
+      if ((intent === "unknown" || intent === "help") && isQuestion(utterance)) {
+        try {
+          const { reply } = await assistantChat({
+            messages: [{ role: "user", content: utterance }],
+            locale,
+          });
+          const text = reply.trim();
+          if (text) {
+            pushCards([
+              {
+                id: `chat-${now}`,
+                kind: "info",
+                title: t(locale, "assistantTitle"),
+                createdAt: now,
+                data: { icon: "💬", headline: text },
+              },
+            ]);
+            track("assistant_chat", locale);
+            await speakWithMouth(text);
+            return;
+          }
+        } catch {
+          /* LLM disabled/offline: fall through to the todo path */
+        }
+      }
+
       // Req 3: medication can be derived from past conversations + profile + what
       // the senior just said. The backend agent does the deriving; offline we fall
       // through to the local card path below.
@@ -270,7 +298,7 @@ export default function Page() {
             built.forEach((r) => reminder.schedule(r));
             pushCards(localCardsFor("tasks", locale, { reminders: built, now }));
             track("med_plan", locale, { basis: plan.basis ?? "mixed" });
-            await speakWithMouth(t(locale, "medTaken"));
+            await speakWithMouth(t(locale, "medPlanSaved"));
             return;
           }
         } catch {
@@ -285,6 +313,9 @@ export default function Page() {
       try {
         next = await getAgentCards({ intent, utterance, locale, now });
       } catch {
+        next = [];
+      }
+      if (!next.length) {
         mode = "local";
         next = localCardsFor(intent, locale, { reminders: reminder.items, now });
         if (!next.length && utterance.trim()) next = [todoCardFromUtterance(utterance, locale, now)];

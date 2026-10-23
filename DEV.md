@@ -28,7 +28,7 @@
 | 手机端 | **Android 原生版本**：Capacitor 6 壳 + 自定义 `AuraNative` 插件（见 §9） |
 | 生产依赖 | 6 个：`next` / `react` / `react-dom` / `qrcode` / `@capacitor/core` / `@capacitor/android` |
 | 源码文件 | 32 个 `.ts/.tsx` + 1 份自检脚本（见 §4 目录结构） |
-| 后端接口 | **10 个**函数，位于 `web/src/lib/api.ts`。**7 个已接线到 `backend/`**（`postGaitWindow`/`postScreeningSession`/`postSos`/`getHealthCard`/`postTelemetry`/`postConversationMemory`/`postReminderEscalation`）；**3 个 LLM 接口按要求保持放空抛 `NOT_IMPLEMENTED`**（`assistantChat`/`getAgentCards`/`getMedicationPlan`） |
+| 后端接口 | **10 个**函数，位于 `web/src/lib/api.ts`，**全部接线**。其中 3 个 LLM 端点默认关闭：未配置返回 501、上游失败/非法输出返回 502、额度用尽返回 429 → 前端自动回退本地卡片/提醒。 |
 | 后端服务 | `backend/`（Python / FastAPI）：MCI/AD 多模态筛查引擎，隐私优先、个人基线 Z-score、双流融合、STEMB 经济与 SaMD 审计。见 §8.7 |
 
 ### 1.2 如何运行
@@ -53,8 +53,8 @@ npm run android     # cap open android（打开 Android Studio 构建 APK）
 | 检查 | 命令 | 结果 |
 |---|---|---|
 | 类型检查 | `npm run typecheck` | `rc=0`（strict 无错） |
-| 纯函数自检 | `npm run selfcheck` | `selfcheck: OK`（幅度/跌倒三阶段/步态/VAD/升级边界/双语字典/**意图（含 tools/followup/note/recall）/卡片工厂/复诊卡/随手记抽取与回忆**/待办卡/每日签到/桌面小组件 payload） |
-| 静态导出构建 | `npm run build` | `✓ Compiled successfully`，路由 `/` **28.1 kB / 116 kB** First Load JS，产物在 `out/` |
+| 纯函数自检 | `npm run selfcheck` | `selfcheck: OK`（幅度/跌倒三阶段/步态/VAD/升级边界/双语字典/**意图（含 tools/followup/note/recall）/问答判定**/卡片工厂/复诊卡/随手记抽取与回忆/待办卡/每日签到/桌面小组件 payload） |
+| 静态导出构建 | `npm run build` | `✓ Compiled successfully`，路由 `/` **28.4 kB / 116 kB** First Load JS，产物在 `out/` |
 | Android 工程 | `npx cap add android` | `[success] android platform added!`（`web/android/` 生成，含 `AuraNative` 插件 + 所需权限） |
 | 浏览器冒烟 | Headless 浏览器 | 默认**只见「食药提醒 / 高对比 / 语言切换」三颗小按钮 + 「说话 / 求助」大按钮**；点语言切换键 → 整页在粤语↔普通话之间翻转（食藥提醒↔吃药提醒、講嘢↔说话）；说「打开按钮」→ 工具面板（健康卡/相机/唤醒/文字输入）展开；控制台零错误 |
 
@@ -271,6 +271,15 @@ App = **通用卡片渲染器**。「显示什么」由意图 + Agent 决定：
 - 结束后 `POST /screening/sessions`；家属端显示「语音筛查 N 次」。
 - 原始音频不落盘、不出端；不会用 RMS 特征伪造 `riskIndex`。
 
+### 5.15 LLM 编排（默认关闭）
+
+- 三个端点：`/assistant/chat`（短回复）、`/agent/cards`（结构化卡片）、`/medication/plan`（只抽取已有用药信息）。
+- 配置：`AURA_LLM_ENABLED` + `AURA_LLM_BASE_URL` / `AURA_LLM_API_KEY` / `AURA_LLM_MODEL`；默认关闭，未配置返回 501。
+- 安全：急救词短路 → SOS；禁止诊断/荐药；药名必须出现在输入中；JSON 校验 + 一次修复；按设备每日额度。
+- 天气：`/agent/cards` 的 weather 意图直接走 Open-Meteo，不经过 LLM，失败返回「暂时攞唔到实时天气」。
+- 回退：上游失败/非法输出 502、额度用尽 429；前端对 501/502/429 一律回退本地卡片/提醒。
+- 隐私：发送前用 `scrub_text(keep=False)` 擦除 PII，只发最近 10 轮文本，不发音频、设备标识或健康卡。
+
 ---
 
 ## 6. 刻意的简化（ponytail 清单）与升级路径
@@ -338,14 +347,14 @@ Web PWA **无法真正「接管」锁屏 / 桌面 / 前台**；以下是**浏览
 | 2 | `postScreeningSession(s)` | `POST /screening/sessions` | `ScreeningSession` | `void` | ✅ 已实现（204，vector-only 摄入） |
 | 3 | `postSos(e)` | `POST /sos` | `SosEvent` | `void` | ✅ 已实现（204） |
 | 4 | `getHealthCard()` | `GET /health-card/me` | — | `HealthCard` | ✅ 已实现（200） |
-| 5 | `assistantChat(req)` | `POST /assistant/chat` | `AssistantChatRequest` | `{ reply }` | ⏸ **501（LLM 放空）** |
-| 6 | **`getAgentCards(req)`** | `POST /agent/cards` | `AgentIntentRequest` | **`AgentCard[]`** | ⏸ **501（LLM 放空）** |
+| 5 | `assistantChat(req)` | `POST /assistant/chat` | `AssistantChatRequest` | `{ reply }` | ⚙️ 已实现；未配置 501 |
+| 6 | **`getAgentCards(req)`** | `POST /agent/cards` | `AgentIntentRequest` | **`AgentCard[]`** | ⚙️ 已实现；未配置 501 |
 | 7 | **`postTelemetry(events)`** | `POST /telemetry/events` | `TelemetryEvent[]` | `void` | ✅ 已实现（204，服务端二次脱敏） |
 | 8 | **`postConversationMemory(turn)`** | `POST /conversation/turns` | `ConversationTurn` | `void` | ✅ 已实现（204，按假名归档） |
-| 9 | **`getMedicationPlan(req)`** | `POST /medication/plan` | `MedicationPlanRequest` | **`MedicationPlan`** | ⏸ **501（LLM 放空）** |
+| 9 | **`getMedicationPlan(req)`** | `POST /medication/plan` | `MedicationPlanRequest` | **`MedicationPlan`** | ⚙️ 已实现；未配置 501 |
 | 10 | **`postReminderEscalation(e)`** | `POST /reminders/escalate` | `ReminderEscalation` | `void` | ✅ 已实现（204，记录超时事件 + 家属 outbox） |
 
-> #8 / #9 是需求 3、6 新增；#10 为提醒超时升级新增。前端会**先落本地再上报**，因此 #8 偶发失败不丢记忆；#9 失败则回退本地提醒。返回 501 的 3 个 LLM 端点与前端 `NOT_IMPLEMENTED` 一一对应，联调时前端按既定策略自动兜底，不报错。
+> #8 / #9 是需求 3、6 新增；#10 为提醒超时升级新增。前端会**先落本地再上报**，因此 #8 偶发失败不丢记忆；#9 失败则回退本地提醒。#5 / #6 / #9 在未配置 LLM 时返回 501，上游失败/非法 JSON 返回 502，额度用尽返回 429——前端对这些情况一律回退本地卡片/提醒。
 
 ### 8.2 Agent 卡片契约（本轮新增，重点）
 
@@ -422,7 +431,7 @@ interface HomeWidgetPayload {   // homeWidgetPayload() 纯函数已实现并自�
 
 1. **鉴权与设备绑定**：下发/校验假名 `DeviceId`，绝不下发或存储真实设备标识。
 2. **SOS 真实升级链路**：`POST /sos` 需并联通知**家人 + 社区照顾员**，跨境场景考虑三地紧急号码。
-3. **LLM 编排**：`/assistant/chat` 与 `/agent/cards` 内应内置健康安全边界（不诊断、不荐药，异常引导 SOS）。
+3. **LLM 编排**：三个端点已实现 OpenAI-compatible 调用；内置急救词短路、禁止诊断/荐药、药名必须来自输入、JSON 校验与一次修复、按设备日额度。默认关闭，未配置时返回 501。
 4. **派生特征入库与趋势**：`cv`、步频、筛查特征的长期趋势是「跌倒前预警」的数据基础。
 5. **合规**：存储与跨境传输满足 HK PDPO / 澳门 PDPA / PIPL；最小化 + 加密 + 可撤回同意。
 6. **健康卡同步**：`GET /health-card/me` 支持家属/诊所更新与版本号。
@@ -498,6 +507,14 @@ backend/
     │   ├── acoustic.py         # 流 A：LightGBM/XGBoost 优先，否则可解释 logistic（真模型用 SHAP、兜底用手工权重，均含逐特征贡献度）
     │   ├── semantic.py         # 流 B：文本分类器（sklearn 优先，否则 logistic）
     │   └── fusion.py           # 晚期融合：加权归一化得到 0.0–1.0 综合风险指数
+    ├── llm/                    # 可选 LLM 编排（默认关闭）
+    │   ├── client.py           # OpenAI-compatible chat/completions + JSON 修复
+    │   ├── prompts.py          # 卡片/用药/闲聊三类提示词
+    │   ├── safety.py           # 急救词短路 / 禁止诊断荐药 / 药名来源校验
+    │   ├── weather.py          # Open-Meteo 实时天气 + 缓存
+    │   ├── usage.py            # 按设备每日额度
+    │   ├── service.py          # 编排 + Pydantic 校验
+    │   └── errors.py           # 501/429/502 的类型化失败
     └── api/
         ├── contract_routes.py  # 上表前端契约端点
         └── insight_routes.py   # 附加：/screening/analyze、/baseline/me、/economics/me、/audit/screening、/health
@@ -505,7 +522,7 @@ backend/
 
 **四项核心理念的落地位置**：非侵入式双模态生物标志物 → `audio/features.py` + `nlp/`；隐私管线 → `privacy.py`（`extract-and-burn` / `vector-only` / PII 擦除 / 假名化）；个人基线动态追踪 → `baseline.py`；STEMB 与 SaMD → `economics.py` + `audit.py`。
 
-**依赖与降级**：本机 **未安装** `librosa` / `soundfile` / `opensmile` / `scikit-learn` / `lightgbm` / `xgboost` / `sentence-transformers` / `jieba`，因此全部走**纯 numpy 优雅降级**实现；每个回退点用 `ponytail:` 注释标明天花板与升级路径，装上对应依赖即自动切换到正式实现。**LLM / ASR 远程 API 按要求放空**（`asr.transcribe_via_remote_api` 抛 `NotImplementedError`，3 个编排端点返回 501）。
+**依赖与降级**：本机 **未安装** `librosa` / `soundfile` / `opensmile` / `scikit-learn` / `lightgbm` / `xgboost` / `sentence-transformers` / `jieba`，因此筛查链路走**纯 numpy 优雅降级**实现；每个回退点用 `ponytail:` 注释标明天花板与升级路径。**LLM 编排已实现但默认关闭**（需 `httpx` 与 `AURA_LLM_*` 配置）；`asr.transcribe_via_remote_api` 仍故意抛 `NotImplementedError`。
 
 **验证结果（历史记录）**：`python3 selfcheck.py` → `selfcheck: OK`；原有 9 个契约端点 HTTP 实测通过（6 个 204/200、3 个 501；当时尚未新增 `/reminders/escalate`）；浏览器级联调确认 PWA 发出 `POST /telemetry/events` 并成功落库、服务端二次擦除 `props`、无 CORS / 控制台错误；前端 `typecheck` 与 `build` 均通过。
 

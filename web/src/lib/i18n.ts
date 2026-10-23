@@ -71,6 +71,8 @@ export type MsgKey =
   | "noteEmpty"
   | "noteTime"
   | "noteHint"
+  | "assistantTitle"
+  | "medPlanSaved"
   | "screeningTitle"
   | "screeningPrompt"
   | "screeningRecording"
@@ -151,6 +153,8 @@ const zhHK: Dict = {
   noteEmpty: "暫時未有記錄。",
   noteTime: "記錄時間",
   noteHint: "講「記住…」我就會幫你記低",
+  assistantTitle: "靈犀講",
+  medPlanSaved: "好，已經幫你記低用藥計劃。",
   screeningTitle: "語音篩查",
   screeningPrompt: "請隨便講一分鐘，講乜都得，我幫你記錄。",
   screeningRecording: "錄緊音…",
@@ -230,6 +234,8 @@ const zhCN: Dict = {
   noteEmpty: "暂时没有记录。",
   noteTime: "记录时间",
   noteHint: "说「记住…」我就会帮您记下",
+  assistantTitle: "灵犀说",
+  medPlanSaved: "好，已经帮您记录用药计划。",
   screeningTitle: "语音筛查",
   screeningPrompt: "请随便讲一分钟，讲什么都可以，我帮您记录。",
   screeningRecording: "正在录音…",
