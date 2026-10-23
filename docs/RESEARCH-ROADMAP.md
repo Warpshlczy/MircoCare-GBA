@@ -21,6 +21,17 @@
 | 特征口径统一 | `audio/features.py` 把 openSMILE 原名归一为 snake_case 规范键，补齐 VAD 节律特征；numpy 兜底与 openSMILE 两条路径产出**同一套摘要键**，不会静默丢指标 |
 | 模型溯源 | `screening.py` 在审计记录里写入模型文件指纹（路径 + SHA256 前 8 位 + 是否加载成功）；加载失败标 `LOAD-FAILED`，绝不静默退回兜底 |
 
+### 2026-10-24 工程增量（接入与适老功能）
+
+| 项 | 内容 |
+|---|---|
+| 鉴权统一 | 契约端点支持 HttpOnly `aura_session` Cookie（原生可 Bearer）；注册按 `(role, device)` 幂等，修复重复注册 500 |
+| 复诊提醒 | `ReminderItem.kind="followup"` + 大字号日期表单；复用 10/30 分钟升级与家属 outbox |
+| 随手记 | 「记住… / 我记低咗咩」纯本地 IndexedDB `notes`，不上传；TTS 复述最近一条 |
+| 语音筛查入口 | 工具面板 60 秒筛查 → `POST /screening/sessions`（仅 RMS/VAD 派生特征） |
+| 数据接线 | 步态窗口上传 + 启动重放；健康卡读 `/health-card/me`；家属端展示筛查次数与通知记录 |
+| SOS 诚实态 | 发送中 / 已记录 / 失败三态 + 重试 + 急救号码拨号兜底，不再假装已通知 |
+
 ### 三个必须补上的缺口（重点）
 
 1. **产物与数据都不在仓库里**：`backend/models/`、`backend/data/`、`backend/.env` 全部被 `.gitignore`（规则在 `.gitignore:25/32/40`），克隆后本地是空的。

@@ -18,6 +18,7 @@ python3 selfcheck.py                              # 可运行断言自检 → se
 
 - 交互式文档：`http://localhost:8000/docs`
 - 元信息根路由：`GET /`
+- `selfcheck.py` 与 `uvicorn` 都要求环境里有 `AURA_AUTH_SECRET`（≥32 字节）；`.env.example` 已带本地开发值，生产必须更换。
 - 本机 Python 3.13；核心依赖为 `fastapi / uvicorn / pydantic / numpy / python-multipart`；
   启用真实模型另需 `opensmile / faster-whisper / jieba / lightgbm / scikit-learn / joblib`。
 
@@ -28,9 +29,9 @@ python3 selfcheck.py                              # 可运行断言自检 → se
 
 ## 与前端联调
 
-前端 `web/src/lib/api.ts` 通过 `NEXT_PUBLIC_API_BASE` 指向本服务（默认 `http://localhost:8000`），所有请求携带假名 `X-Device-Id` 头，无需 Cookie。CORS 由 `AURA_CORS_ORIGINS` 控制。
+前端 `web/src/lib/api.ts` 通过 `NEXT_PUBLIC_API_BASE` 指向本服务（默认 `http://localhost:8000`）。首次加载会 `POST /auth/register` 建立 HttpOnly `aura_session` Cookie（原生/CLI 可用 `Authorization: Bearer`）；之后请求携带该会话与假名 `X-Device-Id` 头。**身份校验通过后**才会把请求映射到授权设备。CORS 由 `AURA_CORS_ORIGINS` 控制，必须是明确来源（`*` 会被拒绝启动）。
 
-**9 个前端契约端点**
+**10 个前端契约端点**
 
 | # | 端点 | 说明 | 状态 |
 |---|---|---|---|
@@ -43,6 +44,7 @@ python3 selfcheck.py                              # 可运行断言自检 → se
 | 7 | `POST /telemetry/events` | 批量埋点（服务端二次脱敏） | 204 |
 | 8 | `POST /conversation/turns` | 会话记忆归档（按假名设备） | 204 |
 | 9 | `POST /medication/plan` | 用药计划生成 | **501（LLM 放空）** |
+| 10 | `POST /reminders/escalate` | 提醒超时事件 + 家属 outbox | 204 |
 
 返回 **501** 的 3 个 LLM 端点与前端 3 个抛 `NOT_IMPLEMENTED` 的函数一一对应，前端会自动回退到本地卡片工厂 / 本地提醒，联调不报错。
 
@@ -98,13 +100,15 @@ uvicorn auragba.main:app --env-file .env --reload --port 8000
 
 ## 环境变量
 
-见 [.env.example](.env.example)（模板）。**均为可选**，未设置时用 `config.py` 的默认值。
+见 [.env.example](.env.example)（模板）。**`AURA_AUTH_SECRET` 必填**（≥32 字节，未设置时服务拒绝启动）；其余变量未设置时用 `config.py` 的默认值。
 
-> `.env.example` 里已经写入**校准值**（融合 0.2/0.8、阈值 0.409/0.521），`cp .env.example .env` 即复现附录中的行为；
+> `.env.example` 里已经写入**校准值**（融合 0.2/0.8、阈值 0.409/0.521）与一个本地开发用 `AURA_AUTH_SECRET`，`cp .env.example .env` 即复现附录中的行为；
 > 直接不设变量跑，则回到 `config.py` 的保守默认（0.5/0.5、0.45/0.65）——那是未校准配置。
 
 | 变量 | 说明 | 默认值 |
 |---|---|---|
+| `AURA_AUTH_SECRET` | HMAC 会话签名密钥，**必填**（≥32 字节） | 无（缺失即拒绝启动） |
+| `AURA_COOKIE_SECURE` | 生产 HTTPS 会话 Cookie；`AURA_ENV=production` 时强制为 `true` | `false` |
 | `AURA_ACOUSTIC_MODEL` | 声学流模型路径（`./models/acoustic_lgbm.txt`） | 空 → 手工权重兜底 |
 | `AURA_SEMANTIC_MODEL` | 语义流模型路径（`./models/semantic_lr.joblib`） | 空 → 手工权重兜底 |
 | `AURA_WHISPER_MODEL` | Whisper 模型名或本地目录（`./models/whisper-small`） | `tiny` |
@@ -113,7 +117,7 @@ uvicorn auragba.main:app --env-file .env --reload --port 8000
 | `AURA_FUSION_W_ACOUSTIC` / `AURA_FUSION_W_SEMANTIC` | 双流融合权重（自动归一） | 0.5 / 0.5 |
 | `AURA_RISK_WATCH` / `AURA_RISK_ELEVATED` | 风险分档切点 | 0.45 / 0.65 |
 | `AURA_DATA_DIR` | 假名存储 / 审计日志目录 | `./.data` |
-| `AURA_CORS_ORIGINS` | 允许的 CORS 源（逗号分隔） | `*` |
+| `AURA_CORS_ORIGINS` | 允许的 CORS 源（逗号分隔，禁止 `*`） | `http://localhost:3000,http://localhost:8000` |
 
 `.env` 里写的是**校准值**（融合 0.2/0.8、阈值 0.409/0.521），与上表中的保守默认值不同——
 校准来源见「已训练模型」一节。
@@ -136,7 +140,10 @@ backend/
 └── auragba/
     ├── config.py            # 版本号 / 阈值 / 环境设置
     ├── contract.py          # Pydantic v2 契约（字段名镜像前端 camelCase）
-    ├── privacy.py           # 假名化 / PII 擦除 / 提取即焚（bytearray 归零）
+    ├── privacy.py           # 假名化 / 会话鉴权依赖 / PII 擦除 / 提取即焚
+    ├── auth.py              # HMAC 会话、角色校验、长者-家属配对
+    ├── auth_store.py        # SQLite：账号、配对码、失败锁定、家属关系
+    ├── notifications.py     # 家属 notification_outbox（推送 provider 的接缝）
     ├── store.py             # 按假名 DeviceId 的每设备 JSON 存储
     ├── audit.py             # SaMD 审计：append-only JSONL hash 链 + verify()
     ├── baseline.py          # 个人 14 天基线 Z-score（normal/watch/elevated）
@@ -146,7 +153,7 @@ backend/
     ├── audio/  io.py · vad.py · features.py      # WAV 解码 / 能量 VAD / eGeMAPS 88 维
     ├── nlp/    asr.py · metrics.py · coherence.py # ASR / TTR·名动比·句长方差 / 语义连贯度
     ├── model/  acoustic.py · semantic.py · fusion.py # 双流分类（模型指纹 / SHAP 贡献）+ 晚期融合
-    └── api/    contract_routes.py · insight_routes.py
+    └── api/    contract_routes.py · insight_routes.py · auth_routes.py · caregiver_routes.py
 ```
 
 ## 四项目标理念的落地位置

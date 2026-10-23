@@ -19,6 +19,19 @@
 
 ---
 
+## 目前已实现
+
+| 能力 | 现状 |
+|---|---|
+| 语音入口 | 前台唤醒词、主动问候、每日签到、回到前台续聊；Android 壳内已实现后台唤醒前台服务 |
+| 用药与复诊 | 吃药提醒 + 10/30 分钟升级；复诊提醒表单（`kind: followup`）；升级事件写入家属 outbox |
+| 记忆辅助 | 「记住…」保存到本机 IndexedDB；「我记低咗咩」读回最近一条；**笔记不上传** |
+| 健康与安全 | 1 分钟语音筛查（仅上报派生特征）、前台跌倒检测、SOS 三态（发送中/已记录/失败）+ 急救拨号兜底 |
+| 健康卡与家属端 | 后端健康卡 + 二维码；家属配对、风险/活动趋势、筛查次数、SOS 确认、通知记录 |
+| Agent 卡片 | 后端 Agent 优先，不可用时回退本地卡片工厂 / 原话成待办卡 |
+
+---
+
 ## 仓库结构
 
 | 目录 | 内容 |
@@ -55,6 +68,8 @@ uvicorn auragba.main:app --env-file .env --reload --port 8000
 python selfcheck.py           # 纯断言自检 → selfcheck: OK
 ```
 
+> `uvicorn` 与 `selfcheck.py` 都要求环境里有 `AURA_AUTH_SECRET`（≥32 字节，`.env.example` 已带本地开发值）。`uvicorn` 用 `--env-file .env` 读取；直接跑 `selfcheck.py` 前请先把该变量导出到当前 shell。CORS 不接受 `*`，需写明确的来源列表。
+
 - 交互式文档：`http://localhost:8000/docs`
 - 前端通过 `NEXT_PUBLIC_API_BASE`（默认 `http://localhost:8000`）指向后端。首次加载会通过 `POST /auth/register` 建立 HttpOnly 会话；之后请求自动携带该 Cookie 与假名 `X-Device-Id` 头（原生/CLI 客户端可改用 `Authorization: Bearer`）。
 
@@ -79,9 +94,9 @@ npm run android      # cap open android（Android Studio 构建 APK）
                               本地卡片工厂 / 原话成待办卡（离线兜底）
 ```
 
-- **纯函数层**：`signal.ts` / `intent.ts` / `cards.ts` / `native.ts` / `checkin.ts` —— 不触碰 `window`，可被 node 直接断言。
+- **纯函数层**：`signal.ts` / `intent.ts` / `cards.ts` / `notes.ts` / `datetime.ts` / `native.ts` / `checkin.ts` —— 不触碰 `window`，可被 node 直接断言。
 - **浏览器胶水层**：`audio.ts` / `vad.ts` / `motion.ts` / `nfc.ts` / `camera.ts`。
-- **后端唯一入口**：`web/src/lib/api.ts`（9 个契约函数，6 个已接线，3 个 LLM 端点按约定返回 501 → 前端自动兜底）。
+- **后端唯一入口**：`web/src/lib/api.ts`（10 个契约函数，7 个已接线，3 个 LLM 端点按约定返回 501 → 前端自动兜底）。
 - **原生接缝**：`lib/native.ts` + Capacitor `AuraNative` 插件（后台唤醒已实现；桌面小组件、自动前置仍为桩）。
 
 ### 后端四大理念的落地位置
@@ -98,7 +113,9 @@ npm run android      # cap open android（Android Studio 构建 APK）
 ## 隐私与合规
 
 - 原始音频 / 原始传感器流**不得出端**；只上传 VAD 裁剪后的派生特征与粗粒度、无自由文本的埋点。
+- 随手记（`notes` store）与提醒数据**只保存在本机 IndexedDB**，不上传后端；埋点只记录粗粒度计数。
 - 仅使用假名 `DeviceId`，禁用 IDFA / AAID / IMEI / MAC。
+- Web 会话使用 HttpOnly `aura_session` Cookie；原生/CLI 可用 `Authorization: Bearer`。身份校验通过后才解析 `X-Device-Id`。
 - 埋点缓冲在本地 IndexedDB，批量上报；上报失败保留缓冲，不丢。
 - 对齐 HK PDPO、澳门个人数据保护法（PDPA）、PIPL。
 
@@ -113,6 +130,7 @@ npm run android      # cap open android（Android Studio 构建 APK）
 | 自动跳到前台 | ❌ 网页禁止自我前置 | 原生 deep link / 通知 |
 | 系统桌面小组件 | ❌ 网页不能写系统桌面 | 原生 AppWidget |
 | 后台 / 息屏传感器采样 | ⚠️ 锁屏即停采 | 原生壳 / BLE 穿戴 |
+| 准时提醒（吃药 / 复诊） | ⚠️ App 关闭时不会到点弹窗；下次打开补提醒 | 原生定时通知 |
 | 震动、Web NFC | ⚠️ 仅 Android Chrome | 原生 |
 
 所有「有已知天花板的简化」在源码中以 `ponytail:` 注释标注（共 15 处），每处都写明天花板与升级路径。
@@ -131,11 +149,13 @@ npm run android      # cap open android（Android Studio 构建 APK）
 
 ## 后续方向
 
-1. 在装有 JDK 17 + Android SDK 的机器上产出并装机验证 APK。
-2. 补齐 `updateHomeWidget` / `bringToForeground` 两个原生桩。
-3. 用 Silero（`onnxruntime-web`）替换能量 VAD，契约 `{speech, ratio}` 不变。
-4. 用 `pixi-live2d-display` 替换 Canvas 数字人，仅需 `state` / `level` 两个 prop。
-5. 纵向检测：个体基线升级、CPD、行为变异性轨迹（见 `docs/RESEARCH-ROADMAP.md`）。
+1. 接通 3 个 LLM 端点（`assistantChat` / `getAgentCards` / `getMedicationPlan`），并内置健康安全边界。
+2. 为 `notification_outbox` 接入真实推送 / 短信 / 语音外呼 provider（目前仅记录投递意图）。
+3. 在装有 JDK 17 + Android SDK 的机器上产出并装机验证 APK。
+4. 补齐 `updateHomeWidget` / `bringToForeground` 两个原生桩，并加原生定时通知。
+5. 用 Silero（`onnxruntime-web`）替换能量 VAD，契约 `{speech, ratio}` 不变。
+6. 用 `pixi-live2d-display` 替换 Canvas 数字人，仅需 `state` / `level` 两个 prop。
+7. 纵向检测：个体基线升级、CPD、行为变异性轨迹（见 `docs/RESEARCH-ROADMAP.md`）。
 
 ---
 

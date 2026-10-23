@@ -27,7 +27,7 @@
 | 运行形态 | **静态导出**（`output: 'export'` → `out/`）：既是可部署的 PWA，又直接作为 Android 壳的 `webDir` |
 | 手机端 | **Android 原生版本**：Capacitor 6 壳 + 自定义 `AuraNative` 插件（见 §9） |
 | 生产依赖 | 6 个：`next` / `react` / `react-dom` / `qrcode` / `@capacitor/core` / `@capacitor/android` |
-| 源码文件 | 27 个 `.ts/.tsx` + 1 份自检脚本（见 §4 目录结构） |
+| 源码文件 | 32 个 `.ts/.tsx` + 1 份自检脚本（见 §4 目录结构） |
 | 后端接口 | **10 个**函数，位于 `web/src/lib/api.ts`。**7 个已接线到 `backend/`**（`postGaitWindow`/`postScreeningSession`/`postSos`/`getHealthCard`/`postTelemetry`/`postConversationMemory`/`postReminderEscalation`）；**3 个 LLM 接口按要求保持放空抛 `NOT_IMPLEMENTED`**（`assistantChat`/`getAgentCards`/`getMedicationPlan`） |
 | 后端服务 | `backend/`（Python / FastAPI）：MCI/AD 多模态筛查引擎，隐私优先、个人基线 Z-score、双流融合、STEMB 经济与 SaMD 审计。见 §8.7 |
 
@@ -53,8 +53,8 @@ npm run android     # cap open android（打开 Android Studio 构建 APK）
 | 检查 | 命令 | 结果 |
 |---|---|---|
 | 类型检查 | `npm run typecheck` | `rc=0`（strict 无错） |
-| 纯函数自检 | `npm run selfcheck` | `selfcheck: OK`（幅度/跌倒三阶段/步态/VAD/升级边界/双语字典/**意图（含 `tools`）/卡片工厂/待办卡/每日签到/桌面小组件 payload**） |
-| 静态导出构建 | `npm run build` | `✓ Compiled successfully`，路由 `/` **22.4 kB / 110 kB** First Load JS，产物在 `out/` |
+| 纯函数自检 | `npm run selfcheck` | `selfcheck: OK`（幅度/跌倒三阶段/步态/VAD/升级边界/双语字典/**意图（含 tools/followup/note/recall）/卡片工厂/复诊卡/随手记抽取与回忆**/待办卡/每日签到/桌面小组件 payload） |
+| 静态导出构建 | `npm run build` | `✓ Compiled successfully`，路由 `/` **28.1 kB / 116 kB** First Load JS，产物在 `out/` |
 | Android 工程 | `npx cap add android` | `[success] android platform added!`（`web/android/` 生成，含 `AuraNative` 插件 + 所需权限） |
 | 浏览器冒烟 | Headless 浏览器 | 默认**只见「食药提醒 / 高对比 / 语言切换」三颗小按钮 + 「说话 / 求助」大按钮**；点语言切换键 → 整页在粤语↔普通话之间翻转（食藥提醒↔吃药提醒、講嘢↔说话）；说「打开按钮」→ 工具面板（健康卡/相机/唤醒/文字输入）展开；控制台零错误 |
 
@@ -89,7 +89,7 @@ npm run android     # cap open android（打开 Android Studio 构建 APK）
 - 所有交互控件有语义与状态：SOS / 提醒 / 相机用 `role="alertdialog"|"dialog"` + `aria-modal` + `aria-labelledby`，提醒层内做**焦点陷阱**（Tab 只在 2 个按钮间循环）；语言、唤醒、高对比开关用 `aria-pressed`；状态文字用 `aria-live="polite"`。
 - 数字人 `<canvas>` 带 `role="img"` + 随状态变化的 `aria-label`（如「灵犀正在聆听」）。
 - 卡片 `article` 带 `aria-label`；后端 HTML 卡片用 `title` 标注 iframe。
-- 全局大号焦点环：见 [globals.css](file:///Users/mac/Documents/hackthon/web/src/app/globals.css#L31-L42)。
+- 全局大号焦点环：见 [globals.css](file:///c:/Users/27843/Desktop/hack/MircoCare-GBA-main/web/src/app/globals.css#L31-L42)。
 - `prefers-reduced-motion` 全量降级；打印样式支持健康卡直接打印。
 - **语音优先但不锁死**：默认隐藏次要控件（需求 1），但语音不可用/被拒时**自动展开工具面板**（fail-open）并提供文字输入；「说话 / 求助」始终可点；**SOS 永不隐藏**（安全底线）。
 
@@ -106,35 +106,40 @@ web/
 │   ├── app/
 │   │   ├── layout.tsx            # 根布局 + SW 注册脚本（内联，避免额外依赖）
 │   │   ├── page.tsx             # 主视图：数字人 + 主按钮 + 卡片流 + 各覆盖层 + 唤醒
+│   │   ├── caregiver/page.tsx    # 家属端：配对、趋势、告警确认、通知记录
 │   │   └── globals.css           # 24px 基准字号、高对比、焦点环、reduced-motion
 │   ├── components/
 │   │   ├── Avatar.tsx            # Canvas-2D 数字人（眨眼/呼吸/口型）
 │   │   ├── CardRenderer.tsx      # ★ 单卡渲染：结构化 JSON 或沙箱 HTML
 │   │   ├── CardBoard.tsx         # ★ 卡片流（App 自己的「桌面」）
 │   │   ├── CameraOverlay.tsx     # ★ 全屏相机 + 一颗大快门
-│   │   ├── ReminderOverlay.tsx   # 全屏食药提醒 + NFC 碰一碰 + 焦点陷阱
-│   │   ├── SosOverlay.tsx        # 一键 SOS + 15s 倒计时 + 双重确认
+│   │   ├── ReminderOverlay.tsx   # 食药/复诊提醒 + NFC 碰一碰 + 焦点陷阱
+│   │   ├── SosOverlay.tsx        # 一键 SOS：确认/发送/已记录/失败 + 急救拨号
+│   │   ├── ScreeningOverlay.tsx  # 1 分钟语音筛查（只上报派生特征）
+│   │   ├── FollowupSheet.tsx     # 复诊提醒：大字号日期/时间表单
 │   │   └── HealthCardSheet.tsx   # 跨境健康卡底部弹层 + 二维码 + 可打印
 │   ├── hooks/
 │   │   ├── useWakeWord.ts        # ★ 休眠/活跃 生命周期 + 唤醒词监听
-│   │   ├── useReminder.ts        # 提醒调度 + 10min/30min 升级状态机
-│   │   └── useGaitMonitor.ts     # 步态/跌倒监控生命周期 + 权限 + 离线持久化
+│   │   ├── useReminder.ts        # 提醒调度 + 10min/30min 升级状态机 + 升级上报回调
+│   │   └── useGaitMonitor.ts     # 步态/跌倒监控 + 权限 + 离线缓存 + 上传重放
 │   ├── lib/
 │   │   ├── signal.ts             # ★ 纯数学核心（唯一「传感器/VAD」被测模块）
 │   │   ├── intent.ts             # ★ 纯函数：文本 → 意图（keyword，可测）
-│   │   ├── cards.ts              # ★ 纯函数：本地卡片工厂 + 原话成待办卡（后端不可用时的兜底）
+│   │   ├── cards.ts              # ★ 纯函数：本地卡片工厂 + 原话成待办/复诊卡
+│   │   ├── notes.ts              # ★ 纯函数：随手记文本抽取、最新记录、笔记卡
+│   │   ├── datetime.ts           # ★ 纯函数：卡片时间格式化
 │   │   ├── checkin.ts            # ★ 纯函数：每日主动唠嗑是否需要触发（本地日历日）
 │   │   ├── native.ts             # ★ 原生壳桥接（window.__AuraNative 或 Capacitor AuraNative 插件）+ 桌面小组件 payload（纯函数）
 │   │   ├── analytics.ts          # ★ 隐私优先埋点：本地缓冲 + 批量上报
 │   │   ├── camera.ts             # ★ getUserMedia 摄像头（getUserMedia → 帧）
 │   │   ├── types.ts              # 共享领域类型（无运行时逻辑）
-│   │   ├── api.ts                # ★ 后端 + LLM + Agent + 埋点接口（6 个已接线，3 个 LLM 保持放空）
+│   │   ├── api.ts                # ★ 后端契约入口（7 个已接线，3 个 LLM 保持放空）
 │   │   ├── i18n.ts               # 手写双语字典（zh-HK/zh-MO/zh-CN）
 │   │   ├── audio.ts              # TTS / STT / 唤醒词 / 振幅表
-│   │   ├── vad.ts                # 浏览器胶水：AnalyserNode → 能量 VAD
+│   │   ├── vad.ts                # 浏览器胶水：AnalyserNode → 能量 VAD；1 分钟筛查录制
 │   │   ├── motion.ts             # 浏览器胶水：DeviceMotionEvent → GaitWindow
 │   │   ├── nfc.ts                # Web NFC 扫描/写入 + 手动兜底开关
-│   │   └── db.ts                 # IndexedDB 离线优先封装（~30 行，无库；v3 含 conversation store）
+│   │   └── db.ts                 # IndexedDB 离线优先封装（v4 含 conversation + notes）
 │   └── selfcheck.ts              # 纯函数断言自检（node 直接运行）
 ├── capacitor.config.ts           # ★ Android 壳配置（webDir=out）
 ├── android/                      # ★ Capacitor 生成的 Android 原生工程（含 AuraNative 插件）
@@ -143,7 +148,7 @@ web/
 └── next.config.mjs / postcss.config.mjs / package.json
 ```
 
-（★ = 本轮新增/改造。**分层原则**：`signal.ts`/`intent.ts`/`cards.ts`/`native.ts` 是**纯函数层**（不触碰 `window`），可被 `node` 直接断言；`audio/vad/motion/nfc/camera` 是**浏览器胶水层**；`api.ts` 是**后端唯一入口**。）
+（★ = 本轮新增/改造。**分层原则**：`signal.ts`/`intent.ts`/`cards.ts`/`notes.ts`/`datetime.ts`/`native.ts` 是**纯函数层**（不触碰 `window`），可被 `node` 直接断言；`audio/vad/motion/nfc/camera` 是**浏览器胶水层**；`api.ts` 是**后端唯一入口**。）
 
 ---
 
@@ -214,7 +219,7 @@ App = **通用卡片渲染器**。「显示什么」由意图 + Agent 决定：
 
 ### 5.9 数字人每天主动「唠嗑」评估（本次需求 4）
 
-- 纯函数 [checkin.ts](file:///Users/mac/Documents/hackthon/web/src/lib/checkin.ts)：`shouldCheckIn(lastAt, now)` 按**本地日历日**判断（不是 24h 计时 —— 长者的「早晨」才是触发点）。
+- 纯函数 [checkin.ts](file:///c:/Users/27843/Desktop/hack/MircoCare-GBA-main/web/src/lib/checkin.ts)：`shouldCheckIn(lastAt, now)` 按**本地日历日**判断（不是 24h 计时 —— 长者的「早晨」才是触发点）。
 - 启动时读 `meta/checkin` 的 `lastAt`：若跨天 → 记 `track("daily_checkin")`、写入 `lastAt`、**主动播报** `dailyCheckIn`（「早晨呀，今日精神點？有冇邊度唔舒服？」）并**接着进入聆听**，用长者的回答采集当日实况。
 - `ponytail:` 天花板：网页无法后台定时，只能在**下次打开 App**时触发；跨过它需要原生壳的 OS 级每日通知（§9）。
 
@@ -241,6 +246,31 @@ App = **通用卡片渲染器**。「显示什么」由意图 + Agent 决定：
 
 > 后台/锁屏时网页听不到名字（平台天花板，§7），因此「锁屏听到名字 → 主动询问」由 **Android 原生前台服务**接管：见 §9。
 
+### 5.12 复诊提醒（`kind: "followup"`）
+
+- 语音命中「覆诊 / 复诊 / 预约 / appointment」→ 调用 `openFollowup()`：停止唤醒监听、打开 [FollowupSheet.tsx](file:///c:/Users/27843/Desktop/hack/MircoCare-GBA-main/web/src/components/FollowupSheet.tsx)、播报提示。
+- 表单使用系统日期/时间选择器（**不做语音日期解析**，避免「下星期三」被听错），校验必须是未来时间。
+- 保存为 `ReminderItem { kind: "followup" }`，完全复用 `useReminder` 的调度、10/30 分钟升级和 IndexedDB 持久化。
+- [ReminderOverlay.tsx](file:///c:/Users/27843/Desktop/hack/MircoCare-GBA-main/web/src/components/ReminderOverlay.tsx) 按 `item.kind` 切换文案：复诊不会出现「食药 / 碰药盒 / NFC」。
+- 超时升级走 `postReminderEscalation`，家属端「通知记录」可见。
+
+> 平台天花板：网页关闭时不会到点弹窗，下次打开补提醒；原生定时通知需要 Android 壳。
+
+### 5.13 随手记（只存在本机）
+
+- 语音「记住… / 帮我记低…」→ `noteFromUtterance()` 去掉前缀后写入 IndexedDB `notes` store（v4）。
+- 语音「我记低咗咩 / 上次记咗咩」→ `latestNote()` 读最近一条，出卡片并用 TTS 复述。
+- 纯函数 [notes.ts](file:///c:/Users/27843/Desktop/hack/MircoCare-GBA-main/web/src/lib/notes.ts) 负责文本抽取、最新记录与卡片生成；[datetime.ts](file:///c:/Users/27843/Desktop/hack/MircoCare-GBA-main/web/src/lib/datetime.ts) 统一时间格式。
+- **笔记不上传后端**；埋点只记录 `note_saved` 的文本长度，不记录内容。
+- 语音不可用时，工具面板文字框输入同样命中这两个意图。
+
+### 5.14 语音筛查入口
+
+- 工具面板「语音筛查」打开 [ScreeningOverlay.tsx](file:///c:/Users/27843/Desktop/hack/MircoCare-GBA-main/web/src/components/ScreeningOverlay.tsx)。
+- 录 60 秒，仅计算 RMS / VAD 派生特征；`recordScreening(durationMs, onFrame, abortSignal)` 支持取消并释放麦克风。
+- 结束后 `POST /screening/sessions`；家属端显示「语音筛查 N 次」。
+- 原始音频不落盘、不出端；不会用 RMS 特征伪造 `riskIndex`。
+
 ---
 
 ## 6. 刻意的简化（ponytail 清单）与升级路径
@@ -249,21 +279,21 @@ App = **通用卡片渲染器**。「显示什么」由意图 + Agent 决定：
 
 | # | 位置 | 简化内容 | 天花板 | 升级路径 |
 |---|---|---|---|---|
-| 1 | [sw.js](file:///Users/mac/Documents/hackthon/web/public/sw.js#L1-L7) | 手写 SW：静态 cache-first、导航 network-first | 无 precache 版本管理 / 后台同步 | 换 workbox |
-| 2 | [globals.css](file:///Users/mac/Documents/hackthon/web/src/app/globals.css#L31-L42) | 焦点环覆盖 `:focus` 而非仅 `:focus-visible` + `!important` | 视觉上始终显示焦点环 | 无需升级：对长者/开关访问用户是**期望行为** |
-| 3 | [audio.ts](file:///Users/mac/Documents/hackthon/web/src/lib/audio.ts#L93-L98) | 口型 = 实时**振幅**，非音素 viseme | 嘴只会张合，不塑形 | Live2D + 真实 viseme 时间轴 |
-| 4 | [page.tsx](file:///Users/mac/Documents/hackthon/web/src/app/page.tsx#L119-L120) | TTS 口型用**合成正弦** | 与真实音素无关 | 把 TTS 输出接 analyser 或 Live2D 口型轨 |
-| 5 | [audio.ts](file:///Users/mac/Documents/hackthon/web/src/lib/audio.ts#L150-L158) | 网页端唤醒词**仅前台**监听 | 网页后台/锁屏听不到 | **已落地**：原生壳 `WakeListenService` 前台服务接管（§9.4） |
-| 6 | [intent.ts](file:///Users/mac/Documents/hackthon/web/src/lib/intent.ts#L1-L6) | 关键词匹配，**非 NLU** | 无同义改写 / 无槽位抽取 | 交给后端 Agent，本函数降级为离线兜底 |
-| 7 | [cards.ts](file:///Users/mac/Documents/hackthon/web/src/lib/cards.ts#L24-L26) | 天气为**演示值** | 非真实天气 | 后端 Agent 返回真实天气卡 |
-| 8 | [camera.ts](file:///Users/mac/Documents/hackthon/web/src/lib/camera.ts#L1-L4) | 浏览器 getUserMedia 路径 | 相机能力受浏览器限制 | 原生壳换更优相机插件，函数签名不变 |
-| 9 | [vad.ts](file:///Users/mac/Documents/hackthon/web/src/lib/vad.ts#L1-L7) | **能量阈值** VAD | 漏弱/低音语音，易被环境噪声触发 | 换 Silero（`onnxruntime-web`），契约 `{speech, ratio}` 不变 |
-| 10 | [motion.ts](file:///Users/mac/Documents/hackthon/web/src/lib/motion.ts#L1-L6) | 仅前台/亮屏采样 | 锁屏/后台即停采 | 原生壳 / BLE 穿戴持续供数 |
-| 11 | [Avatar.tsx](file:///Users/mac/Documents/hackthon/web/src/components/Avatar.tsx#L6-L10) | Canvas-2D 代替 Live2D | 拟真度有限 | 替换 `draw()` 为 `pixi-live2d-display`，仅需 `state`/`level` |
-| 12 | [HealthCardSheet.tsx](file:///Users/mac/Documents/hackthon/web/src/components/HealthCardSheet.tsx#L15-L17) | 引入 `qrcode` 依赖 | 多一个依赖 | 可接受：手写 RS 纠错 + 掩码不划算 |
-| 13 | [checkin.ts](file:///Users/mac/Documents/hackthon/web/src/lib/checkin.ts#L6-L10) | 每日唠嗑用**本地日历日**触发，且只在**下次打开 App** 时判定 | 关着的 App 不会主动叫人 | 原生壳 OS 级每日通知（§9） |
-| 14 | [page.tsx](file:///Users/mac/Documents/hackthon/web/src/app/page.tsx#L68-L70) | 用药计划的 `schedule`（如「早上」）不解析成真实 due time | 提醒在创建时即触发 | 后端返回显式 `dueAt`，或由 Agent 解析时间槽 |
-| 15 | [WakeListenService.java](file:///Users/mac/Documents/hackthon/web/android/app/src/main/java/com/auragba/app/WakeListenService.java) | 后台唤醒用**平台 `SpeechRecognizer` 短会话循环**近似常驻监听 | 耗电偏高、唤醒延迟略大 | 换端上关键字唤醒（Porcupine/Snowboy），`ACTION_START/STOP` 契约不变 |
+| 1 | [sw.js](file:///c:/Users/27843/Desktop/hack/MircoCare-GBA-main/web/public/sw.js#L1-L7) | 手写 SW：静态 cache-first、导航 network-first | 无 precache 版本管理 / 后台同步 | 换 workbox |
+| 2 | [globals.css](file:///c:/Users/27843/Desktop/hack/MircoCare-GBA-main/web/src/app/globals.css#L31-L42) | 焦点环覆盖 `:focus` 而非仅 `:focus-visible` + `!important` | 视觉上始终显示焦点环 | 无需升级：对长者/开关访问用户是**期望行为** |
+| 3 | [audio.ts](file:///c:/Users/27843/Desktop/hack/MircoCare-GBA-main/web/src/lib/audio.ts#L93-L98) | 口型 = 实时**振幅**，非音素 viseme | 嘴只会张合，不塑形 | Live2D + 真实 viseme 时间轴 |
+| 4 | [page.tsx](file:///c:/Users/27843/Desktop/hack/MircoCare-GBA-main/web/src/app/page.tsx#L119-L120) | TTS 口型用**合成正弦** | 与真实音素无关 | 把 TTS 输出接 analyser 或 Live2D 口型轨 |
+| 5 | [audio.ts](file:///c:/Users/27843/Desktop/hack/MircoCare-GBA-main/web/src/lib/audio.ts#L150-L158) | 网页端唤醒词**仅前台**监听 | 网页后台/锁屏听不到 | **已落地**：原生壳 `WakeListenService` 前台服务接管（§9.4） |
+| 6 | [intent.ts](file:///c:/Users/27843/Desktop/hack/MircoCare-GBA-main/web/src/lib/intent.ts#L1-L6) | 关键词匹配，**非 NLU** | 无同义改写 / 无槽位抽取 | 交给后端 Agent，本函数降级为离线兜底 |
+| 7 | [cards.ts](file:///c:/Users/27843/Desktop/hack/MircoCare-GBA-main/web/src/lib/cards.ts#L24-L26) | 天气为**演示值** | 非真实天气 | 后端 Agent 返回真实天气卡 |
+| 8 | [camera.ts](file:///c:/Users/27843/Desktop/hack/MircoCare-GBA-main/web/src/lib/camera.ts#L1-L4) | 浏览器 getUserMedia 路径 | 相机能力受浏览器限制 | 原生壳换更优相机插件，函数签名不变 |
+| 9 | [vad.ts](file:///c:/Users/27843/Desktop/hack/MircoCare-GBA-main/web/src/lib/vad.ts#L1-L7) | **能量阈值** VAD | 漏弱/低音语音，易被环境噪声触发 | 换 Silero（`onnxruntime-web`），契约 `{speech, ratio}` 不变 |
+| 10 | [motion.ts](file:///c:/Users/27843/Desktop/hack/MircoCare-GBA-main/web/src/lib/motion.ts#L1-L6) | 仅前台/亮屏采样 | 锁屏/后台即停采 | 原生壳 / BLE 穿戴持续供数 |
+| 11 | [Avatar.tsx](file:///c:/Users/27843/Desktop/hack/MircoCare-GBA-main/web/src/components/Avatar.tsx#L6-L10) | Canvas-2D 代替 Live2D | 拟真度有限 | 替换 `draw()` 为 `pixi-live2d-display`，仅需 `state`/`level` |
+| 12 | [HealthCardSheet.tsx](file:///c:/Users/27843/Desktop/hack/MircoCare-GBA-main/web/src/components/HealthCardSheet.tsx#L15-L17) | 引入 `qrcode` 依赖 | 多一个依赖 | 可接受：手写 RS 纠错 + 掩码不划算 |
+| 13 | [checkin.ts](file:///c:/Users/27843/Desktop/hack/MircoCare-GBA-main/web/src/lib/checkin.ts#L6-L10) | 每日唠嗑用**本地日历日**触发，且只在**下次打开 App** 时判定 | 关着的 App 不会主动叫人 | 原生壳 OS 级每日通知（§9） |
+| 14 | [page.tsx](file:///c:/Users/27843/Desktop/hack/MircoCare-GBA-main/web/src/app/page.tsx#L68-L70) | 用药计划的 `schedule`（如「早上」）不解析成真实 due time | 提醒在创建时即触发 | 后端返回显式 `dueAt`，或由 Agent 解析时间槽 |
+| 15 | [WakeListenService.java](file:///c:/Users/27843/Desktop/hack/MircoCare-GBA-main/web/android/app/src/main/java/com/auragba/app/WakeListenService.java) | 后台唤醒用**平台 `SpeechRecognizer` 短会话循环**近似常驻监听 | 耗电偏高、唤醒延迟略大 | 换端上关键字唤醒（Porcupine/Snowboy），`ACTION_START/STOP` 契约不变 |
 
 > 「有效语音门控」的阈值（`VOICE_PEAK_MIN = 0.08`、最短 2 字）是**真实硬件标定**，不是可以偷懒的地方；不同手机的麦克风增益不同，上线前需用目标机型校准（`page.tsx` 顶部常量）。
 
@@ -284,6 +314,7 @@ Web PWA **无法真正「接管」锁屏 / 桌面 / 前台**；以下是**浏览
 | **前台唤醒词**（本轮已实现） | ✅ 需 App 前台 + 亮屏 + 一次手势授权 | — |
 | **摄像头**（本轮已实现） | ✅ 需 HTTPS/localhost + 授权 | — |
 | 后台/息屏传感器采样 | ⚠️ 锁屏即停采 | 原生壳 / BLE 穿戴 |
+| 准时提醒（吃药 / 复诊） | ⚠️ App 关闭时不会到点弹窗，下次打开补提醒 | 原生定时通知 |
 | 震动 `navigator.vibrate` | ⚠️ 仅 Android Chrome | 原生 |
 | Web NFC 碰一碰 | ⚠️ 仅 Android Chrome | 原生 NFC |
 
@@ -293,7 +324,7 @@ Web PWA **无法真正「接管」锁屏 / 桌面 / 前台**；以下是**浏览
 
 ## 8. 需要后端实现什么（交付契约）
 
-所有后端交互集中在 [api.ts](file:///Users/mac/Documents/hackthon/web/src/lib/api.ts)。前端已冻结类型，后端**只需实现下列契约函数**并遵守隐私契约。
+所有后端交互集中在 [api.ts](file:///c:/Users/27843/Desktop/hack/MircoCare-GBA-main/web/src/lib/api.ts)。前端已冻结类型，后端**只需实现下列契约函数**并遵守隐私契约。
 
 > **实现状态（后端已交付）**：`backend/`（FastAPI）已实现全部契约端点。其中 **7 个接入真实后端逻辑并返回 204/200**（`#1–#4`、`#7`、`#8`、`#10`），**3 个 LLM 编排端点按约定返回 HTTP 501**（`#5 assistantChat`、`#6 getAgentCards`、`#9 getMedicationPlan`），以此触发前端的本地兜底路径（本地卡片工厂 / 本地提醒）。前端 `api.ts` 仅在 7 个非 LLM 函数体接线；3 个 LLM 函数体保持抛 `NOT_IMPLEMENTED`。详见 §8.7。
 
@@ -314,7 +345,7 @@ Web PWA **无法真正「接管」锁屏 / 桌面 / 前台**；以下是**浏览
 | 9 | **`getMedicationPlan(req)`** | `POST /medication/plan` | `MedicationPlanRequest` | **`MedicationPlan`** | ⏸ **501（LLM 放空）** |
 | 10 | **`postReminderEscalation(e)`** | `POST /reminders/escalate` | `ReminderEscalation` | `void` | ✅ 已实现（204，记录超时事件 + 家属 outbox） |
 
-> #8 / #9 是本次新增（需求 3、6）。前端会**先落本地再上报**，因此 #8 偶发失败不丢记忆；#9 失败则回退本地提醒。返回 501 的 3 个 LLM 端点与前端 `NOT_IMPLEMENTED` 一一对应，联调时前端按既定策略自动兜底，不报错。
+> #8 / #9 是需求 3、6 新增；#10 为提醒超时升级新增。前端会**先落本地再上报**，因此 #8 偶发失败不丢记忆；#9 失败则回退本地提醒。返回 501 的 3 个 LLM 端点与前端 `NOT_IMPLEMENTED` 一一对应，联调时前端按既定策略自动兜底，不报错。
 
 ### 8.2 Agent 卡片契约（本轮新增，重点）
 
@@ -395,7 +426,7 @@ interface HomeWidgetPayload {   // homeWidgetPayload() 纯函数已实现并自�
 4. **派生特征入库与趋势**：`cv`、步频、筛查特征的长期趋势是「跌倒前预警」的数据基础。
 5. **合规**：存储与跨境传输满足 HK PDPO / 澳门 PDPA / PIPL；最小化 + 加密 + 可撤回同意。
 6. **健康卡同步**：`GET /health-card/me` 支持家属/诊所更新与版本号。
-7. **建议补齐**：`POST /reminders`（提醒同步）、离线队列回传（IndexedDB 已存，暂无 flush 触发点，可按需在 `analytics.flush()` 模式上扩展）。
+7. **提醒与离线队列**：`POST /reminders/escalate` 已实现（超时事件 + 家属 outbox）；步态窗口已接上传并在启动时重放未发送队列。仍建议补齐 `POST /reminders`（用药计划同步）以及埋点的定时 flush / 容量上限。
 
 ### 8.6 会话记忆 & 用药计划契约（本次新增）
 
@@ -476,7 +507,7 @@ backend/
 
 **依赖与降级**：本机 **未安装** `librosa` / `soundfile` / `opensmile` / `scikit-learn` / `lightgbm` / `xgboost` / `sentence-transformers` / `jieba`，因此全部走**纯 numpy 优雅降级**实现；每个回退点用 `ponytail:` 注释标明天花板与升级路径，装上对应依赖即自动切换到正式实现。**LLM / ASR 远程 API 按要求放空**（`asr.transcribe_via_remote_api` 抛 `NotImplementedError`，3 个编排端点返回 501）。
 
-**验证结果**：`python3 selfcheck.py` → `selfcheck: OK`；9 个契约端点 HTTP 实测通过（6 个 204/200、3 个 501）；浏览器级联调确认 PWA 发出 `POST /telemetry/events` 并成功落库、服务端二次擦除 `props`、无 CORS / 控制台错误；前端 `typecheck` 与 `build` 均通过。
+**验证结果（历史记录）**：`python3 selfcheck.py` → `selfcheck: OK`；原有 9 个契约端点 HTTP 实测通过（6 个 204/200、3 个 501；当时尚未新增 `/reminders/escalate`）；浏览器级联调确认 PWA 发出 `POST /telemetry/events` 并成功落库、服务端二次擦除 `props`、无 CORS / 控制台错误；前端 `typecheck` 与 `build` 均通过。
 
 ---
 
@@ -518,7 +549,7 @@ cd android && ./gradlew assembleDebug    # 产物：android/app/build/outputs/ap
 
 ### 9.4 原生能力清单（需求 2：后台唤醒已实现）
 
-1. ✅ **`startBackgroundWake` / `stopBackgroundWake`（已实现）** —— `AuraNativePlugin` 先申请 `RECORD_AUDIO`（`@CapacitorPlugin` 权限别名 `mic` + `@PermissionCallback`），再以 `START_STICKY` 启动前台服务 [`WakeListenService`](file:///Users/mac/Documents/hackthon/web/android/app/src/main/java/com/auragba/app/WakeListenService.java)：常驻通知（渠道 `aura_wake`、`FOREGROUND_SERVICE_TYPE_MICROPHONE`）+ `SpeechRecognizer` 识别循环（`onPartialResults`/`onResults` 命中名字列表「灵犀 / 靈犀 / lingxi / 小灵 / 灵西」即 `startActivity(MainActivity)` 前置）。**这一步真正跨过「锁屏听不到唤醒词」的天花板**；回到前台后由 §5.11 的 `visibilitychange` 续聊，或由前景唤醒逻辑走 `wakeGreeting`。前端已在启动及唤醒开关切换时调用它。
+1. ✅ **`startBackgroundWake` / `stopBackgroundWake`（已实现）** —— `AuraNativePlugin` 先申请 `RECORD_AUDIO`（`@CapacitorPlugin` 权限别名 `mic` + `@PermissionCallback`），再以 `START_STICKY` 启动前台服务 [`WakeListenService`](file:///c:/Users/27843/Desktop/hack/MircoCare-GBA-main/web/android/app/src/main/java/com/auragba/app/WakeListenService.java)：常驻通知（渠道 `aura_wake`、`FOREGROUND_SERVICE_TYPE_MICROPHONE`）+ `SpeechRecognizer` 识别循环（`onPartialResults`/`onResults` 命中名字列表「灵犀 / 靈犀 / lingxi / 小灵 / 灵西」即 `startActivity(MainActivity)` 前置）。**这一步真正跨过「锁屏听不到唤醒词」的天花板**；回到前台后由 §5.11 的 `visibilitychange` 续聊，或由前景唤醒逻辑走 `wakeGreeting`。前端已在启动及唤醒开关切换时调用它。
 2. ⏳ `updateHomeWidget` —— 把 `HomeWidgetPayload` 落到 `SharedPreferences` 并 `AppWidgetManager` 通知 AppWidgetProvider 重绘。
 3. ⏳ `bringToForeground` —— deep link / 通知点击把 WebView 前置；配合原生**每日通知**触发 §5.9 的唠嗑。
 4. ⏳ 原生 `SpeechRecognizer` / TTS 可选替换 WebView 的 Web Speech，提升中文识别率（注意：前台服务已用原生 `SpeechRecognizer`，可与之统一）。
