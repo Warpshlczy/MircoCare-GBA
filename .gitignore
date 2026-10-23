@@ -41,8 +41,8 @@ dist/
 build/
 
 # WorkBuddy local runtime state (sessions, caches, scratch files).
-# NOTE: .workbuddy/memory/*.md is intentionally tracked — it is the team's
-# shared work log — so it is explicitly re-included below.
+# .workbuddy/memory/ is strictly PRIVATE — never tracked, never shared,
+# not a team log. Do NOT add re-include rules for it.
 .workbuddy/*
 .workbuddy/memory/
 .workbuddy/memory/**

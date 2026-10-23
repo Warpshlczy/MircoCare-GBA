@@ -1,0 +1,568 @@
+{
+  "n_by_group": {
+    "CTRL_age": 164,
+    "MCI": 59,
+    "dementia": 36,
+    "at_risk": 30
+  },
+  "comparisons": {
+    "dementia_vs_CTRL_age": {
+      "task1_score": {
+        "median_g1": 4.0,
+        "median_g2": 1.0,
+        "cliffs_delta": 0.646,
+        "p_approx": 0.0
+      },
+      "task2_score": {
+        "median_g1": 4.0,
+        "median_g2": 1.0,
+        "cliffs_delta": 0.817,
+        "p_approx": 0.0
+      },
+      "task3_score": {
+        "median_g1": 4.0,
+        "median_g2": 1.0,
+        "cliffs_delta": 0.702,
+        "p_approx": 0.0
+      },
+      "task4_score": {
+        "median_g1": 4.0,
+        "median_g2": 1.0,
+        "cliffs_delta": 0.813,
+        "p_approx": 0.0
+      },
+      "task5_score": {
+        "median_g1": 2.5,
+        "median_g2": 1.0,
+        "cliffs_delta": 0.749,
+        "p_approx": 0.0
+      },
+      "task6_score": {
+        "median_g1": 4.0,
+        "median_g2": 1.0,
+        "cliffs_delta": 0.553,
+        "p_approx": 0.0
+      },
+      "task7_score": {
+        "median_g1": 3.0,
+        "median_g2": 2.0,
+        "cliffs_delta": 0.552,
+        "p_approx": 0.0001
+      },
+      "task8_score": {
+        "median_g1": 4.0,
+        "median_g2": 1.0,
+        "cliffs_delta": 0.425,
+        "p_approx": 0.0024
+      },
+      "tasks_sum": {
+        "median_g1": 28.0,
+        "median_g2": 14.0,
+        "cliffs_delta": 0.688,
+        "p_approx": 0.0
+      },
+      "dayout_accuracy": {
+        "median_g1": 26.0,
+        "median_g2": 12.0,
+        "cliffs_delta": 0.989,
+        "p_approx": 0.0
+      },
+      "dayout_sequencing": {
+        "median_g1": 1.5,
+        "median_g2": 4.0,
+        "cliffs_delta": -0.725,
+        "p_approx": 0.0018
+      },
+      "session_dur_min": {
+        "median_g1": 179.7850981166667,
+        "median_g2": 169.9739768166666,
+        "cliffs_delta": 0.11,
+        "p_approx": 0.4277
+      },
+      "n_events": {
+        "median_g1": 3845.5,
+        "median_g2": 4275.0,
+        "cliffs_delta": -0.237,
+        "p_approx": 0.0857
+      },
+      "events_per_min": {
+        "median_g1": 23.741241267574573,
+        "median_g2": 24.987107073537558,
+        "cliffs_delta": -0.18,
+        "p_approx": 0.1927
+      },
+      "n_motion_events": {
+        "median_g1": 3289.0,
+        "median_g2": 3452.0,
+        "cliffs_delta": -0.175,
+        "p_approx": 0.2053
+      },
+      "n_door_events": {
+        "median_g1": 43.5,
+        "median_g2": 68.0,
+        "cliffs_delta": -0.603,
+        "p_approx": 0.0
+      },
+      "n_item_events": {
+        "median_g1": 11.0,
+        "median_g2": 18.0,
+        "cliffs_delta": -0.517,
+        "p_approx": 0.0002
+      },
+      "n_light_events": {
+        "median_g1": 3.0,
+        "median_g2": 2.0,
+        "cliffs_delta": -0.094,
+        "p_approx": 0.4881
+      },
+      "motion_ratio": {
+        "median_g1": 0.8630019057322917,
+        "median_g2": 0.8214829862874555,
+        "cliffs_delta": 0.276,
+        "p_approx": 0.0456
+      },
+      "unique_sensors": {
+        "median_g1": 57.5,
+        "median_g2": 58.0,
+        "cliffs_delta": -0.145,
+        "p_approx": 0.2943
+      },
+      "sensor_diversity": {
+        "median_g1": 0.013801781776938818,
+        "median_g2": 0.013803680981595092,
+        "cliffs_delta": 0.033,
+        "p_approx": 0.8138
+      },
+      "on_off_balance": {
+        "median_g1": 0.3988364653695801,
+        "median_g2": 0.3649164677804296,
+        "cliffs_delta": 0.48,
+        "p_approx": 0.0005
+      },
+      "_significant_sorted_by_effect": [
+        {
+          "metric": "dayout_accuracy",
+          "cliffs_delta": 0.989,
+          "p": 0.0
+        },
+        {
+          "metric": "task2_score",
+          "cliffs_delta": 0.817,
+          "p": 0.0
+        },
+        {
+          "metric": "task4_score",
+          "cliffs_delta": 0.813,
+          "p": 0.0
+        },
+        {
+          "metric": "task5_score",
+          "cliffs_delta": 0.749,
+          "p": 0.0
+        },
+        {
+          "metric": "dayout_sequencing",
+          "cliffs_delta": -0.725,
+          "p": 0.0018
+        },
+        {
+          "metric": "task3_score",
+          "cliffs_delta": 0.702,
+          "p": 0.0
+        },
+        {
+          "metric": "tasks_sum",
+          "cliffs_delta": 0.688,
+          "p": 0.0
+        },
+        {
+          "metric": "task1_score",
+          "cliffs_delta": 0.646,
+          "p": 0.0
+        },
+        {
+          "metric": "n_door_events",
+          "cliffs_delta": -0.603,
+          "p": 0.0
+        },
+        {
+          "metric": "task6_score",
+          "cliffs_delta": 0.553,
+          "p": 0.0
+        }
+      ]
+    },
+    "MCI_vs_CTRL_age": {
+      "task1_score": {
+        "median_g1": 2.0,
+        "median_g2": 1.0,
+        "cliffs_delta": 0.221,
+        "p_approx": 0.0055
+      },
+      "task2_score": {
+        "median_g1": 2.0,
+        "median_g2": 1.0,
+        "cliffs_delta": 0.362,
+        "p_approx": 0.0
+      },
+      "task3_score": {
+        "median_g1": 2.0,
+        "median_g2": 1.0,
+        "cliffs_delta": 0.256,
+        "p_approx": 0.0011
+      },
+      "task4_score": {
+        "median_g1": 2.0,
+        "median_g2": 1.0,
+        "cliffs_delta": 0.302,
+        "p_approx": 0.0002
+      },
+      "task5_score": {
+        "median_g1": 1.0,
+        "median_g2": 1.0,
+        "cliffs_delta": 0.053,
+        "p_approx": 0.1906
+      },
+      "task6_score": {
+        "median_g1": 4.0,
+        "median_g2": 1.0,
+        "cliffs_delta": 0.236,
+        "p_approx": 0.0023
+      },
+      "task7_score": {
+        "median_g1": 2.5,
+        "median_g2": 2.0,
+        "cliffs_delta": 0.211,
+        "p_approx": 0.0128
+      },
+      "task8_score": {
+        "median_g1": 3.0,
+        "median_g2": 1.0,
+        "cliffs_delta": 0.227,
+        "p_approx": 0.0062
+      },
+      "tasks_sum": {
+        "median_g1": 17.5,
+        "median_g2": 14.0,
+        "cliffs_delta": 0.424,
+        "p_approx": 0.0
+      },
+      "dayout_accuracy": {
+        "median_g1": 14.0,
+        "median_g2": 12.0,
+        "cliffs_delta": 0.404,
+        "p_approx": 0.0002
+      },
+      "dayout_sequencing": {
+        "median_g1": 4.0,
+        "median_g2": 4.0,
+        "cliffs_delta": -0.118,
+        "p_approx": 0.2617
+      },
+      "session_dur_min": {
+        "median_g1": 179.74584999166666,
+        "median_g2": 169.9739768166666,
+        "cliffs_delta": 0.202,
+        "p_approx": 0.0256
+      },
+      "n_events": {
+        "median_g1": 4307.0,
+        "median_g2": 4275.0,
+        "cliffs_delta": 0.033,
+        "p_approx": 0.7175
+      },
+      "events_per_min": {
+        "median_g1": 24.400124249173736,
+        "median_g2": 24.987107073537558,
+        "cliffs_delta": -0.083,
+        "p_approx": 0.3613
+      },
+      "n_motion_events": {
+        "median_g1": 3491.5,
+        "median_g2": 3452.0,
+        "cliffs_delta": 0.024,
+        "p_approx": 0.7949
+      },
+      "n_door_events": {
+        "median_g1": 66.0,
+        "median_g2": 68.0,
+        "cliffs_delta": 0.08,
+        "p_approx": 0.3793
+      },
+      "n_item_events": {
+        "median_g1": 18.0,
+        "median_g2": 18.0,
+        "cliffs_delta": -0.011,
+        "p_approx": 0.9011
+      },
+      "n_light_events": {
+        "median_g1": 2.0,
+        "median_g2": 2.0,
+        "cliffs_delta": -0.087,
+        "p_approx": 0.3302
+      },
+      "motion_ratio": {
+        "median_g1": 0.8098656165500908,
+        "median_g2": 0.8214829862874555,
+        "cliffs_delta": -0.05,
+        "p_approx": 0.5806
+      },
+      "unique_sensors": {
+        "median_g1": 59.0,
+        "median_g2": 58.0,
+        "cliffs_delta": 0.089,
+        "p_approx": 0.325
+      },
+      "sensor_diversity": {
+        "median_g1": 0.014033304449124331,
+        "median_g2": 0.013803680981595092,
+        "cliffs_delta": 0.053,
+        "p_approx": 0.5629
+      },
+      "on_off_balance": {
+        "median_g1": 0.367928863808308,
+        "median_g2": 0.3649164677804296,
+        "cliffs_delta": 0.011,
+        "p_approx": 0.9075
+      },
+      "_significant_sorted_by_effect": [
+        {
+          "metric": "tasks_sum",
+          "cliffs_delta": 0.424,
+          "p": 0.0
+        },
+        {
+          "metric": "dayout_accuracy",
+          "cliffs_delta": 0.404,
+          "p": 0.0002
+        },
+        {
+          "metric": "task2_score",
+          "cliffs_delta": 0.362,
+          "p": 0.0
+        },
+        {
+          "metric": "task4_score",
+          "cliffs_delta": 0.302,
+          "p": 0.0002
+        },
+        {
+          "metric": "task3_score",
+          "cliffs_delta": 0.256,
+          "p": 0.0011
+        },
+        {
+          "metric": "task6_score",
+          "cliffs_delta": 0.236,
+          "p": 0.0023
+        },
+        {
+          "metric": "task8_score",
+          "cliffs_delta": 0.227,
+          "p": 0.0062
+        },
+        {
+          "metric": "task1_score",
+          "cliffs_delta": 0.221,
+          "p": 0.0055
+        },
+        {
+          "metric": "task7_score",
+          "cliffs_delta": 0.211,
+          "p": 0.0128
+        },
+        {
+          "metric": "session_dur_min",
+          "cliffs_delta": 0.202,
+          "p": 0.0256
+        }
+      ]
+    },
+    "dementia_vs_MCI": {
+      "task1_score": {
+        "median_g1": 4.0,
+        "median_g2": 2.0,
+        "cliffs_delta": 0.461,
+        "p_approx": 0.0022
+      },
+      "task2_score": {
+        "median_g1": 4.0,
+        "median_g2": 2.0,
+        "cliffs_delta": 0.601,
+        "p_approx": 0.0001
+      },
+      "task3_score": {
+        "median_g1": 4.0,
+        "median_g2": 2.0,
+        "cliffs_delta": 0.47,
+        "p_approx": 0.0023
+      },
+      "task4_score": {
+        "median_g1": 4.0,
+        "median_g2": 2.0,
+        "cliffs_delta": 0.631,
+        "p_approx": 0.0
+      },
+      "task5_score": {
+        "median_g1": 2.5,
+        "median_g2": 1.0,
+        "cliffs_delta": 0.685,
+        "p_approx": 0.0
+      },
+      "task6_score": {
+        "median_g1": 4.0,
+        "median_g2": 4.0,
+        "cliffs_delta": 0.321,
+        "p_approx": 0.0263
+      },
+      "task7_score": {
+        "median_g1": 3.0,
+        "median_g2": 2.5,
+        "cliffs_delta": 0.372,
+        "p_approx": 0.0207
+      },
+      "task8_score": {
+        "median_g1": 4.0,
+        "median_g2": 3.0,
+        "cliffs_delta": 0.212,
+        "p_approx": 0.1613
+      },
+      "tasks_sum": {
+        "median_g1": 28.0,
+        "median_g2": 17.5,
+        "cliffs_delta": 0.498,
+        "p_approx": 0.0013
+      },
+      "dayout_accuracy": {
+        "median_g1": 26.0,
+        "median_g2": 14.0,
+        "cliffs_delta": 0.898,
+        "p_approx": 0.0005
+      },
+      "dayout_sequencing": {
+        "median_g1": 1.5,
+        "median_g2": 4.0,
+        "cliffs_delta": -0.644,
+        "p_approx": 0.0107
+      },
+      "session_dur_min": {
+        "median_g1": 179.7850981166667,
+        "median_g2": 179.74584999166666,
+        "cliffs_delta": -0.048,
+        "p_approx": 0.7546
+      },
+      "n_events": {
+        "median_g1": 3845.5,
+        "median_g2": 4307.0,
+        "cliffs_delta": -0.234,
+        "p_approx": 0.1237
+      },
+      "events_per_min": {
+        "median_g1": 23.741241267574573,
+        "median_g2": 24.400124249173736,
+        "cliffs_delta": -0.107,
+        "p_approx": 0.4828
+      },
+      "n_motion_events": {
+        "median_g1": 3289.0,
+        "median_g2": 3491.5,
+        "cliffs_delta": -0.195,
+        "p_approx": 0.2006
+      },
+      "n_door_events": {
+        "median_g1": 43.5,
+        "median_g2": 66.0,
+        "cliffs_delta": -0.641,
+        "p_approx": 0.0
+      },
+      "n_item_events": {
+        "median_g1": 11.0,
+        "median_g2": 18.0,
+        "cliffs_delta": -0.502,
+        "p_approx": 0.0009
+      },
+      "n_light_events": {
+        "median_g1": 3.0,
+        "median_g2": 2.0,
+        "cliffs_delta": 0.005,
+        "p_approx": 0.9758
+      },
+      "motion_ratio": {
+        "median_g1": 0.8630019057322917,
+        "median_g2": 0.8098656165500908,
+        "cliffs_delta": 0.307,
+        "p_approx": 0.0431
+      },
+      "unique_sensors": {
+        "median_g1": 57.5,
+        "median_g2": 59.0,
+        "cliffs_delta": -0.243,
+        "p_approx": 0.1094
+      },
+      "sensor_diversity": {
+        "median_g1": 0.013801781776938818,
+        "median_g2": 0.014033304449124331,
+        "cliffs_delta": -0.021,
+        "p_approx": 0.8921
+      },
+      "on_off_balance": {
+        "median_g1": 0.3988364653695801,
+        "median_g2": 0.367928863808308,
+        "cliffs_delta": 0.505,
+        "p_approx": 0.0009
+      },
+      "_significant_sorted_by_effect": [
+        {
+          "metric": "dayout_accuracy",
+          "cliffs_delta": 0.898,
+          "p": 0.0005
+        },
+        {
+          "metric": "task5_score",
+          "cliffs_delta": 0.685,
+          "p": 0.0
+        },
+        {
+          "metric": "dayout_sequencing",
+          "cliffs_delta": -0.644,
+          "p": 0.0107
+        },
+        {
+          "metric": "n_door_events",
+          "cliffs_delta": -0.641,
+          "p": 0.0
+        },
+        {
+          "metric": "task4_score",
+          "cliffs_delta": 0.631,
+          "p": 0.0
+        },
+        {
+          "metric": "task2_score",
+          "cliffs_delta": 0.601,
+          "p": 0.0001
+        },
+        {
+          "metric": "on_off_balance",
+          "cliffs_delta": 0.505,
+          "p": 0.0009
+        },
+        {
+          "metric": "n_item_events",
+          "cliffs_delta": -0.502,
+          "p": 0.0009
+        },
+        {
+          "metric": "tasks_sum",
+          "cliffs_delta": 0.498,
+          "p": 0.0013
+        },
+        {
+          "metric": "task3_score",
+          "cliffs_delta": 0.47,
+          "p": 0.0023
+        }
+      ]
+    }
+  }
+}
