@@ -3,7 +3,7 @@
 import type {
   GaitWindow, ScreeningSession, SosEvent, HealthCard, Locale, AgentCard,
   AgentIntentRequest, TelemetryEvent, ConversationTurn, MedicationPlan,
-  MedicationPlanRequest,
+  MedicationPlanRequest, ReminderKind,
 } from "./types";
 
 export interface AssistantMessage { role: "system" | "user" | "assistant"; content: string; }
@@ -151,6 +151,17 @@ export async function postTelemetry(events: TelemetryEvent[]): Promise<void> {
 }
 export async function postConversationMemory(turn: ConversationTurn): Promise<void> {
   await request<void>("/conversation/turns", { method: "POST", body: JSON.stringify(turn) });
+}
+/** Coarse reminder-timeout event: no medication name or free text crosses the boundary. */
+export interface ReminderEscalation {
+  id: string;
+  at: number;
+  locale: Locale;
+  kind: ReminderKind;
+  stage: "notify-caregiver";
+}
+export async function postReminderEscalation(e: ReminderEscalation): Promise<void> {
+  await request<void>("/reminders/escalate", { method: "POST", body: JSON.stringify(e) });
 }
 export async function getMedicationPlan(_req: MedicationPlanRequest): Promise<MedicationPlan> {
   throw new Error("NOT_IMPLEMENTED: /medication/plan");

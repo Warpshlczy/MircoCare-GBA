@@ -113,6 +113,20 @@ class ConversationTurn(_Base):
     locale: Locale
 
 
+class ReminderEscalation(_Base):
+    """A reminder that timed out and reached the caregiver-escalation stage.
+
+    Deliberately carries no medication name or free text: the family outbox only
+    needs "this reminder was missed", not the senior's health details.
+    """
+
+    id: str
+    at: int
+    locale: Locale
+    kind: Literal["med", "followup"] = "med"
+    stage: Literal["notify-caregiver"] = "notify-caregiver"
+
+
 class MedicationPlanItem(_Base):
     name: str
     dosage: str

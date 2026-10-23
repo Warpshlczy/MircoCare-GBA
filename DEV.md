@@ -28,7 +28,7 @@
 | 手机端 | **Android 原生版本**：Capacitor 6 壳 + 自定义 `AuraNative` 插件（见 §9） |
 | 生产依赖 | 6 个：`next` / `react` / `react-dom` / `qrcode` / `@capacitor/core` / `@capacitor/android` |
 | 源码文件 | 27 个 `.ts/.tsx` + 1 份自检脚本（见 §4 目录结构） |
-| 后端接口 | **9 个**函数，位于 `web/src/lib/api.ts`。**6 个已接线到 `backend/`**（`postGaitWindow`/`postScreeningSession`/`postSos`/`getHealthCard`/`postTelemetry`/`postConversationMemory`）；**3 个 LLM 接口按要求保持放空抛 `NOT_IMPLEMENTED`**（`assistantChat`/`getAgentCards`/`getMedicationPlan`） |
+| 后端接口 | **10 个**函数，位于 `web/src/lib/api.ts`。**7 个已接线到 `backend/`**（`postGaitWindow`/`postScreeningSession`/`postSos`/`getHealthCard`/`postTelemetry`/`postConversationMemory`/`postReminderEscalation`）；**3 个 LLM 接口按要求保持放空抛 `NOT_IMPLEMENTED`**（`assistantChat`/`getAgentCards`/`getMedicationPlan`） |
 | 后端服务 | `backend/`（Python / FastAPI）：MCI/AD 多模态筛查引擎，隐私优先、个人基线 Z-score、双流融合、STEMB 经济与 SaMD 审计。见 §8.7 |
 
 ### 1.2 如何运行
@@ -293,9 +293,9 @@ Web PWA **无法真正「接管」锁屏 / 桌面 / 前台**；以下是**浏览
 
 ## 8. 需要后端实现什么（交付契约）
 
-所有后端交互集中在 [api.ts](file:///Users/mac/Documents/hackthon/web/src/lib/api.ts)。前端已冻结类型，后端**只需实现下列 9 个函数**并遵守隐私契约。
+所有后端交互集中在 [api.ts](file:///Users/mac/Documents/hackthon/web/src/lib/api.ts)。前端已冻结类型，后端**只需实现下列契约函数**并遵守隐私契约。
 
-> **实现状态（后端已交付）**：`backend/`（FastAPI）已实现全部 9 个端点。其中 **6 个接入真实后端逻辑并返回 204/200**（`#1–#4`、`#7`、`#8`），**3 个 LLM 编排端点按约定返回 HTTP 501**（`#5 assistantChat`、`#6 getAgentCards`、`#9 getMedicationPlan`），以此触发前端的本地兜底路径（本地卡片工厂 / 本地提醒）。前端 `api.ts` 仅在 6 个非 LLM 函数体接线；3 个 LLM 函数体保持抛 `NOT_IMPLEMENTED`。详见 §8.7。
+> **实现状态（后端已交付）**：`backend/`（FastAPI）已实现全部契约端点。其中 **7 个接入真实后端逻辑并返回 204/200**（`#1–#4`、`#7`、`#8`、`#10`），**3 个 LLM 编排端点按约定返回 HTTP 501**（`#5 assistantChat`、`#6 getAgentCards`、`#9 getMedicationPlan`），以此触发前端的本地兜底路径（本地卡片工厂 / 本地提醒）。前端 `api.ts` 仅在 7 个非 LLM 函数体接线；3 个 LLM 函数体保持抛 `NOT_IMPLEMENTED`。详见 §8.7。
 
 **绑定式隐私契约**（`api.ts` 头部注释已写明）：原始音频 / 原始传感器流**不得出端**；只上传 VAD 裁剪后的派生特征与粗粒度埋点；仅携带假名 `DeviceId`；对齐 HK PDPO、澳门个人数据保护法（PDPA）、PIPL。
 
@@ -312,6 +312,7 @@ Web PWA **无法真正「接管」锁屏 / 桌面 / 前台**；以下是**浏览
 | 7 | **`postTelemetry(events)`** | `POST /telemetry/events` | `TelemetryEvent[]` | `void` | ✅ 已实现（204，服务端二次脱敏） |
 | 8 | **`postConversationMemory(turn)`** | `POST /conversation/turns` | `ConversationTurn` | `void` | ✅ 已实现（204，按假名归档） |
 | 9 | **`getMedicationPlan(req)`** | `POST /medication/plan` | `MedicationPlanRequest` | **`MedicationPlan`** | ⏸ **501（LLM 放空）** |
+| 10 | **`postReminderEscalation(e)`** | `POST /reminders/escalate` | `ReminderEscalation` | `void` | ✅ 已实现（204，记录超时事件 + 家属 outbox） |
 
 > #8 / #9 是本次新增（需求 3、6）。前端会**先落本地再上报**，因此 #8 偶发失败不丢记忆；#9 失败则回退本地提醒。返回 501 的 3 个 LLM 端点与前端 `NOT_IMPLEMENTED` 一一对应，联调时前端按既定策略自动兜底，不报错。
 
@@ -467,7 +468,7 @@ backend/
     │   ├── semantic.py         # 流 B：文本分类器（sklearn 优先，否则 logistic）
     │   └── fusion.py           # 晚期融合：加权归一化得到 0.0–1.0 综合风险指数
     └── api/
-        ├── contract_routes.py  # 上表 9 个前端契约端点
+        ├── contract_routes.py  # 上表前端契约端点
         └── insight_routes.py   # 附加：/screening/analyze、/baseline/me、/economics/me、/audit/screening、/health
 ```
 

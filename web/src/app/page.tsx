@@ -20,7 +20,7 @@ import {
 } from "@/lib/audio";
 import { parseIntent } from "@/lib/intent";
 import { localCardsFor, photoCard, todoCardFromUtterance } from "@/lib/cards";
-import { createPairingCode, ensureSeniorSession, getAgentCards, getHealthCard, getMedicationPlan, postConversationMemory } from "@/lib/api";
+import { createPairingCode, ensureSeniorSession, getAgentCards, getHealthCard, getMedicationPlan, postConversationMemory, postReminderEscalation } from "@/lib/api";
 import { all, get, put } from "@/lib/db";
 import { shouldCheckIn } from "@/lib/checkin";
 import { flush, track } from "@/lib/analytics";
@@ -108,7 +108,20 @@ export default function Page() {
   const [cards, setCards] = useState<AgentCard[]>([]);
   const [pairingCode, setPairingCode] = useState<string | null>(null);
 
-  const reminder = useReminder();
+  const reminder = useReminder([], {
+    onEscalate: (item) => {
+      track("reminder_escalated", locale, { kind: item.kind });
+      void postReminderEscalation({
+        id: item.id,
+        at: Date.now(),
+        locale,
+        kind: item.kind,
+        stage: "notify-caregiver",
+      }).catch(() => {
+        /* offline: the local escalation still shows; the outbox is the delivery seam */
+      });
+    },
+  });
   const gait = useGaitMonitor();
   const meterRef = useRef<{ getLevel: () => number; stop: () => void } | null>(null);
   const levelTimer = useRef<number | null>(null);

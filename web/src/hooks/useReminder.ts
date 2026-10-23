@@ -7,13 +7,20 @@ import type { ReminderItem } from "@/lib/types";
 
 const TICK_MS = 1000;
 
+export interface ReminderOptions {
+  /** Called once when a reminder crosses into the caregiver-escalation stage. */
+  onEscalate?: (item: ReminderItem) => void;
+}
+
 /** Schedules due reminders and drives the 10-min retry / 30-min caregiver escalation machine. */
-export function useReminder(initial: ReminderItem[] = []) {
+export function useReminder(initial: ReminderItem[] = [], options: ReminderOptions = {}) {
   const [items, setItems] = useState<ReminderItem[]>(initial);
   const [due, setDue] = useState<ReminderItem | null>(null);
   const [escalation, setEscalation] = useState<"none" | "retry" | "notify-caregiver">("none");
   const dueRef = useRef<ReminderItem | null>(null);
   dueRef.current = due;
+  const onEscalateRef = useRef(options.onEscalate);
+  onEscalateRef.current = options.onEscalate;
 
   // hydrate from IndexedDB (offline-first)
   useEffect(() => {
@@ -53,8 +60,15 @@ export function useReminder(initial: ReminderItem[] = []) {
       }
       const stage = escalationFor(now - active.dueAt);
       if (stage !== active.stage) {
+        const status: ReminderItem["status"] = stage === "notify-caregiver" ? "escalated" : "pending";
+        const next: ReminderItem = { ...active, stage, status };
+        // Keep the live `due` object in sync with the persisted item; otherwise
+        // `active.stage` stays stale and this branch re-fires every tick.
+        dueRef.current = next;
+        setDue(next);
         setEscalation(stage);
-        update({ ...active, stage, status: stage === "notify-caregiver" ? "escalated" : "pending" });
+        update(next);
+        if (stage === "notify-caregiver") onEscalateRef.current?.(next);
       }
     }, TICK_MS);
     return () => clearInterval(timer);

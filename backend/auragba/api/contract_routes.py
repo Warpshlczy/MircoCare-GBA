@@ -21,6 +21,7 @@ from ..contract import (
     GaitWindow,
     HealthCard,
     MedicationPlanRequest,
+    ReminderEscalation,
     ScreeningSession,
     SosEvent,
     TelemetryEvent,
@@ -108,6 +109,18 @@ def post_conversation_memory(turn: ConversationTurn, dev: str = Depends(device_i
     rest + TTL + explicit consent record.
     """
     store.record(dev, "conversation", {**turn.model_dump(), "text": scrub_text(turn.text, keep=True)})
+
+
+@router.post("/reminders/escalate", status_code=204)
+def post_reminder_escalation(e: ReminderEscalation, dev: str = Depends(device_id)) -> None:
+    """A reminder timed out. Record the coarse event and queue a family notice.
+
+    The outbox is the delivery seam: a provider worker (push/SMS/voice) consumes
+    it later. We never claim in the senior UI that a message was actually
+    delivered, only that the escalation was recorded.
+    """
+    store.record(dev, "reminder_escalations", e.model_dump())
+    notify_families(dev, "reminder", e.model_dump())
 
 
 # --------------------------------------------------------------------------- #
