@@ -103,7 +103,11 @@ def require_role(principal: Principal, role: Role) -> Principal:
 def create_account(role: Role, raw_device_id: str | None = None) -> tuple[dict, str]:
     if role == "senior" and not raw_device_id:
         raise HTTPException(status_code=400, detail="Senior device binding is required")
-    account = auth_store.create_account(role, pseudonymize(raw_device_id) if role == "senior" else None)
+    # Bind family accounts to the device pseudonym too: registration stays
+    # idempotent instead of creating a new caregiver account (and losing the
+    # previous pairing) on every page load.
+    device_id = pseudonymize(raw_device_id) if raw_device_id else None
+    account = auth_store.create_account(role, device_id)
     return account, issue_token(account["id"], role, account["deviceId"])
 
 

@@ -534,7 +534,7 @@ cd android && ./gradlew assembleDebug    # 产物：android/app/build/outputs/ap
 
 1. `POST /auth/register` 创建最小长者或家属账号；长者账号只保存设备假名，家属账号不要求真实姓名或手机号。
 2. 长者端通过 `POST /auth/pairing-code` 生成 10 分钟有效的 6 位配对码；家属端通过 `POST /auth/pair` 兑换并建立授权关系。
-3. 业务接口现在必须使用 `Authorization: Bearer <token>`；`X-Device-Id` 只用于把当前请求映射到已授权的设备，不能单独读写数据。
+3. 业务接口必须携带已签名的会话：Web 端使用 `POST /auth/register` 下发的 HttpOnly `aura_session` Cookie（`GET /auth/me` 可复用已有会话），原生/CLI 客户端可用 `Authorization: Bearer <token>`。`X-Device-Id` 只用于把当前请求映射到已授权的设备，不能单独读写数据。
 4. 家属端位于 `/caregiver`，通过 `GET /caregiver/overview` 查看健康卡、风险/活动趋势、SOS/跌倒告警，并可确认 SOS。
 5. SOS 会写入 `notification_outbox`，形成可重试的投递意图并展示在家属面板。当前没有伪装成已发送的短信、电话或 IM；生产环境应由 provider worker 消费该 outbox。
 

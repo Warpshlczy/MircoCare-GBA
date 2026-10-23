@@ -19,7 +19,7 @@ import {
 } from "@/lib/audio";
 import { parseIntent } from "@/lib/intent";
 import { localCardsFor, photoCard, todoCardFromUtterance } from "@/lib/cards";
-import { createPairingCode, getAgentCards, getMedicationPlan, postConversationMemory } from "@/lib/api";
+import { createPairingCode, ensureSeniorSession, getAgentCards, getMedicationPlan, postConversationMemory } from "@/lib/api";
 import { all, get, put } from "@/lib/db";
 import { shouldCheckIn } from "@/lib/checkin";
 import { flush, track } from "@/lib/analytics";
@@ -339,14 +339,17 @@ export default function Page() {
   useEffect(() => {
     if (startedRef.current) return;
     startedRef.current = true;
-    track("app_open", locale);
-    void flush();
     if (!sttSupported()) setShowTools(true);
     // Req 2 (native): keep listening for the name even when the app is not in the
     // foreground. No-op on the web (bridge() is undefined there).
     if (wakeOn) void bridge()?.startBackgroundWake();
     let alive = true;
     void (async () => {
+      // Authenticate before any data call. This is the ONLY place that creates a
+      // senior session — the caregiver page must never be re-registered as one.
+      await ensureSeniorSession().catch(() => {});
+      track("app_open", locale);
+      await flush();
       const rows = await all<ConversationTurn>("conversation").catch(() => []);
       if (alive) historyRef.current = rows.sort((a, b) => a.at - b.at).slice(-MEMORY_TURNS);
       const rec = await get<{ id: string; lastAt: number | null }>("meta", CHECKIN_KEY).catch(() => undefined);

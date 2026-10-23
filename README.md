@@ -56,7 +56,7 @@ python selfcheck.py           # 纯断言自检 → selfcheck: OK
 ```
 
 - 交互式文档：`http://localhost:8000/docs`
-- 前端通过 `NEXT_PUBLIC_API_BASE`（默认 `http://localhost:8000`）指向后端，请求携带假名 `X-Device-Id` 头。
+- 前端通过 `NEXT_PUBLIC_API_BASE`（默认 `http://localhost:8000`）指向后端。首次加载会通过 `POST /auth/register` 建立 HttpOnly 会话；之后请求自动携带该 Cookie 与假名 `X-Device-Id` 头（原生/CLI 客户端可改用 `Authorization: Bearer`）。
 
 ### Android 壳（需 JDK 17 + Android SDK）
 

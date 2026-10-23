@@ -47,6 +47,16 @@ def register(
     return RegisterResponse(accountId=account["id"], role=account["role"])
 
 
+@router.get("/me", response_model=RegisterResponse)
+def me(principal: Principal = Depends(current_principal)) -> RegisterResponse:
+    """Return the caller's session, or 401 when the cookie/bearer is invalid.
+
+    The web app calls this before any data request so it can reuse an existing
+    HttpOnly session instead of re-registering (and potentially switching roles).
+    """
+    return RegisterResponse(accountId=principal.account_id, role=principal.role)
+
+
 @router.post("/pairing-code", response_model=PairingCodeResponse)
 def pairing_code(principal: Principal = Depends(current_principal)) -> PairingCodeResponse:
     senior = require_role(principal, "senior")

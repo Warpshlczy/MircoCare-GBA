@@ -34,25 +34,53 @@ async function register(role: AccountRole): Promise<Session> {
     method: "POST",
     headers: { "Content-Type": "application/json", "X-Device-Id": deviceId() },
     body: JSON.stringify({ role }),
+    credentials: "include",
   });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText} @ /auth/register`);
   return (await res.json()) as Session;
 }
 
-async function ensureSession(): Promise<void> {
-  if (typeof window !== "undefined") {
-    await register("senior");
+/** Reads the current HttpOnly session (or null when there is none). */
+export async function getSession(): Promise<Session | null> {
+  if (typeof window === "undefined") return null;
+  try {
+    const res = await fetch(`${API_BASE}/auth/me`, {
+      headers: { "X-Device-Id": deviceId() },
+      credentials: "include",
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as Session;
+  } catch {
+    return null;
   }
 }
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-  if (!path.startsWith("/auth/") && typeof window !== "undefined") {
-    const bootstrapped = window.sessionStorage.getItem("auragba.sessionBootstrapped");
-    if (!bootstrapped) {
-      await ensureSession();
-      window.sessionStorage.setItem("auragba.sessionBootstrapped", "1");
-    }
+let seniorSession: Promise<void> | null = null;
+
+/**
+ * Ensures the senior app has a session. Called once at boot, NOT from every
+ * request: the caregiver page must be able to load with a family cookie (or no
+ * cookie at all) without being silently re-registered as a senior.
+ *
+ * The backend registration is idempotent per (role, device), so reopening the
+ * app reuses the same account instead of failing on a unique constraint.
+ */
+export function ensureSeniorSession(): Promise<void> {
+  if (typeof window === "undefined") return Promise.resolve();
+  if (!seniorSession) {
+    seniorSession = (async () => {
+      const current = await getSession();
+      if (current?.role === "senior") return;
+      await register("senior");
+    })();
+    void seniorSession.catch(() => {
+      seniorSession = null; // allow a retry on the next boot / gesture
+    });
   }
+  return seniorSession;
+}
+
+async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
   try {

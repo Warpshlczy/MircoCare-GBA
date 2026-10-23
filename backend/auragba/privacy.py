@@ -16,7 +16,7 @@ import hashlib
 import re
 from typing import Any
 
-from fastapi import Header, HTTPException
+from fastapi import Cookie, Header, HTTPException
 
 _SALT = "auragba-pseudonym-v1"
 
@@ -108,12 +108,27 @@ def input_digest(*parts: str) -> str:
 def device_id(
     x_device_id: str | None = Header(default=None, alias="X-Device-Id"),
     authorization: str | None = Header(default=None),
+    aura_session: str | None = Cookie(default=None),
 ) -> str:
-    """Resolve a device only after verifying a signed bearer session."""
-    from .auth import principal_from_token, authorized_device
+    """Resolve a device only after verifying a signed session.
 
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Bearer session required")
-    principal = principal_from_token(authorization[7:].strip())
-    resolved = pseudonymize(x_device_id)
+    Accepts either `Authorization: Bearer <token>` (native/test clients) or the
+    HttpOnly `aura_session` cookie the web app receives from `/auth/register`
+    and `/auth/me`. The cookie path is what makes the browser app work: fetch
+    cannot read an HttpOnly token, so requiring the header alone would 401 every
+    contract call.
+    """
+    from .auth import authorized_device, principal_from_token
+
+    token = authorization[7:].strip() if authorization and authorization.startswith("Bearer ") else aura_session
+    if not token:
+        raise HTTPException(status_code=401, detail="Authenticated session required")
+    principal = principal_from_token(token)
+    if principal.role == "senior" and principal.device_id:
+        # The signed session already proves which device this senior owns. Do not
+        # depend on the (client-controlled, localStorage-derived) header — it can
+        # change when storage is cleared and would otherwise 403 all data calls.
+        resolved = principal.device_id
+    else:
+        resolved = pseudonymize(x_device_id)
     return authorized_device(principal, resolved)

@@ -33,8 +33,9 @@ class AuthStore:
                 CREATE TABLE IF NOT EXISTS accounts (
                     id TEXT PRIMARY KEY,
                     role TEXT NOT NULL CHECK (role IN ('senior', 'family')),
-                    device_id TEXT UNIQUE,
-                    created_at INTEGER NOT NULL
+                    device_id TEXT,
+                    created_at INTEGER NOT NULL,
+                    UNIQUE (role, device_id)
                 );
                 CREATE TABLE IF NOT EXISTS pairing_codes (
                     id TEXT PRIMARY KEY,
@@ -70,20 +71,90 @@ class AuthStore:
                 );
                 """
             )
+        self._migrate_account_uniqueness()
+
+    def _migrate_account_uniqueness(self) -> None:
+        """Rebuild `accounts` if it still has the old global `device_id UNIQUE`.
+
+        A senior and a family account may live on the same physical device (the
+        same browser can open both apps), so uniqueness must be per-role. SQLite
+        cannot drop a column constraint in place; the table is rebuilt once and
+        existing rows are carried over.
+        """
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'accounts'"
+            ).fetchone()
+            if not row or "device_id TEXT UNIQUE" not in (row["sql"] or ""):
+                return
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("ALTER TABLE accounts RENAME TO accounts_legacy")
+            db.execute(
+                """
+                CREATE TABLE accounts (
+                    id TEXT PRIMARY KEY,
+                    role TEXT NOT NULL CHECK (role IN ('senior', 'family')),
+                    device_id TEXT,
+                    created_at INTEGER NOT NULL,
+                    UNIQUE (role, device_id)
+                )
+                """
+            )
+            db.execute(
+                """
+                INSERT INTO accounts (id, role, device_id, created_at)
+                SELECT id, role, device_id, created_at FROM accounts_legacy
+                """
+            )
+            db.execute("DROP TABLE accounts_legacy")
+            db.commit()
 
     def create_account(self, role: str, device_id: str | None) -> dict[str, Any]:
-        account = {
-            "id": f"acct-{secrets.token_urlsafe(12)}",
-            "role": role,
-            "deviceId": device_id,
-            "createdAt": int(time.time() * 1000),
-        }
+        """Return the existing account for (role, device), or create one.
+
+        Registration is idempotent so a new browser session (or a second tab)
+        never hits the uniqueness constraint and never fragments a senior's
+        history across several accounts.
+        """
         with self._connect() as db:
-            db.execute(
-                "INSERT INTO accounts(id, role, device_id, created_at) VALUES (?, ?, ?, ?)",
-                (account["id"], role, device_id, account["createdAt"]),
-            )
+            existing = self._find(db, role, device_id)
+            if existing:
+                return existing
+            account = {
+                "id": f"acct-{secrets.token_urlsafe(12)}",
+                "role": role,
+                "deviceId": device_id,
+                "createdAt": int(time.time() * 1000),
+            }
+            try:
+                db.execute(
+                    "INSERT INTO accounts(id, role, device_id, created_at) VALUES (?, ?, ?, ?)",
+                    (account["id"], role, device_id, account["createdAt"]),
+                )
+            except sqlite3.IntegrityError:
+                # Lost a race against a concurrent request — return the winner.
+                existing = self._find(db, role, device_id)
+                if not existing:
+                    raise
+                return existing
         return account
+
+    @staticmethod
+    def _find(db: sqlite3.Connection, role: str, device_id: str | None) -> dict[str, Any] | None:
+        if device_id is None:
+            return None
+        row = db.execute(
+            "SELECT id, role, device_id, created_at FROM accounts WHERE role = ? AND device_id = ?",
+            (role, device_id),
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "id": row["id"],
+            "role": row["role"],
+            "deviceId": row["device_id"],
+            "createdAt": row["created_at"],
+        }
 
     def get_account(self, account_id: str) -> dict[str, Any] | None:
         with self._connect() as db:
