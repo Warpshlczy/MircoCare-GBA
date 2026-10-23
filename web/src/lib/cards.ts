@@ -3,6 +3,7 @@
 // throws NOT_IMPLEMENTED today). No DOM. Tested in src/selfcheck.ts.
 
 import { t } from "./i18n.ts";
+import { formatWhen } from "./datetime.ts";
 import type { AgentCard, Intent, Locale, ReminderItem } from "./types";
 
 export interface CardCtx {
@@ -68,6 +69,21 @@ export function photoCard(dataUrl: string, locale: Locale, now: number): AgentCa
     title: t(locale, "cameraTitle"),
     createdAt: now,
     data: { image: dataUrl, headline: t(locale, "photoTaken") },
+  };
+}
+
+/** A confirmation card for a scheduled follow-up / appointment reminder. */
+export function followupCard(item: ReminderItem, locale: Locale, now: number): AgentCard {
+  return {
+    id: `followup-card-${item.id}`,
+    kind: "info",
+    title: t(locale, "followupCardTitle"),
+    createdAt: now,
+    data: {
+      icon: "🏥",
+      headline: item.title,
+      rows: [{ label: t(locale, "reminderWhen"), value: formatWhen(item.dueAt, locale) }],
+    },
   };
 }
 

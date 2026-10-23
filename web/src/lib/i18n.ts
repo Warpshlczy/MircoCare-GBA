@@ -53,6 +53,24 @@ export type MsgKey =
   | "langOther"
   | "wakeGreeting"
   | "openGreeting"
+  | "cancel"
+  | "followupTitle"
+  | "followupConfirm"
+  | "followupDone"
+  | "followupEscalation"
+  | "followupFormTitle"
+  | "followupFormLabel"
+  | "followupFormWhen"
+  | "followupSave"
+  | "followupInvalid"
+  | "followupPrompt"
+  | "followupCardTitle"
+  | "reminderWhen"
+  | "noteSavedTitle"
+  | "noteRecallTitle"
+  | "noteEmpty"
+  | "noteTime"
+  | "noteHint"
   | "screeningTitle"
   | "screeningPrompt"
   | "screeningRecording"
@@ -115,6 +133,24 @@ const zhHK: Dict = {
   langOther: "普通話",
   wakeGreeting: "阿婆／阿伯，我喺度。今日身體點呀？有冇邊度唔舒服？",
   openGreeting: "阿婆／阿伯，我係靈犀。今日身體點呀？有冇邊度唔舒服？",
+  cancel: "取消",
+  followupTitle: "覆診提醒",
+  followupConfirm: "夠鐘覆診喇，記得帶健康卡。",
+  followupDone: "知道喇",
+  followupEscalation: "覆診時間過咗好耐，我已經記錄咗呢次超時。",
+  followupFormTitle: "設定覆診提醒",
+  followupFormLabel: "覆診做咩",
+  followupFormWhen: "幾時",
+  followupSave: "記低",
+  followupInvalid: "請揀一個將來嘅時間。",
+  followupPrompt: "好，請設定覆診時間。",
+  followupCardTitle: "覆診提醒已記低",
+  reminderWhen: "提醒時間",
+  noteSavedTitle: "幫你記低咗",
+  noteRecallTitle: "你記低嘅事",
+  noteEmpty: "暫時未有記錄。",
+  noteTime: "記錄時間",
+  noteHint: "講「記住…」我就會幫你記低",
   screeningTitle: "語音篩查",
   screeningPrompt: "請隨便講一分鐘，講乜都得，我幫你記錄。",
   screeningRecording: "錄緊音…",
@@ -176,6 +212,24 @@ const zhCN: Dict = {
   langOther: "粤语",
   wakeGreeting: "奶奶／爷爷，我在呢。今天身体怎么样？有没有哪里不舒服？",
   openGreeting: "奶奶／爷爷，我是灵犀。今天身体怎么样？有没有哪里不舒服？",
+  cancel: "取消",
+  followupTitle: "复诊提醒",
+  followupConfirm: "到复诊时间了，记得带健康卡。",
+  followupDone: "知道了",
+  followupEscalation: "复诊时间过去很久了，我已经记录了这次超时。",
+  followupFormTitle: "设置复诊提醒",
+  followupFormLabel: "复诊事项",
+  followupFormWhen: "什么时候",
+  followupSave: "保存",
+  followupInvalid: "请选择一个将来的时间。",
+  followupPrompt: "好的，请设置复诊时间。",
+  followupCardTitle: "复诊提醒已记录",
+  reminderWhen: "提醒时间",
+  noteSavedTitle: "帮您记下了",
+  noteRecallTitle: "您记下的事",
+  noteEmpty: "暂时没有记录。",
+  noteTime: "记录时间",
+  noteHint: "说「记住…」我就会帮您记下",
   screeningTitle: "语音筛查",
   screeningPrompt: "请随便讲一分钟，讲什么都可以，我帮您记录。",
   screeningRecording: "正在录音…",

@@ -12,7 +12,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 Locale = Literal["zh-HK", "zh-MO", "zh-CN"]
-Intent = Literal["weather", "medication", "tasks", "camera", "sos", "help", "tools", "unknown"]
+Intent = Literal["weather", "medication", "tasks", "camera", "sos", "help", "tools", "followup", "note", "recall", "unknown"]
 CardKind = Literal["task", "med", "weather", "camera", "info"]
 
 

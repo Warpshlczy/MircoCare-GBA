@@ -19,6 +19,7 @@ export function ReminderOverlay({ item, locale, escalation, onTaken, onSnooze }:
   const [scanning, setScanning] = useState(false);
   const takenRef = useRef<HTMLButtonElement>(null);
   const snoozeRef = useRef<HTMLButtonElement>(null);
+  const isFollowup = item.kind === "followup";
 
   useEffect(() => {
     takenRef.current?.focus();
@@ -26,11 +27,13 @@ export function ReminderOverlay({ item, locale, escalation, onTaken, onSnooze }:
 
   useEffect(() => {
     const prompt =
-      escalation === "notify-caregiver" ? t(locale, "caregiverEscalation") : t(locale, "medConfirm");
+      escalation === "notify-caregiver"
+        ? t(locale, isFollowup ? "followupEscalation" : "caregiverEscalation")
+        : t(locale, isFollowup ? "followupConfirm" : "medConfirm");
     void speak(prompt, locale);
     // haptic alert — Android Chrome only (iOS Safari has no vibrate); optional call is the guard
     navigator.vibrate?.([200, 100, 200]);
-  }, [locale, escalation]);
+  }, [locale, escalation, isFollowup]);
 
   // focus trap: Tab cycles between the two actions only
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
@@ -62,12 +65,14 @@ export function ReminderOverlay({ item, locale, escalation, onTaken, onSnooze }:
       className="fixed inset-0 z-50 flex flex-col items-center justify-center gap-8 bg-aura-bg p-8 text-center hc:bg-black"
     >
       <h1 id="reminder-title" className="text-5xl font-extrabold text-aura-deep hc:text-white">
-        {t(locale, "reminderTitle")}
+        {t(locale, isFollowup ? "followupTitle" : "reminderTitle")}
       </h1>
       <p className="max-w-[22ch] text-4xl font-bold leading-snug text-aura-deep hc:text-yellow-300">
         {item.med?.name ?? item.title}
       </p>
-      <p className="text-3xl text-aura-deep hc:text-white">{t(locale, "medConfirm")}</p>
+      <p className="text-3xl text-aura-deep hc:text-white">
+        {t(locale, isFollowup ? "followupConfirm" : "medConfirm")}
+      </p>
 
       <div className="flex w-full max-w-md flex-col gap-5">
         <button
@@ -75,7 +80,7 @@ export function ReminderOverlay({ item, locale, escalation, onTaken, onSnooze }:
           onClick={confirmTaken}
           className="rounded-3xl bg-aura-accent px-8 py-8 text-4xl font-extrabold text-white shadow-lg focus:outline-none focus-visible:ring-8 focus-visible:ring-aura-warm hc:bg-yellow-300 hc:text-black"
         >
-          {t(locale, "medTaken")}
+          {t(locale, isFollowup ? "followupDone" : "medTaken")}
         </button>
         <button
           ref={snoozeRef}
@@ -87,7 +92,7 @@ export function ReminderOverlay({ item, locale, escalation, onTaken, onSnooze }:
       </div>
 
       {/* 适老化：NFC 提示同时是按钮，触控目标需 >=44x44px（规范最低值） */}
-      {NFC_SUPPORTED ? (
+      {isFollowup ? null : NFC_SUPPORTED ? (
         <button
           onClick={onTap}
           className="elderly-tap inline-flex items-center justify-center rounded-2xl px-5 py-3 text-2xl font-bold underline text-aura-deep hc:text-white"

@@ -1,15 +1,13 @@
 // Offline-first IndexedDB wrapper. ~30 lines, promise-based, no library.
-// Stores: reminders | gait | screening | meta | events | conversation.
+// Stores: reminders | gait | screening | meta | events | conversation | notes.
 // Records use an `id` key.
 
-export type Store = "reminders" | "gait" | "screening" | "meta" | "events" | "conversation";
+export type Store = "reminders" | "gait" | "screening" | "meta" | "events" | "conversation" | "notes";
 
 const DB_NAME = "auragba";
-// v3 adds the `conversation` store (local conversation memory the backend agent
-// reads to derive reminders). onupgradeneeded creates only missing stores, so
-// existing users migrate in place.
-const DB_VERSION = 3;
-const STORES: Store[] = ["reminders", "gait", "screening", "meta", "events", "conversation"];
+// v4 adds the `notes` store (private on-device memory notes).
+const DB_VERSION = 4;
+const STORES: Store[] = ["reminders", "gait", "screening", "meta", "events", "conversation", "notes"];
 
 let dbPromise: Promise<IDBDatabase> | null = null;
 

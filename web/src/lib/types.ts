@@ -30,6 +30,14 @@ export interface ReminderItem {
   createdAt: number;
 }
 
+/** A private, on-device memory note ("remember the keys are in the drawer"). */
+export interface Note {
+  id: string;
+  at: number;
+  text: string;
+  locale: Locale;
+}
+
 export interface AccelSample {
   t: number; // epoch ms
   ax: number;
@@ -152,7 +160,7 @@ export interface AgentIntentRequest {
 // ---------------------------------------------------------------------------
 // Intent parsing (pure, testable) + privacy-first telemetry
 // ---------------------------------------------------------------------------
-export type Intent = "weather" | "medication" | "tasks" | "camera" | "sos" | "help" | "tools" | "unknown";
+export type Intent = "weather" | "medication" | "tasks" | "camera" | "sos" | "help" | "tools" | "followup" | "note" | "recall" | "unknown";
 
 export interface TelemetryEvent {
   id: string;

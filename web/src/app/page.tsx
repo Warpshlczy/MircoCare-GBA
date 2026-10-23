@@ -8,6 +8,7 @@ import { ReminderOverlay } from "@/components/ReminderOverlay";
 import { SosOverlay } from "@/components/SosOverlay";
 import { HealthCardSheet } from "@/components/HealthCardSheet";
 import { ScreeningOverlay } from "@/components/ScreeningOverlay";
+import { FollowupSheet } from "@/components/FollowupSheet";
 import { useReminder } from "@/hooks/useReminder";
 import { useGaitMonitor, flushGaitUploads } from "@/hooks/useGaitMonitor";
 import { useWakeWord } from "@/hooks/useWakeWord";
@@ -19,7 +20,8 @@ import {
   sttSupported,
 } from "@/lib/audio";
 import { parseIntent } from "@/lib/intent";
-import { localCardsFor, photoCard, todoCardFromUtterance } from "@/lib/cards";
+import { localCardsFor, followupCard, photoCard, todoCardFromUtterance } from "@/lib/cards";
+import { latestNote, noteCard, noteFromUtterance, recallCard } from "@/lib/notes";
 import { createPairingCode, ensureSeniorSession, getAgentCards, getHealthCard, getMedicationPlan, postConversationMemory, postReminderEscalation } from "@/lib/api";
 import { all, get, put } from "@/lib/db";
 import { shouldCheckIn } from "@/lib/checkin";
@@ -33,6 +35,7 @@ import type {
   HealthCard,
   Intent,
   Locale,
+  Note,
   ReminderItem,
   SosEvent,
 } from "@/lib/types";
@@ -99,6 +102,7 @@ export default function Page() {
   const [hc, setHc] = useState(false);
   const [healthCard, setHealthCard] = useState<HealthCard>(DEMO_CARD);
   const [screeningOpen, setScreeningOpen] = useState(false);
+  const [followupOpen, setFollowupOpen] = useState(false);
   // Wake word is ON by default (req 2). The extra options stay hidden behind voice.
   const [wakeOn, setWakeOn] = useState(true);
   // Req 1: only 吃药提醒 + 高对比 are visible by default. Everything else is
@@ -195,6 +199,16 @@ export default function Page() {
     [locale, wakeSleep]
   );
 
+  // Appointment reminders use a native date/time picker instead of fragile
+  // speech-to-time parsing. Opening it stops the wake listener and blocks
+  // converse() triggers until the sheet closes.
+  const openFollowup = useCallback(() => {
+    stopWake();
+    setState("confirming");
+    setFollowupOpen(true);
+    void speak(t(locale, "followupPrompt"), locale);
+  }, [locale, stopWake]);
+
   // --- one spoken turn: any (recognized, valid) utterance is routed to the agent ---
   const runIntent = useCallback(
     async (intent: Intent, utterance: string) => {
@@ -217,6 +231,31 @@ export default function Page() {
       if (intent === "tools") {
         setShowTools(true);
         await speakWithMouth(t(locale, "toolsOpened"));
+        return;
+      }
+      if (intent === "followup") {
+        openFollowup();
+        return;
+      }
+      // Private memory notes: text stays on-device; only a coarse length is tracked.
+      if (intent === "note") {
+        const note = noteFromUtterance(utterance, locale, now);
+        await put("notes", note).catch(() => undefined);
+        pushCards([noteCard(note, locale, now)]);
+        track("note_saved", locale, { length: note.text.length });
+        await speakWithMouth(`${t(locale, "noteSavedTitle")}：${note.text}`);
+        return;
+      }
+      if (intent === "recall") {
+        const rows = await all<Note>("notes").catch(() => []);
+        const note = latestNote(rows);
+        if (!note) {
+          await speakWithMouth(t(locale, "noteEmpty"));
+          return;
+        }
+        pushCards([recallCard(note, locale, now)]);
+        track("note_recall", locale);
+        await speakWithMouth(`${t(locale, "noteRecallTitle")}：${note.text}`);
         return;
       }
 
@@ -260,7 +299,7 @@ export default function Page() {
         await speakWithMouth(t(locale, "intentUnknown"));
       }
     },
-    [locale, reminder.items, reminder.schedule, pushCards, speakWithMouth, wakeSleep]
+    [locale, reminder.items, reminder.schedule, pushCards, speakWithMouth, wakeSleep, openFollowup]
   );
 
   const onTalk = useCallback(async () => {
@@ -543,6 +582,12 @@ export default function Page() {
               {t(locale, "screeningTitle")}
             </button>
             <button
+              onClick={openFollowup}
+              className="elderly-tap inline-flex items-center justify-center rounded-2xl bg-aura-bg px-5 py-3 text-2xl font-bold text-aura-deep hc:bg-neutral-800 hc:text-white"
+            >
+              {t(locale, "followupTitle")}
+            </button>
+            <button
               onClick={() => {
                 const next = !wakeOn;
                 setWakeOn(next);
@@ -592,6 +637,7 @@ export default function Page() {
               {t(locale, "send")}
             </button>
           </form>
+          <p className="text-xl text-aura-deep opacity-70 hc:text-white">{t(locale, "noteHint")}</p>
         </section>
       ) : null}
 
@@ -640,6 +686,20 @@ export default function Page() {
           setScreeningOpen(false);
           setState("idle");
           wakeSleep(); // re-arm the wake listener now that recording stopped
+        }}
+      />
+      <FollowupSheet
+        open={followupOpen}
+        locale={locale}
+        onSave={(item) => {
+          reminder.schedule(item);
+          pushCards([followupCard(item, locale, Date.now())]);
+          track("followup_scheduled", locale);
+        }}
+        onClose={() => {
+          setFollowupOpen(false);
+          setState("idle");
+          wakeSleep();
         }}
       />
       <HealthCardSheet open={cardOpen} card={healthCard} locale={locale} onClose={() => setCardOpen(false)} />

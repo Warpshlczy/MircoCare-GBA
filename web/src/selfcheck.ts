@@ -14,7 +14,14 @@ import {
 } from "./lib/signal.ts";
 import { t } from "./lib/i18n.ts";
 import { parseIntent } from "./lib/intent.ts";
-import { localCardsFor, todoCardFromUtterance } from "./lib/cards.ts";
+import { localCardsFor, followupCard, todoCardFromUtterance } from "./lib/cards.ts";
+import {
+  latestNote,
+  noteCard,
+  noteFromUtterance,
+  noteTextFromUtterance,
+  recallCard,
+} from "./lib/notes.ts";
 import { shouldCheckIn } from "./lib/checkin.ts";
 import { homeWidgetPayload } from "./lib/native.ts";
 import type { ReminderItem } from "./lib/types.ts";
@@ -154,7 +161,36 @@ assert.equal(magnitude(3, 4, 0), 5);
   assert.equal(parseIntent("今日要做咩"), "tasks");
   // req 1: "打开按钮" reveals the hidden options
   assert.equal(parseIntent("打开按钮"), "tools");
+  assert.equal(parseIntent("下星期覆诊"), "followup");
+  assert.equal(parseIntent("帮我记住钥匙喺抽屉"), "note");
+  assert.equal(parseIntent("我记低咗咩"), "recall");
   assert.equal(parseIntent("blah blah"), "unknown");
+}
+
+// --- memory notes (pure) -----------------------------------------------------
+{
+  assert.equal(noteTextFromUtterance("帮我记住钥匙喺抽屉"), "钥匙喺抽屉");
+  assert.equal(noteTextFromUtterance("記住：聽日買藥"), "聽日買藥");
+  assert.equal(noteTextFromUtterance("钥匙喺抽屉"), "钥匙喺抽屉");
+  const note = noteFromUtterance("幫我記低 眼鏡放喺枱面", "zh-HK", 5000);
+  assert.equal(note.text, "眼鏡放喺枱面");
+  assert.equal(noteCard(note, "zh-HK", 5000).data?.headline, "眼鏡放喺枱面");
+  assert.equal(recallCard(note, "zh-HK", 5000).kind, "info");
+  const latest = latestNote([{ ...note, id: "n1", text: "a" }, { ...note, id: "n2", at: 6000, text: "b" }]);
+  assert.equal(latest?.text, "b");
+  assert.equal(latestNote([]), null);
+}
+
+// --- follow-up reminder card -------------------------------------------------
+{
+  const f = followupCard(
+    { id: "f1", kind: "followup", title: "覆診", dueAt: 60_000, status: "pending", stage: "none", createdAt: 1 },
+    "zh-HK",
+    5000
+  );
+  assert.equal(f.kind, "info");
+  assert.equal(f.data?.headline, "覆診");
+  assert.ok(f.data?.rows?.[0]?.value, "follow-up card must show the due time");
 }
 
 // --- local card factory ------------------------------------------------------

@@ -56,7 +56,7 @@ function CardBody({ data }: { data: CardData }) {
       ) : null}
 
       {data.headline ? (
-        <p className="text-4xl font-black text-aura-deep hc:text-yellow-300">{data.headline}</p>
+        <p className="break-words text-4xl font-black text-aura-deep hc:text-yellow-300">{data.headline}</p>
       ) : null}
 
       {data.rows?.length ? (
