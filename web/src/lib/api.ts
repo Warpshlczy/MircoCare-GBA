@@ -32,28 +32,40 @@ export type AccountRole = "senior" | "family";
 export interface Session { accountId: string; role: AccountRole; }
 
 async function register(role: AccountRole): Promise<Session> {
-  const res = await fetch(`${API_BASE}/auth/register`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "X-Device-Id": deviceId() },
-    body: JSON.stringify({ role }),
-    credentials: "include",
-  });
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText} @ /auth/register`);
-  return (await res.json()) as Session;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  try {
+    const res = await fetch(`${API_BASE}/auth/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Device-Id": deviceId() },
+      body: JSON.stringify({ role }),
+      credentials: "include",
+      signal: controller.signal,
+    });
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText} @ /auth/register`);
+    return (await res.json()) as Session;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** Reads the current HttpOnly session (or null when there is none). */
 export async function getSession(): Promise<Session | null> {
   if (typeof window === "undefined") return null;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
   try {
     const res = await fetch(`${API_BASE}/auth/me`, {
       headers: { "X-Device-Id": deviceId() },
       credentials: "include",
+      signal: controller.signal,
     });
     if (!res.ok) return null;
     return (await res.json()) as Session;
   } catch {
     return null;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -105,7 +117,11 @@ async function request<T>(path: string, init: RequestInit = {}, timeoutMs = TIME
   }
 }
 
-export async function registerFamily(): Promise<Session> { return register("family"); }
+export async function registerFamily(): Promise<Session> {
+  const session = await register("family");
+  seniorSession = null; // a family cookie replaced any senior session in this tab
+  return session;
+}
 export async function registerSenior(): Promise<Session> { return register("senior"); }
 export async function createPairingCode(): Promise<{ code: string; expiresAt: number }> {
   return request("/auth/pairing-code", { method: "POST" });

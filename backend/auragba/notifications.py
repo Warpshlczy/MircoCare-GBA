@@ -9,7 +9,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from .auth import family_relations
+from .auth_store import auth_store
 from .store import store
 
 
@@ -34,11 +34,6 @@ def notify_families(device_id: str, kind: str, payload: dict[str, Any]) -> int:
 
 
 def _families_for(device_id: str) -> list[str]:
-    accounts = store.get_doc("__system__", "accounts") or {}
-    relations = store.get_doc("__system__", "relations") or {}
-    return [
-        account_id
-        for account_id, linked in relations.items()
-        if any(row.get("seniorDeviceId") == device_id for row in linked)
-        and accounts.get(account_id, {}).get("role") == "family"
-    ]
+    # Accounts/relations live in SQLite (auth_store), not the JSON store; reading
+    # the old "__system__" docs here silently produced zero notifications.
+    return auth_store.family_accounts_for_device(device_id)

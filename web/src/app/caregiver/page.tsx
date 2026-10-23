@@ -14,7 +14,7 @@ export default function CaregiverPage() {
   const refresh = useCallback(async () => {
     setLoading(true);
     try { setOverview(await getCaregiverOverview()); setMessage("数据已更新"); }
-    catch (error) { setMessage(error instanceof Error ? error.message : "暂时无法读取家属数据"); }
+    catch (error) { const text = error instanceof Error ? error.message : ""; setMessage(text.includes("401") ? "请先创建家属账号并输入长者配对码。" : text || "暂时无法读取家属数据"); }
     finally { setLoading(false); }
   }, []);
   useEffect(() => { void refresh(); }, [refresh]);

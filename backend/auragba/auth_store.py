@@ -324,6 +324,18 @@ class AuthStore:
             for row in rows
         ]
 
+    def family_accounts_for_device(self, senior_device_id: str) -> list[str]:
+        """Family account ids bound to a senior device (used by notifications)."""
+        with self._connect() as db:
+            rows = db.execute(
+                """
+                SELECT DISTINCT family_account_id
+                FROM family_relations WHERE senior_device_id = ?
+                """,
+                (senior_device_id,),
+            ).fetchall()
+        return [row["family_account_id"] for row in rows]
+
     @staticmethod
     def _hash_code(code: str) -> str:
         return hmac.new(settings.auth_secret.encode("utf-8"), code.encode("ascii", "ignore"), hashlib.sha256).hexdigest()
