@@ -16,7 +16,7 @@ import hashlib
 import re
 from typing import Any
 
-from fastapi import Header
+from fastapi import Header, HTTPException
 
 _SALT = "auragba-pseudonym-v1"
 
@@ -105,11 +105,15 @@ def input_digest(*parts: str) -> str:
 # --------------------------------------------------------------------------- #
 # FastAPI dependency: resolve the pseudonymous device id from a header.
 # --------------------------------------------------------------------------- #
-def device_id(x_device_id: str | None = Header(default=None, alias="X-Device-Id")) -> str:
-    """Pseudonymous device id; falls back to a shared anonymous bucket.
+def device_id(
+    x_device_id: str | None = Header(default=None, alias="X-Device-Id"),
+    authorization: str | None = Header(default=None),
+) -> str:
+    """Resolve a device only after verifying a signed bearer session."""
+    from .auth import principal_from_token, authorized_device
 
-    ponytail: no auth/token verification yet — the header is trusted as a
-    pseudonym, not as an authenticated identity. Upgrade: issue signed device
-    tokens (see DEV.md §8.5.1) before exposing beyond a demo.
-    """
-    return pseudonymize(x_device_id)
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Bearer session required")
+    principal = principal_from_token(authorization[7:].strip())
+    resolved = pseudonymize(x_device_id)
+    return authorized_device(principal, resolved)

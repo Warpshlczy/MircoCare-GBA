@@ -8,7 +8,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .api import contract_router, insight_router
+from .api import auth_router, caregiver_router, contract_router, insight_router
 from .config import ENGINE_VERSION, FEATURE_SET_VERSION, settings
 
 _DESCRIPTION = """
@@ -30,14 +30,16 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=list(settings.cors_origins) or ["*"],
-    allow_credentials=False,  # pseudonymous header auth, not cookies
+    allow_origins=list(settings.cors_origins),
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 app.include_router(contract_router)
 app.include_router(insight_router)
+app.include_router(auth_router)
+app.include_router(caregiver_router)
 
 
 @app.get("/", tags=["meta"])
@@ -53,5 +55,6 @@ def root() -> dict:
             "POST /assistant/chat (501)", "POST /agent/cards (501)", "POST /telemetry/events",
             "POST /conversation/turns", "POST /medication/plan (501)",
         ],
+        "auth": ["POST /auth/register", "POST /auth/pairing-code", "POST /auth/pair"],
         "insight": ["POST /screening/analyze", "GET /baseline/me", "GET /economics/me", "GET /audit/screening"],
     }

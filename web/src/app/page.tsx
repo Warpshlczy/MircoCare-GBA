@@ -19,7 +19,7 @@ import {
 } from "@/lib/audio";
 import { parseIntent } from "@/lib/intent";
 import { localCardsFor, photoCard, todoCardFromUtterance } from "@/lib/cards";
-import { getAgentCards, getMedicationPlan, postConversationMemory } from "@/lib/api";
+import { createPairingCode, getAgentCards, getMedicationPlan, postConversationMemory } from "@/lib/api";
 import { all, get, put } from "@/lib/db";
 import { shouldCheckIn } from "@/lib/checkin";
 import { flush, track } from "@/lib/analytics";
@@ -103,6 +103,7 @@ export default function Page() {
   const [showTools, setShowTools] = useState(false);
   const [text, setText] = useState("");
   const [cards, setCards] = useState<AgentCard[]>([]);
+  const [pairingCode, setPairingCode] = useState<string | null>(null);
 
   const reminder = useReminder();
   const gait = useGaitMonitor();
@@ -518,7 +519,25 @@ export default function Page() {
             >
               {t(locale, "wakeOn")}
             </button>
+            <button
+              onClick={async () => {
+                try {
+                  const result = await createPairingCode();
+                  setPairingCode(result.code);
+                } catch {
+                  setPairingCode("暂时无法生成");
+                }
+              }}
+              className="elderly-tap inline-flex items-center justify-center rounded-2xl bg-aura-bg px-5 py-3 text-2xl font-bold text-aura-deep hc:bg-neutral-800 hc:text-white"
+            >
+              家属绑定
+            </button>
           </div>
+          {pairingCode ? (
+            <p aria-live="polite" className="rounded-2xl bg-aura-warm p-4 text-center text-3xl font-black text-aura-deep">
+              配对码：{pairingCode}
+            </p>
+          ) : null}
 
           <form onSubmit={submitText} className="flex gap-3">
             <input

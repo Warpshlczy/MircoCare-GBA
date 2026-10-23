@@ -52,9 +52,14 @@ class Settings:
     )
     cors_origins: tuple[str, ...] = field(
         default_factory=lambda: tuple(
-            o.strip() for o in os.getenv("AURA_CORS_ORIGINS", "*").split(",") if o.strip()
+            o.strip() for o in os.getenv(
+                "AURA_CORS_ORIGINS", "http://localhost:3000,http://localhost:8000"
+            ).split(",") if o.strip()
         )
     )
+    auth_secret: str = os.getenv("AURA_AUTH_SECRET", "")
+    environment: str = os.getenv("AURA_ENV", "development")
+    cookie_secure: bool = os.getenv("AURA_COOKIE_SECURE", "false").lower() == "true"
 
     @property
     def burn_audio(self) -> bool:
@@ -70,6 +75,12 @@ class Settings:
 
 
 settings = Settings()
+if not settings.auth_secret or len(settings.auth_secret.encode("utf-8")) < 32:
+    raise RuntimeError("AURA_AUTH_SECRET must be set to at least 32 bytes before starting the backend")
+if settings.environment == "production" and not settings.cookie_secure:
+    raise RuntimeError("AURA_COOKIE_SECURE=true is required in production")
+if "*" in settings.cors_origins:
+    raise RuntimeError("Wildcard CORS is incompatible with credentialed session cookies")
 
 # Sampling rate the acoustic front-end works at (16 kHz mono, telephony-grade).
 TARGET_SR = 16_000

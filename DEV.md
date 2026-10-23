@@ -528,6 +528,27 @@ cd android && ./gradlew assembleDebug    # 产物：android/app/build/outputs/ap
 
 ## 10. 建议的下一步
 
+### 10.1 家属端 MVP（已接入）
+
+本轮新增了一个不依赖第三方消息服务的安全闭环：
+
+1. `POST /auth/register` 创建最小长者或家属账号；长者账号只保存设备假名，家属账号不要求真实姓名或手机号。
+2. 长者端通过 `POST /auth/pairing-code` 生成 10 分钟有效的 6 位配对码；家属端通过 `POST /auth/pair` 兑换并建立授权关系。
+3. 业务接口现在必须使用 `Authorization: Bearer <token>`；`X-Device-Id` 只用于把当前请求映射到已授权的设备，不能单独读写数据。
+4. 家属端位于 `/caregiver`，通过 `GET /caregiver/overview` 查看健康卡、风险/活动趋势、SOS/跌倒告警，并可确认 SOS。
+5. SOS 会写入 `notification_outbox`，形成可重试的投递意图并展示在家属面板。当前没有伪装成已发送的短信、电话或 IM；生产环境应由 provider worker 消费该 outbox。
+
+6. 配对凭据由 SQLite 事务存储：只保存 HMAC 哈希，成功后原子消费。家属账号累计失败 10 次锁定 15 分钟，之后每个 10 次失败窗口依次锁定 30、60 分钟；达到 40 次后停止数字配对，必须走人工/二维码备用流程。错误消息不区分“码不存在”还是“码错误”。
+7. Web 会话使用 HttpOnly、SameSite Cookie；前端不再把会话凭据写入 `localStorage`。生产环境必须设置 `AURA_COOKIE_SECURE=true` 并使用 HTTPS。
+
+### 10.2 部署安全清单
+
+- 必须设置至少 32 字节随机的 `AURA_AUTH_SECRET`；未设置时后端拒绝启动，不存在可伪造的默认密钥。
+- 生产环境必须设置 `AURA_ENV=production`、`AURA_COOKIE_SECURE=true` 和明确的 `AURA_CORS_ORIGINS`；禁止通配符 CORS。
+- 授权、账号、配对码和失败锁定状态使用 `auth.sqlite3` 的事务/WAL 存储；部署多 worker 时将该数据库放在可靠的本地持久卷，并按 SQLite 并发/备份策略运维，规模扩大后迁移 PostgreSQL。
+- 长者注册必须提供设备绑定头；缺失设备绑定不会进入共享匿名数据桶。
+- 达到 40 次配对失败后，产品必须引导重新生成二维码或人工协助，不得继续重试数字码。
+
 1. 在装有 JDK 17 + Android SDK 的机器上跑 §9.3，产出可安装 APK。
 2. 装机验证 §9.4 的后台唤醒前台服务（权限申请、锁屏唤醒→前置），再补齐剩余的 `updateHomeWidget`/`bringToForeground`。
 3. 接入 `Wake Lock` / `Fullscreen`，尽量延长前台守护时长。

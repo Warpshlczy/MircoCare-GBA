@@ -55,6 +55,31 @@ class SosEvent(_Base):
     status: Literal["pending", "notified", "resolved"]
 
 
+class RegisterRequest(_Base):
+    role: Literal["senior", "family"]
+
+
+class RegisterResponse(_Base):
+    accountId: str
+    role: Literal["senior", "family"]
+    token: str | None = None
+
+
+class PairingCodeResponse(_Base):
+    code: str
+    expiresAt: int
+
+
+class PairingRedeemRequest(_Base):
+    code: str
+
+
+class FamilyRelation(_Base):
+    seniorAccountId: str
+    seniorDeviceId: str
+    boundAt: int
+
+
 class EmergencyContact(_Base):
     name: str
     phone: str

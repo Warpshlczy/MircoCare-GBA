@@ -28,6 +28,7 @@ from ..contract import (
 from ..privacy import device_id, scrub_props, scrub_text
 from ..screening import ingest_session
 from ..store import store
+from ..notifications import notify_families
 
 router = APIRouter(tags=["contract"])
 
@@ -73,6 +74,7 @@ def post_sos(e: SosEvent, dev: str = Depends(device_id)) -> None:
     """
     store.record(dev, "sos", e.model_dump())
     store.set_doc(dev, "sos_last", {"at": e.at, "status": "pending", "reason": e.reason})
+    notify_families(dev, "sos", e.model_dump())
 
 
 @router.get("/health-card/me")
