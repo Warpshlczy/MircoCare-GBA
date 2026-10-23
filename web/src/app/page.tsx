@@ -22,6 +22,7 @@ import {
 import { parseIntent, isQuestion } from "@/lib/intent";
 import { localCardsFor, followupCard, photoCard, todoCardFromUtterance } from "@/lib/cards";
 import { latestNote, noteCard, noteFromUtterance, recallCard } from "@/lib/notes";
+import { nextDueAt } from "@/lib/datetime";
 import { assistantChat, createPairingCode, ensureSeniorSession, getAgentCards, getHealthCard, getMedicationPlan, postConversationMemory, postReminderEscalation } from "@/lib/api";
 import { all, get, put } from "@/lib/db";
 import { shouldCheckIn } from "@/lib/checkin";
@@ -69,16 +70,15 @@ function reminderFromPlanItem(
   now: number,
   i: number
 ): ReminderItem {
-  // ponytail: the plan's `schedule` string (e.g. "早上") is not parsed into a real
-  // due time — the reminder fires on creation. Upgrade path: the backend returns an
-  // explicit dueAt (or the agent parses the slot) so reminders land at the right hour.
+  // ponytail: only common slots (早上/中午/下午/晚上/睡前) map to a due time;
+  // unknown schedules fall back to +1h. Upgrade: backend returns explicit dueAt.
   const title = it.schedule ? `${it.name}（${it.schedule}）` : it.name;
   return {
     id: `plan-${now}-${i}`,
     kind: "med",
     med: { id: `m-${now}-${i}`, name: title, dosage: it.dosage },
     title,
-    dueAt: now,
+    dueAt: nextDueAt(it.schedule, now),
     status: "pending",
     stage: "none",
     createdAt: now,
@@ -430,13 +430,13 @@ export default function Page() {
     // foreground. No-op on the web (bridge() is undefined there).
     if (wakeOn) void bridge()?.startBackgroundWake();
     let alive = true;
+    track("app_open", locale);
+
+    // Session + remote sync run in the background: a slow/unreachable backend
+    // must never delay the local greeting.
     void (async () => {
-      // Authenticate before any data call. This is the ONLY place that creates a
-      // senior session — the caregiver page must never be re-registered as one.
       await ensureSeniorSession().catch(() => {});
-      track("app_open", locale);
-      await flush();
-      // Data wiring: replay offline gait windows and hydrate the real health card.
+      void flush();
       void flushGaitUploads();
       void getHealthCard()
         .then((card) => {
@@ -445,6 +445,9 @@ export default function Page() {
         .catch(() => {
           /* offline: keep the local demo card */
         });
+    })();
+
+    void (async () => {
       const rows = await all<ConversationTurn>("conversation").catch(() => []);
       if (alive) historyRef.current = rows.sort((a, b) => a.at - b.at).slice(-MEMORY_TURNS);
       const rec = await get<{ id: string; lastAt: number | null }>("meta", CHECKIN_KEY).catch(() => undefined);
@@ -461,6 +464,7 @@ export default function Page() {
         1500
       );
     })();
+
     return () => {
       alive = false;
     };

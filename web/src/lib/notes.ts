@@ -57,7 +57,7 @@ export function noteCard(note: Note, locale: Locale, now: number): AgentCard {
 
 export function recallCard(note: Note, locale: Locale, now: number): AgentCard {
   return {
-    id: `note-recall-${note.id}`,
+    id: `note-recall-${note.id}-${now}`,
     kind: "info",
     title: t(locale, "noteRecallTitle"),
     createdAt: now,

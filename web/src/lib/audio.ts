@@ -124,6 +124,9 @@ export function createAmplitudeMeter(stream: MediaStream): { getLevel: () => num
       clearInterval(timer);
       src.disconnect();
       void ctx.close();
+      // Release the microphone: disconnecting the analyser alone leaves the
+      // capture track live and keeps the OS mic indicator on.
+      stream.getTracks().forEach((track) => track.stop());
     },
   };
 }

@@ -23,6 +23,7 @@ import {
   recallCard,
 } from "./lib/notes.ts";
 import { shouldCheckIn } from "./lib/checkin.ts";
+import { nextDueAt } from "./lib/datetime.ts";
 import { homeWidgetPayload } from "./lib/native.ts";
 import type { ReminderItem } from "./lib/types.ts";
 
@@ -196,6 +197,15 @@ assert.equal(magnitude(3, 4, 0), 5);
   assert.equal(f.kind, "info");
   assert.equal(f.data?.headline, "覆診");
   assert.ok(f.data?.rows?.[0]?.value, "follow-up card must show the due time");
+}
+
+// --- medication schedule -> due time -----------------------------------------
+{
+  const morning = new Date(2026, 0, 1, 7, 0).getTime();
+  assert.equal(nextDueAt("早上", morning), new Date(2026, 0, 1, 8, 0).getTime());
+  const evening = new Date(2026, 0, 1, 21, 0).getTime();
+  assert.equal(nextDueAt("早上", evening), new Date(2026, 0, 2, 8, 0).getTime());
+  assert.equal(nextDueAt("未注明", morning), morning + 60 * 60 * 1000);
 }
 
 // --- local card factory ------------------------------------------------------
