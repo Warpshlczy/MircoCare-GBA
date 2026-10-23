@@ -7,8 +7,9 @@ import { CameraOverlay } from "@/components/CameraOverlay";
 import { ReminderOverlay } from "@/components/ReminderOverlay";
 import { SosOverlay } from "@/components/SosOverlay";
 import { HealthCardSheet } from "@/components/HealthCardSheet";
+import { ScreeningOverlay } from "@/components/ScreeningOverlay";
 import { useReminder } from "@/hooks/useReminder";
-import { useGaitMonitor } from "@/hooks/useGaitMonitor";
+import { useGaitMonitor, flushGaitUploads } from "@/hooks/useGaitMonitor";
 import { useWakeWord } from "@/hooks/useWakeWord";
 import {
   ensureAudioUnlocked,
@@ -19,7 +20,7 @@ import {
 } from "@/lib/audio";
 import { parseIntent } from "@/lib/intent";
 import { localCardsFor, photoCard, todoCardFromUtterance } from "@/lib/cards";
-import { createPairingCode, ensureSeniorSession, getAgentCards, getMedicationPlan, postConversationMemory } from "@/lib/api";
+import { createPairingCode, ensureSeniorSession, getAgentCards, getHealthCard, getMedicationPlan, postConversationMemory } from "@/lib/api";
 import { all, get, put } from "@/lib/db";
 import { shouldCheckIn } from "@/lib/checkin";
 import { flush, track } from "@/lib/analytics";
@@ -96,6 +97,8 @@ export default function Page() {
   const [cardOpen, setCardOpen] = useState(false);
   const [cameraOpen, setCameraOpen] = useState(false);
   const [hc, setHc] = useState(false);
+  const [healthCard, setHealthCard] = useState<HealthCard>(DEMO_CARD);
+  const [screeningOpen, setScreeningOpen] = useState(false);
   // Wake word is ON by default (req 2). The extra options stay hidden behind voice.
   const [wakeOn, setWakeOn] = useState(true);
   // Req 1: only 吃药提醒 + 高对比 are visible by default. Everything else is
@@ -350,6 +353,15 @@ export default function Page() {
       await ensureSeniorSession().catch(() => {});
       track("app_open", locale);
       await flush();
+      // Data wiring: replay offline gait windows and hydrate the real health card.
+      void flushGaitUploads();
+      void getHealthCard()
+        .then((card) => {
+          if (alive) setHealthCard(card);
+        })
+        .catch(() => {
+          /* offline: keep the local demo card */
+        });
       const rows = await all<ConversationTurn>("conversation").catch(() => []);
       if (alive) historyRef.current = rows.sort((a, b) => a.at - b.at).slice(-MEMORY_TURNS);
       const rec = await get<{ id: string; lastAt: number | null }>("meta", CHECKIN_KEY).catch(() => undefined);
@@ -509,6 +521,16 @@ export default function Page() {
             </button>
             <button
               onClick={() => {
+                stopWake(); // free the mic for the one-minute recording
+                setState("listening"); // block converse()/visibility triggers
+                setScreeningOpen(true);
+              }}
+              className="elderly-tap inline-flex items-center justify-center rounded-2xl bg-aura-bg px-5 py-3 text-2xl font-bold text-aura-deep hc:bg-neutral-800 hc:text-white"
+            >
+              {t(locale, "screeningTitle")}
+            </button>
+            <button
+              onClick={() => {
                 const next = !wakeOn;
                 setWakeOn(next);
                 // Req 2 (native): mirror the toggle to the background listener.
@@ -598,7 +620,16 @@ export default function Page() {
         }}
         onClose={() => setCameraOpen(false)}
       />
-      <HealthCardSheet open={cardOpen} card={DEMO_CARD} locale={locale} onClose={() => setCardOpen(false)} />
+      <ScreeningOverlay
+        open={screeningOpen}
+        locale={locale}
+        onClose={() => {
+          setScreeningOpen(false);
+          setState("idle");
+          wakeSleep(); // re-arm the wake listener now that recording stopped
+        }}
+      />
+      <HealthCardSheet open={cardOpen} card={healthCard} locale={locale} onClose={() => setCardOpen(false)} />
     </main>
   );
 }

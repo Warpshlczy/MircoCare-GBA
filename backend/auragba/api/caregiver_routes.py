@@ -47,6 +47,7 @@ def overview(
         "seniorDeviceId": device,
         "healthCard": card,
         "riskTrend": store.history(device, "screening_results")[-30:],
+        "screeningSessions": store.history(device, "screening_sessions")[-30:],
         "activityTrend": store.history(device, "gait")[-30:],
         "alerts": alerts[-30:],
         "notifications": [

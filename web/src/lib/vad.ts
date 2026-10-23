@@ -67,8 +67,10 @@ export function createVad(stream: MediaStream, cfg: VadCfg = {}): VadHandle {
 /** Records a screening session and returns DERIVED FEATURES ONLY. No raw audio leaves the device. */
 export async function recordScreening(
   durationMs: number,
-  onFrame?: (frame: { rmsDb: number }) => void
+  onFrame?: (frame: { rmsDb: number }) => void,
+  signal?: AbortSignal
 ): Promise<ScreeningSession> {
+  if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
   const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
   const Ctx = audioCtxCtor();
   const ctx = new Ctx();
@@ -80,22 +82,37 @@ export async function recordScreening(
   const frames: { rmsDb: number }[] = [];
   const startedAt = Date.now();
 
-  await new Promise<void>((resolve) => {
-    const timer = setInterval(() => {
-      analyser.getFloatTimeDomainData(buf);
-      const frame = { rmsDb: dbFromSamples(buf) };
-      frames.push(frame);
-      onFrame?.(frame);
-      if (Date.now() - startedAt >= durationMs) {
-        clearInterval(timer);
-        resolve();
-      }
-    }, 100);
-  });
-
-  src.disconnect();
-  void ctx.close();
-  stream.getTracks().forEach((tr) => tr.stop());
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const timer = setInterval(() => {
+        if (signal?.aborted) {
+          clearInterval(timer);
+          reject(new DOMException("Aborted", "AbortError"));
+          return;
+        }
+        analyser.getFloatTimeDomainData(buf);
+        const frame = { rmsDb: dbFromSamples(buf) };
+        frames.push(frame);
+        onFrame?.(frame);
+        if (Date.now() - startedAt >= durationMs) {
+          clearInterval(timer);
+          resolve();
+        }
+      }, 100);
+      signal?.addEventListener(
+        "abort",
+        () => {
+          clearInterval(timer);
+          reject(new DOMException("Aborted", "AbortError"));
+        },
+        { once: true }
+      );
+    });
+  } finally {
+    src.disconnect();
+    void ctx.close();
+    stream.getTracks().forEach((tr) => tr.stop());
+  }
 
   const { start, end } = trimSilence(frames);
   const kept = frames.slice(start, end + 1);

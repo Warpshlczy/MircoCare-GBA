@@ -116,6 +116,7 @@ export interface CaregiverOverview {
   seniorDeviceId: string;
   healthCard: Partial<HealthCard> & { updatedAt?: number };
   riskTrend: { at: number; riskIndex?: number; riskBand?: string }[];
+  screeningSessions?: { id?: string; at?: number; durationMs?: number; speechRatio?: number }[];
   activityTrend: { endedAt?: number; steps?: number; cadence?: number; fall?: boolean }[];
   alerts: { id?: string; at?: number; reason?: string; status?: string }[];
   notifications: { id?: string; kind?: string; status?: string; createdAt?: number }[];

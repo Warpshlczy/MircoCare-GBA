@@ -2,10 +2,33 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { startGaitMonitor, requestMotionPermission } from "@/lib/motion";
-import { put } from "@/lib/db";
+import { all, del, put } from "@/lib/db";
+import { postGaitWindow } from "@/lib/api";
 import type { GaitMonitorState, GaitWindow } from "@/lib/types";
 
-/** Starts/stops motion monitoring; persists windows offline; exposes last window + permission. */
+/** In-flight guard so a live window and the boot replay never upload twice. */
+const uploading = new Set<string>();
+
+async function uploadWindow(w: GaitWindow): Promise<void> {
+  if (uploading.has(w.id)) return;
+  uploading.add(w.id);
+  try {
+    await postGaitWindow(w);
+    await del("gait", w.id); // uploaded: drop the local copy
+  } catch {
+    /* offline / not authenticated yet — keep it for the next flush */
+  } finally {
+    uploading.delete(w.id);
+  }
+}
+
+/** Replays persisted gait windows that have not reached the backend yet. */
+export async function flushGaitUploads(): Promise<void> {
+  const rows = await all<GaitWindow>("gait").catch(() => []);
+  await Promise.all(rows.map(uploadWindow));
+}
+
+/** Starts/stops motion monitoring; persists + uploads windows; exposes last window + permission. */
 export function useGaitMonitor() {
   const [running, setRunning] = useState(false);
   const [lastWindow, setLastWindow] = useState<GaitWindow | null>(null);
@@ -25,7 +48,8 @@ export function useGaitMonitor() {
     if (perm === "unsupported") return;
     stopRef.current = startGaitMonitor((w) => {
       setLastWindow(w);
-      void put("gait", w); // offline-first: persist, sync to api.ts later
+      // Offline-first: persist, then try to upload and delete on success.
+      void put("gait", w).then(() => uploadWindow(w));
     });
     setRunning(true);
   }, []);

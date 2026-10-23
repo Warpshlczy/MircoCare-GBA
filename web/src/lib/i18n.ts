@@ -13,6 +13,11 @@ export type MsgKey =
   | "nfcUnavailable"
   | "sosConfirmQuestion"
   | "sosDialing"
+  | "sosSending"
+  | "sosRecorded"
+  | "sosFailed"
+  | "sosRetry"
+  | "sosCallEmergency"
   | "sosCancel"
   | "caregiverEscalation"
   | "healthCardTitle"
@@ -47,7 +52,15 @@ export type MsgKey =
   | "highContrast"
   | "langOther"
   | "wakeGreeting"
-  | "openGreeting";
+  | "openGreeting"
+  | "screeningTitle"
+  | "screeningPrompt"
+  | "screeningRecording"
+  | "screeningSaving"
+  | "screeningDone"
+  | "screeningFailed"
+  | "screeningClose"
+  | "screeningSeconds";
 
 type Dict = Record<MsgKey, string>;
 
@@ -62,6 +75,11 @@ const zhHK: Dict = {
   nfcUnavailable: "呢部手機冇碰一碰，撳下面個大掣都得。",
   sosConfirmQuestion: "你係咪唔舒服？需要我幫你嗌人嗎？",
   sosDialing: "好，我即刻幫你通知屋企人同社區照顧員。",
+  sosSending: "正在發出求助…",
+  sosRecorded: "求助已記錄。如情況緊急，請直接打 999。",
+  sosFailed: "網絡未接通，求助未發出。請再試，或直接打 999。",
+  sosRetry: "再試一次",
+  sosCallEmergency: "打 999",
   sosCancel: "撳錯咗？撳呢度取消。",
   caregiverEscalation: "等咗咁耐都冇回應，我已經通知咗你屋企人同社區照顧員。",
   healthCardTitle: "跨境健康卡",
@@ -97,6 +115,14 @@ const zhHK: Dict = {
   langOther: "普通話",
   wakeGreeting: "阿婆／阿伯，我喺度。今日身體點呀？有冇邊度唔舒服？",
   openGreeting: "阿婆／阿伯，我係靈犀。今日身體點呀？有冇邊度唔舒服？",
+  screeningTitle: "語音篩查",
+  screeningPrompt: "請隨便講一分鐘，講乜都得，我幫你記錄。",
+  screeningRecording: "錄緊音…",
+  screeningSaving: "儲存緊…",
+  screeningDone: "記錄好喇，多謝你。",
+  screeningFailed: "今次記錄唔到，遲啲再試。",
+  screeningClose: "返回",
+  screeningSeconds: "秒",
 };
 
 const zhCN: Dict = {
@@ -110,6 +136,11 @@ const zhCN: Dict = {
   nfcUnavailable: "这台手机没有碰一碰，点下面的大按钮也可以。",
   sosConfirmQuestion: "您是不是不舒服？需要我帮您叫人吗？",
   sosDialing: "好，我马上帮您通知家人和社区照护员。",
+  sosSending: "正在发出求助…",
+  sosRecorded: "求助已记录。如情况紧急，请直接拨打 120。",
+  sosFailed: "网络未接通，求助没有发出。请重试，或直接拨打 120。",
+  sosRetry: "再试一次",
+  sosCallEmergency: "拨打 120",
   sosCancel: "点错了？点这里取消。",
   caregiverEscalation: "等了这么久没回应，我已经通知了您的家人和社区照护员。",
   healthCardTitle: "跨境健康卡",
@@ -145,6 +176,14 @@ const zhCN: Dict = {
   langOther: "粤语",
   wakeGreeting: "奶奶／爷爷，我在呢。今天身体怎么样？有没有哪里不舒服？",
   openGreeting: "奶奶／爷爷，我是灵犀。今天身体怎么样？有没有哪里不舒服？",
+  screeningTitle: "语音筛查",
+  screeningPrompt: "请随便讲一分钟，讲什么都可以，我帮您记录。",
+  screeningRecording: "正在录音…",
+  screeningSaving: "正在保存…",
+  screeningDone: "记录好了，谢谢您。",
+  screeningFailed: "这次没有记录成功，稍后再试。",
+  screeningClose: "返回",
+  screeningSeconds: "秒",
 };
 
 const DICTS: Record<string, Dict> = {
