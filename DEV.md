@@ -54,7 +54,7 @@ npm run android     # cap open android（打开 Android Studio 构建 APK）
 |---|---|---|
 | 类型检查 | `npm run typecheck` | `rc=0`（strict 无错） |
 | 纯函数自检 | `npm run selfcheck` | `selfcheck: OK`（幅度/跌倒三阶段/步态/VAD/升级边界/双语字典/**意图（含 tools/followup/note/recall）/问答判定**/卡片工厂/复诊卡/随手记抽取与回忆/待办卡/每日签到/桌面小组件 payload） |
-| 静态导出构建 | `npm run build` | `✓ Compiled successfully`，路由 `/` **28.4 kB / 116 kB** First Load JS，产物在 `out/` |
+| 静态导出构建 | `npm run build` | `✓ Compiled successfully`，路由 `/` **28.7 kB / 116 kB** First Load JS，产物在 `out/` |
 | Android 工程 | `npx cap add android` | `[success] android platform added!`（`web/android/` 生成，含 `AuraNative` 插件 + 所需权限） |
 | 浏览器冒烟 | Headless 浏览器 | 默认**只见「食药提醒 / 高对比 / 语言切换」三颗小按钮 + 「说话 / 求助」大按钮**；点语言切换键 → 整页在粤语↔普通话之间翻转（食藥提醒↔吃药提醒、講嘢↔说话）；说「打开按钮」→ 工具面板（健康卡/相机/唤醒/文字输入）展开；控制台零错误 |
 

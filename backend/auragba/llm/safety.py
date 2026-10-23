@@ -19,8 +19,9 @@ _EMERGENCY = (
     "胸痛", "心口痛", "透唔到氣", "透唔到气", "呼吸困難", "呼吸困难", "抖唔到氣",
     "半邊身無力", "半边身无力", "半身不遂", "講唔到話", "讲不到话", "口齒不清",
     "暈低", "晕倒", "意識不清", "意识不清", "昏迷", "流血不止", "起唔到身",
+    "跌倒", "跌低", "跌親", "仆低", "仆親", "仆亲", "摔親", "摔亲", "起不了身",
     "跌親起唔到", "跌倒起不来", "自殺", "自杀", "想死", "中風", "中风",
-    "stroke", "can't breathe", "chest pain", "unconscious",
+    "stroke", "fall down", "fell down", "fallen", "can't breathe", "chest pain", "unconscious",
 )
 
 _FORBIDDEN_ADVICE = re.compile(

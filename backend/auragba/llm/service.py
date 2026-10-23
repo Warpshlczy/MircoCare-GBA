@@ -49,6 +49,7 @@ def plan_cards(req: AgentIntentRequest, device_id: str) -> list[AgentCard]:
     # Safety and weather do not need a model.
     if safety.is_emergency(req.utterance):
         card = safety.emergency_card(req.locale)
+        card.id = f"llm-emergency-{uuid.uuid4().hex[:8]}"
         card.createdAt = now
         return [card]
     if req.intent == "weather":
@@ -62,7 +63,10 @@ def plan_cards(req: AgentIntentRequest, device_id: str) -> list[AgentCard]:
 
 
 def plan_medication(req: MedicationPlanRequest, device_id: str) -> MedicationPlan:
-    source = f"{req.utterance}\n" + "\n".join(turn.text for turn in req.history)
+    # Only the senior's own words are ground truth. Assistant turns are model
+    # output and must never justify a medication name.
+    user_history = [turn for turn in req.history if turn.role == "user"]
+    source = f"{req.utterance}\n" + "\n".join(turn.text for turn in user_history)
     if safety.is_emergency(source):
         return MedicationPlan(items=[], basis="utterance")
 
@@ -70,7 +74,7 @@ def plan_medication(req: MedicationPlanRequest, device_id: str) -> MedicationPla
     usage.reserve(device_id)
     history_lines = [
         f"{turn.role}: {scrub_text(turn.text, keep=False)[:300]}"
-        for turn in req.history[-10:]
+        for turn in user_history[-10:]
     ]
     safe_req = req.model_copy(update={"utterance": scrub_text(req.utterance, keep=False)})
     payload = LLMClient().complete_json(prompts.medication_messages(safe_req, history_lines))
@@ -108,7 +112,7 @@ def _weather_card(locale: str, now: int) -> AgentCard:
 
     if not snapshot:
         return AgentCard(
-            id="llm-weather-unavailable",
+            id=f"llm-weather-{uuid.uuid4().hex[:8]}",
             kind="weather",
             title=title,
             createdAt=now,
@@ -116,7 +120,7 @@ def _weather_card(locale: str, now: int) -> AgentCard:
         )
 
     return AgentCard(
-        id="llm-weather",
+        id=f"llm-weather-{uuid.uuid4().hex[:8]}",
         kind="weather",
         title=title,
         createdAt=now,
@@ -203,11 +207,14 @@ def _validate_medication(payload: dict[str, Any], source: str, locale: str) -> M
         if key in seen:
             continue
         seen.add(key)
+        dosage = str(raw.get("dosage", "")).strip()[:40]
+        schedule = str(raw.get("schedule", "")).strip()[:40]
         items.append(
             MedicationPlanItem(
                 name=name,
-                dosage=str(raw.get("dosage", "")).strip()[:40] or unknown,
-                schedule=str(raw.get("schedule", "")).strip()[:40] or unknown,
+                # Do not trust a dosage/schedule the senior never said.
+                dosage=dosage if dosage and safety.name_mentioned(dosage, source) else unknown,
+                schedule=schedule if schedule and safety.name_mentioned(schedule, source) else unknown,
             )
         )
 
