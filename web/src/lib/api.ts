@@ -136,7 +136,17 @@ export async function redeemPairingCode(code: string): Promise<{ seniorAccountId
 export interface CaregiverOverview {
   seniorDeviceId: string;
   healthCard: Partial<HealthCard> & { updatedAt?: number };
-  riskTrend: { at: number; riskIndex?: number; riskBand?: string }[];
+  riskTrend: {
+    at: number;
+    riskIndex?: number;
+    riskBand?: string;
+    insufficientStreams?: boolean;
+    baselineSufficient?: boolean;
+    quality?: "good" | "fair" | "reject";
+    usedInBaseline?: boolean;
+  }[];
+  /** C's baseline-level flag; `null` means "unknown", never "sufficient". */
+  sufficient?: boolean | null;
   screeningSessions?: { id?: string; at?: number; durationMs?: number; speechRatio?: number }[];
   activityTrend: { endedAt?: number; steps?: number; cadence?: number; fall?: boolean }[];
   alerts: { id?: string; at?: number; reason?: string; status?: string }[];

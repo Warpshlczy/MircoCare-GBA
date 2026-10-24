@@ -474,6 +474,10 @@ assert.equal(magnitude(3, 4, 0), 5);
   assert.equal(riskBandLabel("zh-CN", "elevated"), "建议检查");
   assert.equal(riskBandLabel("zh-CN", "elevated", true), "样本不足，继续观察", "insufficient streams never show a band");
   assert.equal(riskBandLabel("zh-CN", undefined), "样本不足，继续观察");
+  const caregiverPage = readFileSync(new URL("./app/caregiver/page.tsx", import.meta.url), "utf8");
+  assert.ok(caregiverPage.includes("overview?.sufficient"), "the family badge honours C's baseline-level flag");
+  assert.ok(caregiverPage.includes("baselineSufficient"), "per-result baseline flags are honoured too");
+  assert.ok(caregiverPage.includes('quality !== "reject"'), "a rejected capture never shows a risk band");
 
   // SOS 202 body has two tiers: "notified" only when the outbox reached someone.
   for (const loc of ["zh-HK", "zh-MO", "zh-CN"] as const) {
