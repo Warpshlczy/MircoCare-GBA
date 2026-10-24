@@ -143,6 +143,7 @@ uvicorn auragba.main:app --env-file .env --reload --port 8000
 | `AURA_LLM_TIMEOUT_S` | 单次 LLM 超时（秒） | 6 |
 | `AURA_LLM_TURN_TIMEOUT_S` | `/agent/turn` 工具规划超时（秒） | 6 |
 | `AURA_LLM_MAX_TOKENS` | 单次最大输出 token | 400 |
+| `AURA_LLM_DISABLE_THINKING` | 推理模型关闭隐藏思考（GLM-4.7-Flash 等） | `false` |
 | `AURA_LLM_DAILY_QUOTA` | 每设备每日调用上限（0 = 不限） | 200 |
 | `AURA_WEATHER_ENABLED` | 是否使用 Open-Meteo 实时天气 | `true` |
 | `AURA_WEATHER_TTL_S` | 天气缓存秒数 | 600 |

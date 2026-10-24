@@ -96,6 +96,10 @@ class Settings:
     # back to a local card/task when this budget is exceeded.
     llm_turn_timeout_s: float = _env_float("AURA_LLM_TURN_TIMEOUT_S", 6.0)
     llm_max_tokens: int = _env_int("AURA_LLM_MAX_TOKENS", 400)
+    # Reasoning models (GLM-4.5+/4.7-Flash, o-series...) spend the whole token
+    # budget on hidden reasoning and can return an empty `content`; a spoken turn
+    # has no time for that. Setting this sends `thinking: {"type": "disabled"}`.
+    llm_disable_thinking: bool = _env_bool("AURA_LLM_DISABLE_THINKING", False)
     llm_daily_quota: int = _env_int("AURA_LLM_DAILY_QUOTA", 200)
 
     # --- Optional real weather (Open-Meteo, no key) -------------------------

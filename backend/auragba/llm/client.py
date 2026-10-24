@@ -27,6 +27,17 @@ class LLMClient:
         if settings.llm_api_key:
             self._headers["Authorization"] = f"Bearer {settings.llm_api_key}"
 
+    @staticmethod
+    def _thinking_off(payload: dict[str, Any]) -> dict[str, Any]:
+        """Disable hidden reasoning for models that expose the GLM `thinking` switch.
+
+        Providers ignore unknown fields, and the OpenAI SDK path never sends it,
+        so this is safe to include only when explicitly enabled.
+        """
+        if settings.llm_disable_thinking:
+            payload["thinking"] = {"type": "disabled"}
+        return payload
+
     def _post(self, payload: dict[str, Any], *, timeout: float | None = None) -> Any:
         try:
             import httpx
@@ -51,6 +62,7 @@ class LLMClient:
         }
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
+        payload = self._thinking_off(payload)
 
         response = self._post(payload)
         # Some OpenAI-compatible providers reject response_format. Retry once
@@ -95,6 +107,7 @@ class LLMClient:
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
+        payload = self._thinking_off(payload)
         response = self._post(payload, timeout=timeout)
         if response.status_code >= 400:
             raise LLMUpstreamError(f"LLM HTTP {response.status_code}")
