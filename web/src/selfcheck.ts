@@ -55,7 +55,7 @@ import {
   fallEventsForDay,
   hasMeasuredSignal,
 } from "./lib/behaviour.ts";
-import { runTurn } from "./lib/agent.ts";
+import { runTurn, appendTurn, isLlmReady, MAX_RECENT_TURNS } from "./lib/agent.ts";
 import type { AgentDeps } from "./lib/agent.ts";
 import { createToolRunner, emergencyNumber } from "./lib/toolExec.ts";
 import {
@@ -1181,6 +1181,51 @@ assert.equal(magnitude(3, 4, 0), 5);
   assert.equal(refused.refused, true);
   assert.equal(reached, false);
   assert.ok(refused.reply.includes("做唔到"), `reply=${refused.reply}`);
+}
+
+// --- planner gate + turn history (B / P1 wiring to C3) ----------------------
+{
+  // Fail CLOSED. A backend started with AURA_LLM_ENABLED=true and no API key
+  // answers 200 with a fixed "我帮你记住了" echo; only /health can tell.
+  assert.equal(isLlmReady({ llmIntegration: "enabled" }), true);
+  assert.equal(isLlmReady({ llmIntegration: "disabled-fallback" }), false);
+  assert.equal(isLlmReady({}), false, "an older backend must not be assumed ready");
+  assert.equal(isLlmReady(null), false);
+  assert.equal(isLlmReady(undefined), false);
+  assert.equal(isLlmReady({ llmIntegration: "ENABLED" }), false, "unknown casing is unknown");
+
+  // History keeps order, drops nothing said, and never records silence.
+  const empty: { role: "user" | "assistant"; text: string }[] = [];
+  const one = appendTurn(empty, { role: "user", text: "我想飲水" });
+  assert.equal(one.length, 1);
+  assert.equal(empty.length, 0, "appendTurn must not mutate the caller's array");
+  const two = appendTurn(one, { role: "assistant", text: "好，我幫你記低。" });
+  assert.deepEqual(two.map((t) => t.role), ["user", "assistant"]);
+  assert.equal(appendTurn(two, { role: "user", text: "   " }).length, 2, "silence is not a turn");
+
+  let long: { role: "user" | "assistant"; text: string }[] = [];
+  for (let i = 0; i < 15; i++) long = appendTurn(long, { role: "user", text: `t${i}` });
+  assert.equal(long.length, MAX_RECENT_TURNS);
+  assert.equal(long[long.length - 1].text, "t14", "the newest turn survives the trim");
+  assert.equal(long[0].text, "t5");
+
+  // And the history actually reaches the model: the request carries it.
+  // (A weather utterance would short-circuit to a local card, so use one that
+  // has to be planned: only a backend turn carries context at all.)
+  const NOW = Date.UTC(2026, 9, 24, 3, 0, 0);
+  let seen: { role: string; text: string }[] = [];
+  await runTurn("幫我打電話畀阿明", {
+    locale: "zh-HK",
+    now: NOW,
+    reminders: [],
+    tasks: [],
+    recentTurns: two,
+    requestTurn: async (req) => {
+      seen = req.context.recentTurns;
+      return { reply: "", calls: [], cards: [] };
+    },
+  });
+  assert.deepEqual(seen, two, "recentTurns must travel with the request");
 }
 
 console.log("selfcheck: OK");
