@@ -87,7 +87,7 @@ export function ScreeningOverlay({ open, locale, onClose }: Props) {
           <p aria-live="polite" className="text-3xl font-bold text-aura-deep hc:text-white">
             {t(locale, "screeningRecording")}
           </p>
-          <p className="text-7xl font-black text-aura-accent">
+          <p className="rec-ring px-8 py-4 text-7xl font-black text-aura-accent">
             {remaining}
             <span className="ml-2 text-3xl">{t(locale, "screeningSeconds")}</span>
           </p>

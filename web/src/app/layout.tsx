@@ -3,11 +3,11 @@ import type { ReactNode } from "react";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "AuraGBA 湾区灵犀",
+  title: "忆伴 MemoMate",
   description: "零 UI 语音长者关怀助手（粤港澳大湾区）：食药提醒、跌倒守护、跨境健康卡。",
   manifest: "/manifest.webmanifest",
-  applicationName: "AuraGBA",
-  appleWebApp: { capable: true, statusBarStyle: "default", title: "湾区灵犀" },
+  applicationName: "MemoMate",
+  appleWebApp: { capable: true, statusBarStyle: "default", title: "忆伴" },
   formatDetection: { telephone: true },
 };
 

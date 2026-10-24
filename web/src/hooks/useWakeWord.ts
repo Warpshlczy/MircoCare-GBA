@@ -5,8 +5,9 @@ import { ensureAudioUnlocked, startWakeWord } from "@/lib/audio";
 import { track } from "@/lib/analytics";
 import type { ActivityState, Locale } from "@/lib/types";
 
-/** Names that wake the assistant. Kept lowercase for matching. */
-const WAKE_NAMES = ["灵犀", "靈犀", "lingxi", "ling xi", "小灵", "小靈"];
+/** Names that wake the assistant. Kept lowercase for matching. Mirrors the
+ *  native `WakeListenService.NAMES` (B) — change both together. */
+export const WAKE_NAMES = ["小忆", "小憶", "阿忆", "阿憶", "忆伴", "憶伴", "memomate", "memo mate"];
 
 /**
  * Sleep/awake lifecycle around the wake name. While `enabled` and sleeping it

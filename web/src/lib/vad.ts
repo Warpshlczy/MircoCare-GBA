@@ -1,12 +1,12 @@
 // Browser glue: AnalyserNode -> energy VAD (signal.ts) on a timer.
 //
-// ponytail: energy-threshold VAD is the cheap ceiling — it misses soft/low-pitched
-// speech and trips on background noise (fans, TV). The reference implementation in
-// research (browser-vad / vad-recorder) runs Silero VAD via ONNX (@ricky0123/vad-web
-// or @huggingface/transformers + onnxruntime-web). Upgrade path: swap createVad's
-// internals for a Silero worker and keep the exact same {isSpeech, ratio} contract.
+// ponytail: energy-threshold VAD misses soft/low-pitched speech. Capture quality
+// is judged separately by signal.ts#qualityOf (speech ratio + SNR + duration),
+// which is what rejects steady background noise; Silero VAD was deliberately not
+// added (docs/dev.md §2.8 D-1). Upgrade path: swap createVad's internals for a
+// Silero worker and keep the exact same {isSpeech, ratio} contract.
 
-import { energyVad, trimSilence } from "./signal";
+import { energyVad, qualityOf, snrDb, trimSilence } from "./signal";
 import type { ScreeningSession } from "./types";
 
 function audioCtxCtor(): typeof AudioContext {
@@ -118,11 +118,16 @@ export async function recordScreening(
   const kept = frames.slice(start, end + 1);
   const vad = energyVad(kept.map((f) => f.rmsDb));
   const dbs = kept.map((f) => f.rmsDb);
+  const elapsedMs = Date.now() - startedAt;
+  // SNR on the UNTRIMMED frames: trimming removes the noise floor it measures.
+  const snr = Math.round(snrDb(frames.map((f) => f.rmsDb)) * 10) / 10;
   return {
     id: `scr-${startedAt}`,
     startedAt,
-    durationMs: Date.now() - startedAt,
+    durationMs: elapsedMs,
     speechRatio: vad.ratio,
+    quality: qualityOf({ speechRatio: vad.ratio, snrDb: snr, durationMs: elapsedMs }),
+    snrDb: snr,
     trimmedStartMs: start * 100,
     trimmedEndMs: end * 100,
     features: {

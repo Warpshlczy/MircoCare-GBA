@@ -66,6 +66,11 @@ export interface ScreeningSession {
   trimmedEndMs: number;
   /** placeholder acoustic features, filled by backend later */
   features: Record<string, number>;
+  /** A's capture gate (signal.ts#qualityOf). `reject` is still uploaded; the
+   *  backend keeps it out of the baseline (issue #3). */
+  quality?: "good" | "fair" | "reject";
+  /** Frame-energy P90 − P10 before trimming, dB. */
+  snrDb?: number;
 }
 
 export interface SosEvent {

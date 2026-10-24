@@ -39,7 +39,7 @@
 | `web/` | 前端工程（Next.js 14 App Router + React 18 + TS strict + Tailwind），静态导出到 `out/`，同时作为 Android 壳的 `webDir` |
 | `backend/` | 后端服务（Python / FastAPI）：MCI/AD 多模态筛查引擎、隐私管线、个人基线、审计与经济学模块 |
 | `docs/RESEARCH-ROADMAP.md` | 研究路线图：必读论文、数据集、纵向检测方法论 |
-| `DEV.md` | 前端交付文档（做了什么、怎么验证、已知天花板、后端契约清单） |
+| `docs/dev.md` | 三部分开发文档（A/B/C 分工、文件级改动点、契约、验收与自检） |
 | `backend/README.md` | 后端专属说明（快速开始、模型产物共享流程、环境变量、目录结构） |
 
 ---
@@ -162,4 +162,4 @@ npm run android      # cap open android（Android Studio 构建 APK）
 
 ---
 
-_文档随代码演进。`DEV.md` 记录「已交付什么」，`docs/RESEARCH-ROADMAP.md` 记录「下一步往哪走、依据是什么」。_
+_文档随代码演进。`docs/dev.md` 记录「已交付什么、怎么分工」，`docs/RESEARCH-ROADMAP.md` 记录「下一步往哪走、依据是什么」。_

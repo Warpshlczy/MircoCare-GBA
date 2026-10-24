@@ -2,6 +2,9 @@
 // Imports ONLY pure modules (no window/DOM at module scope). No test framework.
 
 import assert from "node:assert/strict";
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   magnitude,
   createFallDetector,
@@ -10,9 +13,14 @@ import {
   trimSilence,
   energyVad,
   escalationFor,
+  snrDb,
+  qualityOf,
+  QUALITY_MIN,
+  QUALITY_GOOD,
+  QUALITY_MIN_MS,
   G,
 } from "./lib/signal.ts";
-import { t } from "./lib/i18n.ts";
+import { t, riskBandLabel } from "./lib/i18n.ts";
 import { parseIntent, isQuestion } from "./lib/intent.ts";
 import { localCardsFor, followupCard, todoCardFromUtterance, taskCard, placeCard, alarmCard, agentPlanCard } from "./lib/cards.ts";
 import {
@@ -22,7 +30,12 @@ import {
   noteTextFromUtterance,
   recallCard,
 } from "./lib/notes.ts";
-import { shouldCheckIn } from "./lib/checkin.ts";
+import { planProactive, recordSpoke, emptyProactiveRecord, isQuietHour } from "./lib/proactive.ts";
+import type { ProactiveCtx } from "./lib/proactive.ts";
+import { ITEMS, pickNext, shouldStop, careCue, isYes, textFor, todayLine } from "./lib/interview.ts";
+import type { InterviewHistory, InterviewState } from "./lib/interview.ts";
+import { visemeFromText, FRAMES_PER_CHAR, VISEME_FRAME_MS } from "./lib/viseme.ts";
+import { parseManifest } from "./lib/live2d.ts";
 import { nextDueAt } from "./lib/datetime.ts";
 import { homeWidgetPayload, onForeground, FOREGROUND_REASONS } from "./lib/native.ts";
 import { haversineM, inCircle, observe, shouldAlert, markAlerted, formatDistance } from "./lib/geofence.ts";
@@ -88,7 +101,7 @@ import {
   requiredPermissions,
   toolByName,
 } from "./lib/tools.ts";
-import type { GaitWindow, OutboxItem, ReminderItem, SosEvent, Task, TaskEvent, ToolCall } from "./lib/types.ts";
+import type { GaitWindow, OutboxItem, ReminderItem, SosEvent, Task, TaskEvent } from "./lib/types.ts";
 
 // --- magnitude ---------------------------------------------------------------
 assert.equal(magnitude(3, 4, 0), 5);
@@ -302,13 +315,192 @@ assert.equal(magnitude(3, 4, 0), 5);
   assert.equal(todo.data?.checklist?.[0]?.done, false);
 }
 
-// --- daily check-in (req 4) --------------------------------------------------
+// --- proactive planner: the 打扰预算 (docs/dev.md §2.4 A2) -----------------------
 {
-  const day = 24 * 60 * 60 * 1000;
-  const base = new Date(2026, 9, 11, 23, 30).getTime(); // 2026-10-11 23:30 local
-  assert.equal(shouldCheckIn(null, base), true, "first ever open -> check in");
-  assert.equal(shouldCheckIn(base, base + 10 * 60 * 1000), false, "same day -> no");
-  assert.equal(shouldCheckIn(base, base + day), true, "next day -> yes");
+  const at = (d: number, h: number, m = 0) => new Date(2026, 9, d, h, m).getTime();
+  const ctx = (over: Partial<ProactiveCtx>): ProactiveCtx => ({
+    now: at(24, 9),
+    trigger: "tick",
+    lastSpokeAt: null,
+    spokenToday: 0,
+    lastInteractionAt: at(24, 8),
+    interviewAt: null,
+    hasDueReminder: false,
+    ...over,
+  });
+  assert.equal(planProactive(ctx({}))?.kind, "interview", "fresh day -> interview");
+  assert.equal(planProactive(ctx({ lastSpokeAt: at(24, 7), spokenToday: 3 })), null, "09:00, 3 already -> null");
+  assert.equal(
+    planProactive(ctx({ lastSpokeAt: at(23, 15), spokenToday: 3 }))?.kind,
+    "interview",
+    "yesterday's count does not carry over"
+  );
+  assert.equal(planProactive(ctx({ now: at(24, 22, 30), hasDueReminder: true }))?.kind, "reminder", "22:30 + due med -> reminder only");
+  assert.equal(planProactive(ctx({ now: at(24, 22, 30) })), null, "quiet hours");
+  assert.equal(planProactive(ctx({ now: at(24, 7, 59) })), null, "quiet until 08:00");
+  assert.equal(planProactive(ctx({ lastSpokeAt: at(24, 8), spokenToday: 1 })), null, "60min gap < 90min");
+  assert.equal(planProactive(ctx({ lastSpokeAt: at(24, 8), spokenToday: 1, trigger: "open" }))?.kind, "greeting", "opening the app may still greet");
+  assert.equal(planProactive(ctx({ trigger: "boot" })), null, "boot never speaks");
+  const silent = planProactive(ctx({ lastInteractionAt: at(22, 20) }));
+  assert.equal(silent?.kind, "silence", "2 silent days -> silence care BEFORE interview");
+  assert.equal(silent?.silentDays, 2);
+  assert.equal(planProactive(ctx({ lastInteractionAt: at(21, 20) }))?.silentDays, 3);
+  assert.equal(planProactive(ctx({ interviewAt: at(24, 8, 30) })), null, "interview done today -> nothing on tick");
+  assert.equal(planProactive(ctx({ lastInteractionAt: null }))?.kind, "interview", "fresh install is not 'silent'");
+  const r1 = recordSpoke(emptyProactiveRecord(), at(24, 9));
+  assert.equal(recordSpoke(r1, at(24, 11)).spokenToday, 2);
+  assert.equal(recordSpoke(r1, at(25, 9)).spokenToday, 1, "new day resets the count");
+  assert.equal(isQuietHour(at(24, 21)), true);
+  assert.equal(isQuietHour(at(24, 8)), false);
+}
+
+// --- interview: bank, selection, stop rules (docs/dev.md §2.4 A1) ------------
+{
+  assert.equal(ITEMS.length, 15, "5 domains x 3 items");
+  for (const d of ["memory", "orientation", "language", "daily_living", "mood"]) {
+    assert.equal(ITEMS.filter((i) => i.domain === d).length, 3, `domain ${d} has 3 items`);
+  }
+  assert.equal(new Set(ITEMS.map((i) => i.id)).size, 15, "item ids are unique");
+  for (const i of ITEMS) {
+    assert.ok(i.prompt.hk && i.prompt.cn && i.prompt.hk !== i.prompt.cn, `${i.id}: Cantonese + Mandarin wording`);
+    assert.equal(textFor(i.prompt, "zh-MO"), i.prompt.hk, "zh-MO reads the Cantonese form");
+    assert.ok(!/記唔記得|记不记得|考你|测试|測試/.test(i.prompt.hk + i.prompt.cn), `${i.id}: no quiz tone`);
+  }
+
+  const now = new Date(2026, 9, 24, 10).getTime();
+  const DAY = 86_400_000;
+  const s: InterviewState = { startedAt: now, answers: [] };
+  const ans = (id: string, at = now, timedOut = false) => ({ id, at, durationMs: 4000, textLen: 8, confidence: 0.8, timedOut });
+  const picked: string[] = [];
+  for (let k = 0; k < 4; k++) {
+    const it = pickNext(s, {}, now);
+    assert.ok(it);
+    picked.push(it.id);
+    s.answers.push(ans(it.id));
+  }
+  assert.equal(new Set(picked.map((id) => ITEMS.find((i) => i.id === id)?.domain)).size, 4, "4 questions -> 4 different domains");
+  assert.equal(shouldStop(s, now), true, "4 answers -> stop");
+  assert.equal(shouldStop({ startedAt: now, answers: [] }, now + 180_000), true, "180s -> stop");
+  assert.equal(shouldStop({ startedAt: now, answers: [], stop: "refuse" }, now), true, "one refusal -> stop");
+  assert.equal(shouldStop({ startedAt: now, answers: [ans("memory-01")] }, now + 1000), false);
+
+  // never twice on one day, even across sessions
+  const today: InterviewHistory = Object.fromEntries(ITEMS.map((i) => [i.id, { at: now - 3600_000, timedOut: false }]));
+  assert.equal(pickNext({ startedAt: now, answers: [] }, today, now), null, "all asked today -> nothing left");
+  // 7-day freshness: an item asked 2 days ago loses to one never asked
+  const first = pickNext({ startedAt: now, answers: [] }, {}, now)!;
+  const fresh = pickNext({ startedAt: now, answers: [] }, { [first.id]: { at: now - 2 * DAY, timedOut: false } }, now)!;
+  assert.notEqual(fresh.id, first.id, "recently asked item is deprioritised");
+  assert.equal(fresh.domain, first.domain, "…but the day's domain order is kept");
+  // a timed-out item ranks after a non-timed-out one of the same age
+  const sameDomain = ITEMS.filter((i) => i.domain === first.domain);
+  const h: InterviewHistory = Object.fromEntries(sameDomain.map((i) => [i.id, { at: now - 10 * DAY, timedOut: i.id === sameDomain[0].id }]));
+  assert.notEqual(pickNext({ startedAt: now, answers: [] }, h, now)!.id, sameDomain[0].id, "timed-out item is demoted");
+
+  assert.equal(careCue("唔想講喇"), "refuse");
+  assert.equal(careCue("不想说了，好累"), "refuse", "refusal wins over tiredness");
+  assert.equal(careCue("我好攰"), "tired");
+  assert.equal(careCue("我今日好唔開心"), "sad");
+  assert.equal(careCue("我唔見咗鎖匙"), "lost");
+  assert.equal(careCue("今朝食咗粥"), null);
+  assert.equal(isYes("係呀"), true);
+  assert.equal(isYes("好"), true);
+  assert.equal(isYes("唔好"), false, "唔好 contains 好 but means no");
+  assert.equal(isYes("冇問題"), true, "冇問題 contains 冇 but means yes");
+  assert.equal(isYes("唔係"), false);
+  assert.equal(isYes("今日天氣"), null, "unsure must not be read as yes");
+  assert.equal(isYes(""), null);
+  const sat = new Date(2026, 9, 24, 10).getTime(); // a Saturday
+  assert.equal(todayLine("zh-HK", sat), "今日係10月24號，星期六。");
+  assert.equal(todayLine("zh-CN", sat), "今天是10月24日，星期六。");
+}
+
+// --- lip-sync timeline (docs/dev.md §2.4 A3) ----------------------------------
+{
+  const v = visemeFromText("你好，阿婆");
+  assert.equal(v.length, 5 * FRAMES_PER_CHAR, "4 frames per character, punctuation included");
+  assert.deepEqual(v.slice(2 * FRAMES_PER_CHAR, 3 * FRAMES_PER_CHAR), [0, 0, 0, 0], "comma = closed mouth");
+  assert.ok(v.every((x) => x >= 0 && x <= 1), "openness stays in 0..1");
+  assert.ok(Math.max(...v.slice(0, FRAMES_PER_CHAR)) >= 0.75, "a syllable opens the mouth");
+  assert.deepEqual(visemeFromText("你"), visemeFromText("你"), "deterministic");
+  assert.ok(VISEME_FRAME_MS * FRAMES_PER_CHAR >= 200 && VISEME_FRAME_MS * FRAMES_PER_CHAR <= 320, "≈ one syllable at rate 0.85");
+}
+
+// --- Live2D manifest: any doubt -> no model -> Canvas-2D (docs/dev.md §2.3.1) -
+{
+  const committed = JSON.parse(readFileSync(new URL("../public/live2d/model.manifest.json", import.meta.url), "utf8"));
+  assert.equal(committed.model, null, "repo ships with the model slot EMPTY");
+  assert.equal(parseManifest(committed), null, "null model -> L2");
+  assert.equal(parseManifest(null), null, "missing manifest (404) -> L2");
+  assert.equal(parseManifest("garbage"), null);
+  assert.equal(parseManifest({ ...committed, model: "hiyori", modelPath: "/live2d/hiyori/hiyori.moc3" }), null, "entry must be .model3.json");
+  assert.equal(parseManifest({ ...committed, model: "hiyori", modelPath: "/live2d/hiyori/h.model3.json", runtime: [] }), null, "no runtime -> L2");
+  const ok = parseManifest({ model: "hiyori", modelPath: "/live2d/hiyori/h.model3.json", runtime: ["/a.js"] });
+  assert.ok(ok, "minimal valid manifest mounts");
+  assert.equal(ok.params.mouthOpen, "ParamMouthOpenY", "defaults fill the gaps");
+  assert.deepEqual(ok.anchor, [0.5, 0.5]);
+  assert.equal(ok.motionGroups.tap, "TapBody");
+}
+
+// --- capture quality gate (docs/dev.md §2.4 A4) -------------------------------
+{
+  const steadyNoise = Array.from({ length: 300 }, (_, i) => -30 + (i % 3)); // 30s of TV/fan hum
+  assert.ok(snrDb(steadyNoise) < QUALITY_MIN.snrDb, `steady noise snr=${snrDb(steadyNoise)}`);
+  assert.equal(qualityOf({ speechRatio: 1, snrDb: snrDb(steadyNoise), durationMs: 30_000 }), "reject", "TV noise must not reach the baseline");
+  const speech = Array.from({ length: 100 }, (_, i) => (i % 2 ? -20 : -60)); // 10s, half speech over a quiet floor
+  assert.ok(snrDb(speech) >= QUALITY_GOOD.snrDb);
+  assert.equal(qualityOf({ speechRatio: 0.5, snrDb: snrDb(speech), durationMs: 10_000 }), "good");
+  assert.equal(qualityOf({ speechRatio: 0.3, snrDb: 17, durationMs: 10_000 }), "fair");
+  assert.equal(qualityOf({ speechRatio: 0.5, snrDb: 30, durationMs: 5_000 }), "reject", "< 8s screening");
+  assert.equal(qualityOf({ speechRatio: 0.5, snrDb: 30, durationMs: 5_000 }, QUALITY_MIN_MS.answer), "good", "a 5s interview answer is enough");
+  assert.equal(qualityOf({ speechRatio: 0.2, snrDb: 30, durationMs: 60_000 }), "reject", "mostly silence");
+  assert.equal(snrDb([]), 0);
+}
+
+// --- rename + wording rules (docs/dev.md §1.3, §1.8) --------------------------
+{
+  for (const loc of ["zh-HK", "zh-MO", "zh-CN"]) {
+    assert.ok(/憶伴|忆伴/.test(t(loc, "greeting")), `${loc} greeting uses the new name`);
+    assert.ok(/小憶|小忆/.test(t(loc, "sleeping")), `${loc} teaches the new wake word`);
+  }
+  assert.equal(riskBandLabel("zh-HK", "low"), "一切如常");
+  assert.equal(riskBandLabel("zh-CN", "watch"), "值得留意");
+  assert.equal(riskBandLabel("zh-CN", "elevated"), "建议检查");
+  assert.equal(riskBandLabel("zh-CN", "elevated", true), "样本不足，继续观察", "insufficient streams never show a band");
+  assert.equal(riskBandLabel("zh-CN", undefined), "样本不足，继续观察");
+
+  // SOS 202 body has two tiers: "notified" only when the outbox reached someone.
+  for (const loc of ["zh-HK", "zh-MO", "zh-CN"] as const) {
+    assert.ok(t(loc, "sosNotified").length > 0 && t(loc, "sosNoFamily").length > 0, `${loc} SOS copy`);
+    assert.ok(!/已通知/.test(t(loc, "sosNoFamily")), `${loc} never claims family was notified`);
+  }
+  const page = readFileSync(new URL("./app/page.tsx", import.meta.url), "utf8");
+  assert.ok(page.includes("planForeground("), "foreground reasons go through B's decision table");
+  assert.ok(page.includes("shouldRaiseSos("), "lock-screen SOS is debounced");
+  assert.ok(page.includes('openSos("button", "widget")'), "widget SOS is tagged as source=widget");
+
+  // Walk src/: no old brand left (native.ts's default title belongs to B0), and
+  // nothing the assistant can say blames the senior.
+  const files: string[] = [];
+  const walk = (dir: string) => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const p = join(dir, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (/\.(ts|tsx)$/.test(e.name) && !p.endsWith("selfcheck.ts")) files.push(p);
+    }
+  };
+  walk(fileURLToPath(new URL(".", import.meta.url)));
+  assert.ok(files.length > 30, `walked ${files.length} source files`);
+  for (const f of files) {
+    if (f.endsWith(join("lib", "native.ts"))) continue;
+    assert.ok(!/灵犀|靈犀|lingxi/i.test(readFileSync(f, "utf8")), `old name left in ${f}`);
+  }
+  const wake = readFileSync(new URL("./hooks/useWakeWord.ts", import.meta.url), "utf8");
+  assert.ok(wake.includes('"小忆"') && wake.includes('"小憶"') && wake.includes('"阿忆"'), "new wake words");
+  const sayable = readFileSync(new URL("./lib/i18n.ts", import.meta.url), "utf8") + readFileSync(new URL("./lib/interview.ts", import.meta.url), "utf8");
+  for (const w of ["傻", "蠢", "笨", "又唔記得", "又忘了", "你問過", "你问过", "痴呆", "失智", "阿尔茨海默", "阿茲海默"]) {
+    assert.ok(!sayable.includes(w), `no blaming / diagnostic word "${w}" in anything the assistant says`);
+  }
 }
 
 // --- home-screen widget payload (native-shell contract) ----------------------

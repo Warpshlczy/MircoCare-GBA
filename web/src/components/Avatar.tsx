@@ -1,70 +1,157 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
+import { mountLive2D, type Live2DHandle } from "@/lib/live2d";
 import type { AssistantState } from "@/lib/types";
 
-// ponytail: Canvas-2D stand-in for Live2D. The ONLY contract a real model needs is
-// these two props — `state` (what the assistant is doing) and `level` (0..1 mouth
-// openness / lip-sync amplitude). Swap-in point: replace the draw() body with
-// `pixi-live2d-display` (PIXI.Application + model.motion/expression + a ParamMouthOpenY
-// driven by `level`). Everything upstream (audio, VAD, hooks) stays unchanged.
+// The digital human, with three fallback levels (docs/dev.md §2.3.1 ⑤):
+//   L1 Live2D  — only when public/live2d/model.manifest.json names a model AND it
+//                loads within 3s (lib/live2d.ts, the only Live2D-coupled file);
+//   L2 Canvas  — the default: blink, breath, mouth height = `level`;
+//   L3 static  — when even a 2D canvas context is unavailable.
+// All three live inside ONE <button>, so tap (= say it again) and long-press
+// (= listen) work at every level, for touch, keyboard and screen readers alike.
+
+export type AvatarMode = "live2d" | "canvas" | "static";
 
 interface AvatarProps {
   state: AssistantState;
   level?: number; // 0..1 lip-sync amplitude
   size?: number; // css px, square
-  className?: string;
+  /** Spoken by screen readers: current state + what tapping does. */
+  label: string;
+  onTap?: () => void;
+  onLongPress?: () => void;
+  /** Reports the level actually rendered (for `track("avatar_*")`). */
+  onMode?: (mode: AvatarMode) => void;
 }
 
-const LABELS: Record<AssistantState, string> = {
-  idle: "灵犀助手（空闲）",
-  listening: "灵犀正在聆听",
-  thinking: "灵犀正在思考",
-  speaking: "灵犀正在说话",
-  confirming: "灵犀正在确认",
-};
+const LONG_PRESS_MS = 1000;
 
-export function Avatar({ state, level = 0, size = 320, className }: AvatarProps) {
+export function Avatar({ state, level = 0, size = 320, label, onTap, onLongPress, onMode }: AvatarProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const hostRef = useRef<HTMLSpanElement>(null);
+  const live2dRef = useRef<Live2DHandle | null>(null);
+  const [mode, setMode] = useState<AvatarMode>("canvas");
   const stateRef = useRef(state);
   const levelRef = useRef(level);
   stateRef.current = state;
   levelRef.current = level;
+  const onModeRef = useRef(onMode);
+  onModeRef.current = onMode;
+
+  // L1 attempt. With the committed `"model": null` this is one tiny fetch.
+  useEffect(() => {
+    let alive = true;
+    const host = hostRef.current;
+    if (!host) return;
+    void mountLive2D(host, size).then((h) => {
+      if (!alive) return h?.destroy();
+      if (!h) return;
+      live2dRef.current = h;
+      setMode("live2d");
+      onModeRef.current?.("live2d");
+    });
+    return () => {
+      alive = false;
+      live2dRef.current?.destroy();
+      live2dRef.current = null;
+    };
+  }, [size]);
 
   useEffect(() => {
+    live2dRef.current?.setLevel(state === "speaking" ? level : 0);
+    live2dRef.current?.setListening(state === "listening");
+  }, [state, level]);
+
+  // L2 render loop; stops as soon as L1 takes over (the canvas unmounts).
+  useEffect(() => {
+    if (mode !== "canvas") return;
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-
-    const dpr = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
+    if (!ctx) {
+      setMode("static");
+      onModeRef.current?.("static");
+      return;
+    }
+    const dpr = window.devicePixelRatio || 1;
     canvas.width = size * dpr;
     canvas.height = size * dpr;
     ctx.scale(dpr, dpr);
 
-    const reduced =
-      typeof window !== "undefined" &&
-      window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
-
+    const reduced = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
     let raf = 0;
     const t0 = performance.now();
     const loop = (now: number) => {
-      const t = reduced ? 0 : (now - t0) / 1000;
-      draw(ctx, size, t, stateRef.current, levelRef.current, reduced);
+      draw(ctx, size, (now - t0) / 1000, stateRef.current, levelRef.current, reduced);
       raf = requestAnimationFrame(loop);
     };
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
-  }, [size]);
+  }, [size, mode]);
+
+  // Tap vs long-press on one element. Keyboard Enter/Space arrives as a click
+  // without pointer events, so it always counts as a tap.
+  const pressTimer = useRef<number | null>(null);
+  const longFired = useRef(false);
+  const clearPress = () => {
+    if (pressTimer.current !== null) window.clearTimeout(pressTimer.current);
+    pressTimer.current = null;
+  };
+
+  const face = (
+    <>
+      <span ref={hostRef} aria-hidden="true" className={mode === "live2d" ? "absolute inset-0" : "hidden"} />
+      {mode === "canvas" ? <canvas ref={canvasRef} aria-hidden="true" style={{ width: size, height: size }} /> : null}
+      {mode === "static" ? (
+        <span aria-hidden="true" className="flex h-full w-full items-center justify-center rounded-full bg-[#F6D5B0] text-[8rem]">
+          😊
+        </span>
+      ) : null}
+    </>
+  );
+  const box = { width: size, height: size };
+
+  // Decorative use (e.g. inside the SOS screen): not a focus stop.
+  if (!onTap && !onLongPress) {
+    return (
+      <span role="img" aria-label={label} style={box} className="relative block">
+        {face}
+      </span>
+    );
+  }
 
   return (
-    <canvas
-      ref={canvasRef}
-      role="img"
-      aria-label={LABELS[state]}
-      style={{ width: size, height: size }}
-      className={className}
-    />
+    <button
+      type="button"
+      aria-label={label}
+      onPointerDown={() => {
+        longFired.current = false;
+        clearPress();
+        pressTimer.current = window.setTimeout(() => {
+          longFired.current = true;
+          pressTimer.current = null;
+          onLongPress?.();
+        }, LONG_PRESS_MS);
+      }}
+      onPointerUp={clearPress}
+      onPointerLeave={clearPress}
+      onPointerCancel={clearPress}
+      onContextMenu={(e) => e.preventDefault()}
+      onClick={() => {
+        if (longFired.current) {
+          longFired.current = false;
+          return;
+        }
+        live2dRef.current?.tap();
+        onTap?.();
+      }}
+      style={{ ...box, WebkitTouchCallout: "none" }}
+      className="relative select-none rounded-full"
+    >
+      {face}
+    </button>
   );
 }
 
@@ -79,11 +166,17 @@ function draw(
   const cx = size / 2;
   const cy = size / 2;
   const r = size * 0.33;
-  const breath = 1 + Math.sin(t * 1.2) * 0.012;
+  // Displacement (breath, lean, idle tilt) is motion; reduced-motion turns it off.
+  // Blinking and the mouth are communication, so they stay on in every mode.
+  const breath = reduced ? 1 : 1 + Math.sin(t * 1.2) * 0.012;
+  const lean = !reduced && state === "listening" ? 1.03 : 1;
+  const phase = t % 10; // one gentle head tilt every ~10s while idle
+  const tilt = !reduced && state === "idle" && phase < 1 ? Math.sin(phase * Math.PI) * 0.04 : 0;
   ctx.clearRect(0, 0, size, size);
   ctx.save();
   ctx.translate(cx, cy);
-  ctx.scale(breath, breath);
+  ctx.rotate(tilt);
+  ctx.scale(breath * lean, breath * lean);
   ctx.translate(-cx, -cy);
 
   // face
@@ -109,9 +202,11 @@ function draw(
     ctx.beginPath();
     ctx.ellipse(cx + dx, eyeCy, r * 0.17, r * 0.2 * blink, 0, 0, Math.PI * 2);
     ctx.fill();
+    // pupils look toward the screen centre (the senior) while listening
+    const look = state === "listening" ? -Math.sign(dx) * r * 0.03 : 0;
     ctx.fillStyle = "#4A2C1A";
     ctx.beginPath();
-    ctx.ellipse(cx + dx, eyeCy + r * 0.02 * blink, r * 0.08, r * 0.1 * blink, 0, 0, Math.PI * 2);
+    ctx.ellipse(cx + dx + look, eyeCy + r * 0.02 * blink, r * 0.08, r * 0.1 * blink, 0, 0, Math.PI * 2);
     ctx.fill();
   }
 
@@ -145,5 +240,4 @@ function draw(
     ctx.stroke();
   }
   ctx.restore();
-  void reduced;
 }

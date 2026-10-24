@@ -236,3 +236,42 @@ export function escalationFor(
   if (elapsedMs >= retryMs) return "retry";
   return "none";
 }
+// ---------------------------------------------------------------------------
+// Capture quality gate (docs/dev.md §2.4 A4). The sample is still uploaded with
+// its label — the backend decides what enters the baseline, so the denominator
+// ("how many were captured, how many were unusable") is never lost.
+// ---------------------------------------------------------------------------
+
+function percentile(sorted: number[], p: number): number {
+  if (!sorted.length) return -160;
+  return sorted[Math.min(sorted.length - 1, Math.floor(p * sorted.length))];
+}
+
+/**
+ * Frame-energy dynamic range: P90 (speech peaks) − P10 (noise floor), in dB.
+ * Must be computed BEFORE silence trimming, which deletes the noise floor.
+ * ponytail: a steady fan/air-con and loudness-compressed TV both have a narrow
+ * range, so they score low — that is the case energy VAD alone cannot reject.
+ * Ceiling: dynamic TV dialogue close to the mic can still pass. Upgrade path:
+ * multiply by a Silero "is this a human voice" probability.
+ */
+export function snrDb(frameDbs: number[]): number {
+  const s = [...frameDbs].sort((a, b) => a - b);
+  return percentile(s, 0.9) - percentile(s, 0.1);
+}
+
+export type CaptureQuality = "good" | "fair" | "reject";
+
+export const QUALITY_MIN = { speechRatio: 0.25, snrDb: 15 } as const;
+export const QUALITY_GOOD = { speechRatio: 0.4, snrDb: 20 } as const;
+/** Free-speech screening needs 8s; a single interview answer needs 3s. */
+export const QUALITY_MIN_MS = { screening: 8000, answer: 3000 } as const;
+
+export function qualityOf(
+  s: { speechRatio: number; snrDb: number; durationMs: number },
+  minMs: number = QUALITY_MIN_MS.screening
+): CaptureQuality {
+  if (s.speechRatio < QUALITY_MIN.speechRatio || s.snrDb < QUALITY_MIN.snrDb || s.durationMs < minMs) return "reject";
+  if (s.speechRatio >= QUALITY_GOOD.speechRatio && s.snrDb >= QUALITY_GOOD.snrDb) return "good";
+  return "fair";
+}

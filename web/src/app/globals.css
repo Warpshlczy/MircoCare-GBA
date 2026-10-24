@@ -42,6 +42,49 @@ ol + p {
   min-width: 60px;
 }
 
+/* Captions: everything the assistant says, 2 lines max, high contrast. */
+.caption {
+  max-width: 28rem;
+  border-radius: 1rem;
+  background: #fff;
+  padding: 0.5rem 1rem;
+  text-align: center;
+  font-size: 48px;
+  line-height: 1.3;
+  font-weight: 700;
+  color: theme("colors.aura.deep");
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.hc .caption {
+  background: #000;
+  color: #ffeb3b;
+  border: 3px solid #fff;
+}
+
+/* Large-text mode, toggled by adding .lg on <html>: every rem-sized element
+   (all Tailwind text/spacing) scales by 1.25 at once. */
+html.lg {
+  font-size: 125%;
+}
+.lg .caption {
+  font-size: 64px;
+}
+
+/* Recording indicator: visible to family in the room; the senior never has to look. */
+.rec-ring {
+  border-radius: 9999px;
+  box-shadow: 0 0 0 10px rgba(192, 57, 43, 0.35);
+  animation: rec-pulse 1.6s ease-in-out infinite;
+}
+@keyframes rec-pulse {
+  50% {
+    box-shadow: 0 0 0 22px rgba(192, 57, 43, 0.12);
+  }
+}
+
 /* High-contrast mode, toggled by adding .hc on <body>. */
 .hc {
   background: #000 !important;

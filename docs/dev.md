@@ -179,7 +179,7 @@ grep -rl "auragba" backend --include=*.py --include=*.txt --include=*.md | \
 |---|---|---|---|---|---|
 | **M0** | 改名 + 基线可跑 | i18n/Avatar/唤醒词改名 | 原生 NAMES、通知文案、`native.ts` title | `main.py` 改名；`memomate` 包名迁移 | `npm run typecheck` / `npm run selfcheck` / `node src/selfcheck.ts` / `python selfcheck.py` 全绿 |
 | **M1** | 采集闭环可用 | 每日访谈脚本、静音门控、镜头指示 | 卡片落库、outbox 重放、任务确认埋点 | 阈值校准落盘、`/screening/analyze` 真 WAV 跑通 | 端到端一条语音 → 后端一条 `screening_results` |
-| **M2** | 拟真与主动触达 | Live2D 挂载层 + viseme、主动调度器、唤起与无障碍 | 小组件 + 前置 + 定时唤醒、权限矩阵 | 行为流接入（服药/任务/步态） | 装机 demo：锁屏被唤醒 → 数字人主动说话 → 生成卡片；§2.3.1 ⑤ 四条断言全过（默认 `model: null` 走 Canvas-2D） |
+| **M2** | 拟真与主动触达 | Live2D 挂载层 + viseme、主动调度器、唤起与无障碍 | 小组件 + 前置 + 定时唤醒、权限矩阵 | 行为流接入（服药/任务/步态） | 装机 demo：锁屏被唤醒 → 数字人主动说话 → 生成卡片；§2.3.1 ⑥ 四条断言全过（默认 `model: null` 走 Canvas-2D） |
 | **M3** | Agent 真编排 | 对话状态机、打断/重问 | `/agent/turn` 工具调用、代操作护栏 | Agent 后端 + 周报生成 + SOS 通知 | 5 个工具调用场景脚本化全通过 |
 | **M4** | 证据与答辩材料 | 无障碍与伦理 UX 说明页 | 合规权限清单、无障碍声明 | PICO / FMEA / NPV / 监管 / TRL / IP / 审计 / 伦理 | 附录 A–E 全部数字可复现 + §1.8 矩阵每行有验收断言 |
 
@@ -222,225 +222,255 @@ grep -rl "auragba" backend --include=*.py --include=*.txt --include=*.md | \
 
 ## 2. 第一部分 · 端侧数字人与主动关怀（开发者 A）
 
+> **修订说明（2026-10-24，A 第二版规划）**：B 已交付 W0–W3（工具层、执行器、原生四件套、`onForeground`、`memomate:sos`），C 已交付 C1–C7（三流融合、周报、SOS 通知、会话加密）。本节据此重排：**删掉了与现状重复或违背 ponytail 的四处设计**（Silero 依赖、npm 引入 PIXI、`visemeFromAnalyser`、`?demo=1` 构型），**补上了联调必须的三处接缝**（接桥、前置原因、SOS 事件），所有偏离原文的地方都写在 §2.8 决策记录里，附理由。
+> 判据只有一个：**长者今天拿到手机能不能用、坏掉时会不会被锁死**。不能回答这个问题的工作不排期。
+
+### 2.0 起点快照（规划前已核实）
+
+| 项 | 现状（main@bd164d3） | 对 A 的含义 |
+|---|---|---|
+| 门禁 | `npm run typecheck` 0 错；`node src/selfcheck.ts` → `selfcheck: OK` | 基线全绿，A 的每一步都不得回退 |
+| 改名 | `i18n.ts` / `Avatar.tsx` / `useWakeWord.ts` / `layout.tsx` 仍是「灵犀」 | A0 未做，阻塞 M0 门禁 |
+| B 接缝 | `useAgentBridge()` 已建好、**无调用方**；`onForeground()` / `memomate:sos` 已可订阅；`scheduleDaily()` 已真实现 | A 接 3 处即生效（issue #1） |
+| C 契约 | `ScreeningSession` 为 `extra="allow"`；`ScreeningResult` 有 `insufficientStreams`、基线有 `sufficient` | A 加可选字段不会 422（issue #3） |
+| 已知缺陷（A 自己的） | ① `prefers-reduced-motion` 下 `Avatar` 把时间冻结为 0，**眼睛永远闭着**；② 播报打断时 `speak()` 的 `onend` 会把状态拨回 `idle` 并重新武装唤醒词，与正在进行的聆听抢麦；③ `repeat`/`cancel` 意图（B 新增）在 `page.tsx` 无分支，落到「记成待办」 | 修根因，不打补丁 |
+
 ### 2.1 目标与非目标
 
 **目标**
 
-1. 让数字人从「会张嘴的画」变成**有口型、有视线、有打断**的对话主体。
-2. 让数字人**自己找长者说话**：定时、按事件、按沉默时长，且频率可控不烦人。
-3. 把每次主动/被动交互变成**结构化访谈样本**（问了什么、答了多久、答了几句、是否答非所问）。
-4. 在低数字读写能力前提下做到「不看屏幕也能用」。
+1. 让数字人从「会张嘴的画」变成**有口型、有视线、可打断**的对话主体，且模型层完全可插拔（今天不带模型也不白屏）。
+2. 让数字人**自己找长者说话**：定时、按事件、按沉默时长，并且受**打扰预算**约束，不烦人。
+3. 把每次主动访谈变成**结构化样本**（问了哪题、答了多久、答了几个字、是否超时、STT 置信度），只上派生量。
+4. 在低数字读写能力前提下做到「不看屏幕也能用」，语音整条坏掉时**纯按钮也能走完**。
 
-**非目标**（明确不做，避免范围膨胀）
+**非目标**（明确不做）
 
-- 不做 3D / 不接云渲染；不做多角色。
-- 不做通用闲聊大模型（闲聊由 C 的 `/agent/turn` 提供文本，A 只负责说与听）。
-- 不做情感识别（不宣称能识别「难过/生气」；只记录可验证的声学与语言量）。
+- 不做 3D / 云渲染 / 多角色；**不往仓库里放任何模型二进制或第三方运行时**。
+- 不做通用闲聊大模型（闲聊文本来自 C 的 `/assistant/chat`、`/agent/turn`，A 只负责说与听）。
+- 不做情感识别、不在端侧给答案打分（定向题答错也不纠正，见 §2.4 A1）。
+- 不读系统音量（Web 拿不到；听力代理依赖 B 的原生接口，列入 M4，见 §2.8 D-7）。
 
 ### 2.2 交付物清单
 
-| # | 交付物 | 形态 |
-|---|---|---|
-| A-1 | Live2D 数字人组件（**按清单挂载模型**，无模型时用 Canvas-2D 默认替代；保留 `state`/`level` 契约） | `web/src/components/Avatar.tsx` + `lib/viseme.ts` + `web/public/live2d/**` |
-| A-2 | 口型驱动：TTS 音频分析 + 文本拼音兜底 | `lib/viseme.ts`、`lib/audio.ts` |
-| A-3 | 主动调度器（定时 / 静默 / 事件三源，含打扰预算） | `lib/proactive.ts` + `lib/db.ts` 新 store |
-| A-4 | 每日认知访谈脚本（3 分钟，5 类题，可跳过） | `lib/interview.ts` + `i18n.ts` |
-| A-5 | 对话状态机（聆听 / 说话 / 打断 / 重问 / 超时） | `page.tsx` 内 `converse` 升级 |
-| A-6 | 适老化与无障碍增强（镜头指示、字幕、失败开放、纯按钮通路） | `components/*`、`globals.css` |
-| A-7 | 端侧质量门控（VAD 升级 + 信噪比判定 + 丢弃标记） | `lib/vad.ts`、`lib/signal.ts` |
-| A-8 | **模型挂载层**：清单读取 → 加载 → 三级降级（详见 §2.3.1） | `components/avatar/MountLive2D.ts`、`public/live2d/model.manifest.json` |
-| A-9 | 日常唤起全通路（前台唤醒词、长按数字人、纯按钮兜底） | `hooks/useWakeWord.ts`、`page.tsx`、`globals.css` |
+| # | 交付物 | 形态 | 门禁 |
+|---|---|---|---|
+| A-1 | 数字人组件：L1 Live2D / L2 Canvas-2D（默认）/ L3 静态头像三级降级；单击=重说，长按 1s=聆听 | `components/Avatar.tsx` | M2 |
+| A-2 | 口型：文本 → 开口度时间轴 + `onboundary` 逐字校准 | `lib/viseme.ts`、`lib/audio.ts` | M2 |
+| A-3 | 主动调度器（提醒 / 沉默关怀 / 每日访谈 / 开屏问候四源 + 打扰预算） | `lib/proactive.ts` + `meta` store 一条记录 | M2 |
+| A-4 | 每日认知访谈（5 类 × 3 题，≤4 题 / ≤180s，可拒答） | `lib/interview.ts` | M1 |
+| A-5 | 对话状态机：聆听 / 思考 / 说话 / 打断 / 重问 / 超时 | `page.tsx` | M3 |
+| A-6 | 适老化：字幕条、三档显示（标准 / 高对比 / 大字）、按压振动、焦点管理 | `page.tsx`、`globals.css` | M2 |
+| A-7 | 端侧质量门控：`snrDb()` + `qualityOf()`，样本打 `quality` 标记**仍上传** | `lib/signal.ts`、`lib/vad.ts` | M1 |
+| A-8 | 模型挂载层：清单读取 → 运行时脚本注入 → 3s 超时回退 | `lib/live2d.ts`、`public/live2d/` | M2 |
+| A-9 | 唤起全通路接入（唤醒词改名、长按、主按钮、widget/闹钟前置原因、锁屏 SOS） | `useWakeWord.ts`、`page.tsx` | M2 |
+| A-10 | **接桥**：`useAgentBridge` 进入主循环；`onSos` / `onConfirm` / `recentTurns` | `page.tsx` | M3 |
 
 ### 2.3 文件级改动点
 
 | 文件 | 操作 | 说明 |
 |---|---|---|
-| [Avatar.tsx](https://github.com/Warpshlczy/MircoCare-GBA/blob/main/web/src/components/Avatar.tsx) | 重写内部 `draw()` | 对外只保留 `{ state, level, size, onTap? }`；Live2D 加载失败自动回退现 Canvas-2D（**必须有回退**，答辩现场不能白屏） |
-| `web/src/lib/viseme.ts` | 新增 | 纯函数：`visemeFromText(text): number[]`（拼音韵母 → 开口度序列）+ `visemeFromAnalyser(analyser): number` |
-| [audio.ts](https://github.com/Warpshlczy/MircoCare-GBA/blob/main/web/src/lib/audio.ts) | 增强 | `speak()` 增加 `onViseme` 回调：优先接 `AnalyserNode`，取不到则用文本序列按字数定时推进 |
-| `web/src/lib/proactive.ts` | 新增 | 纯函数 `planProactive(ctx): ProactiveAction \| null`，输入：上次开口时间、今日已开口次数、连续沉默天数、是否有未确认提醒、时段 |
-| `web/src/lib/interview.ts` | 新增 | 纯函数：题库 + 选题策略 + 结束判定（详见 §2.5） |
-| [page.tsx](https://github.com/Warpshlczy/MircoCare-GBA/blob/main/web/src/app/page.tsx) | 改造 | 把「四条主动开口」收敛为调用 `planProactive()`；新增 `state = "listening" \| "thinking"` 的中间态与打断处理 |
-| [i18n.ts](https://github.com/Warpshlczy/MircoCare-GBA/blob/main/web/src/lib/i18n.ts) | 扩充 | 新增 ≥30 条：访谈题、追问、鼓励、拒答接受、镜头说明、时间提示 |
-| [vad.ts](https://github.com/Warpshlczy/MircoCare-GBA/blob/main/web/src/lib/vad.ts) | 替换实现 | 保留 `{ isSpeech, ratio, stop }` 契约，内部换 Silero（`@ricky0123/vad-web`）；加载失败回退能量 VAD |
-| [signal.ts](https://github.com/Warpshlczy/MircoCare-GBA/blob/main/web/src/lib/signal.ts) | 增函数 | `snrDb(frames)`、`qualityOf(session)` → `good \| fair \| reject` |
-| [globals.css](https://github.com/Warpshlczy/MircoCare-GBA/blob/main/web/src/app/globals.css) | 增样式 | 字幕条（底部 2 行、48px、高对比）、录音指示环 |
-| `web/public/live2d/model.manifest.json` | 新增（**留空占位**） | 模型清单：`modelPath` / `cubismVersion` / 必需参数名 / 动作分组 / `scale` / `anchor`；字段见 §2.3.1。**本轮不放任何模型二进制** |
-| `web/public/live2d/README.md` | 新增 | 一页纸说明：放什么文件、什么格式、放哪里、如何自检 |
-| `web/src/components/avatar/MountLive2D.ts` | 新增 | 动态 import PIXI + `pixi-live2d-display`，读清单 → 加载 → 失败/超时 3s 回退；唯一与库耦合的文件 |
-| `web/src/components/avatar/StaticPortrait.tsx` | 新增 | 第三级兜底：静态头像 + 状态文字（模型与 Canvas 都不可用时） |
+| `components/Avatar.tsx` | 重写 | 对外 `{ state, level, size, label, onTap?, onLongPress? }`。外层是 `<button>`（可交互，所以不是 `role="img"`，见 §2.8 D-6）；内部 L1/L2/L3。L3 用内联字符头像，不新增 PNG |
+| `lib/live2d.ts` | 新增 | `parseManifest(json)` 纯函数（自检覆盖）+ `mountLive2D(el, manifest)` 浏览器侧；**唯一**与 Live2D 耦合的文件 |
+| `lib/viseme.ts` | 新增 | `visemeFromText(text)` 纯函数：每字固定 4 帧 × 65ms，标点为闭口 |
+| `lib/audio.ts` | 增强 | `speak(text, locale, onViseme?)`；`cancelSpeech()`；`listenOnce(locale, timeoutMs)` 返回 `{ text, confidence, durationMs }` |
+| `lib/proactive.ts` | 新增 | `planProactive(ctx)` 纯函数 + `dayKey` 复用 `checkin.ts` 的本地日历日判定 |
+| `lib/interview.ts` | 新增 | 题库 15 条 + `pickNext` / `shouldStop` / `careCue` 纯函数 |
+| `lib/signal.ts` | 增函数 | `snrDb(rmsDb[])`、`qualityOf({ speechRatio, snrDb, durationMs }, minMs)` |
+| `lib/vad.ts` | 小改 | `recordScreening()` 在**裁剪前**的帧上算 SNR，结果带 `quality` / `snrDb`；`createVad` 契约不动 |
+| `lib/types.ts` | 加可选字段 | `ScreeningSession.quality?` / `snrDb?`（契约流程 §0.2：先改类型，C 已是 `extra="allow"`，issue #3 通知 C 收编） |
+| `lib/i18n.ts` | 改名 + 扩充 | 「灵犀」→「忆伴 / 小忆」；新增访谈收尾、重问、跳题、长按提示、唤醒词提示、显示档位、风险分层三档文案等 |
+| `lib/checkin.ts` | 删除 | 本地日历日判定并入 `proactive.ts`，`page.tsx` 的 boot 签到改由调度器决定 |
+| `hooks/useWakeWord.ts` | 改名 | `WAKE_NAMES` 换新词并导出，供自检断言 |
+| `app/page.tsx` | 改造 | 接桥 / 前置原因 / SOS 事件 / 调度器 tick / 访谈循环 / 打断 / 字幕 / 三档显示 / 常用三件事 |
+| `app/layout.tsx`、`app/caregiver/page.tsx` | 改名 + 文案 | 标题改名；家属端风险分层显示中文三档，不显示英文枚举 |
+| `app/globals.css` | 增样式 | `.lg` 大字档、字幕条、录音指示环 |
+| `public/live2d/model.manifest.json`、`README.md` | 新增 | 留空占位 + 一页纸接入说明 |
 
 ### 2.3.1 数字人模型挂载契约（**先留空 · 默认替代**）
 
-> 本节是 A-8 的唯一规格。目标：**仓库里今天不带任何模型二进制**，代码仍能跑、答辩仍不白屏；后续把模型文件按下面格式丢进目录即自动生效，**不需要改一行代码**。
+> 目标：**仓库里今天不带任何模型二进制、也不带任何 Live2D 运行时**，代码照跑、答辩不白屏；后续把文件按下面格式丢进目录、改清单两行，**不改一行代码**。
 
-**① 目录契约**
+**① 为什么不 `npm install pixi.js pixi-live2d-display`**（相对第一版的关键调整）
+
+Cubism Core（`live2dcubismcore.min.js`）是 Live2D 专有许可，**不能进 npm 依赖树、只能以全局脚本加载**；既然必须走脚本注入，PIXI 与插件也一并走脚本注入：零新依赖、零首屏体积、默认零下载，许可证边界（附录 C.4）也随文件一起落在 `public/live2d/vendor/` 这一处。
+
+**② 目录契约**
 
 ```
 web/public/live2d/
 ├── README.md                      # 说明（提交）
-├── model.manifest.json            # 清单（提交，默认 {"model": null}）
-└── <模型目录>/                    # 默认不存在；接入模型时创建
+├── model.manifest.json            # 清单（提交，默认 "model": null）
+├── vendor/                        # 默认不存在；接入时放运行时
+│   ├── live2dcubismcore.min.js    # Cubism Core（专有许可，自行下载）
+│   ├── pixi.min.js                # pixi.js 6.x（与插件 0.4.x 配套）
+│   └── cubism4.min.js             # pixi-live2d-display 0.4.x 的 Cubism 3/4 包
+└── <模型目录>/                    # 默认不存在
     ├── <name>.model3.json         # 必需
     ├── <name>.moc3                # 必需
-    ├── textures/*.png             # 必需（2048×2048 或 1024×1024）
-    ├── motions/*.motion3.json     # 必需（至少 Idle + TapBody 两组）
-    ├── expressions/*.exp3.json    # 可选
-    └── physics3.json              # 可选（呼吸/摆动）
+    ├── textures/*.png             # 必需（≤2048px）
+    └── motions/*.motion3.json     # 必需（至少 Idle + TapBody）
 ```
 
-**② 清单字段（`model.manifest.json`，本轮默认值即"留空"）**
+**③ 清单字段**
 
 ```json
 {
   "model": null,
   "modelPath": "",
-  "cubismVersion": "",
+  "runtime": ["/live2d/vendor/live2dcubismcore.min.js", "/live2d/vendor/pixi.min.js", "/live2d/vendor/cubism4.min.js"],
   "scale": 1.0,
   "anchor": [0.5, 0.5],
-  "params": {
-    "mouthOpen": "ParamMouthOpenY",
-    "eyeLeft": "ParamEyeLOpen",
-    "eyeRight": "ParamEyeROpen",
-    "angleX": "ParamAngleX",
-    "angleY": "ParamAngleY",
-    "angleZ": "ParamAngleZ",
-    "bodyAngleZ": "ParamBodyAngleZ"
-  },
-  "motionGroups": { "idle": "Idle", "tap": "TapBody" },
-  "stateMotion": { "idle": "Idle", "listening": "Idle", "thinking": "Idle", "speaking": "Idle", "confirming": "TapBody" }
+  "params": { "mouthOpen": "ParamMouthOpenY", "angleX": "ParamAngleX" },
+  "motionGroups": { "idle": "Idle", "tap": "TapBody" }
 }
 ```
 
-`model: null` 时 **A-8 直接走默认替代**，连网络请求都不发；接入时把 `model` 改成 `"<模型目录>"`、`modelPath` 改成 `"/live2d/<模型目录>/<name>.model3.json"`、`cubismVersion` 填 `"3" | "4" | "5"`，其余字段通常不用动。
+- `model: null` → **只请求这一份清单（同源 200，<1KB）**，不加载任何脚本或模型。第一版写的「连网络请求都不发」与「运行时读清单」自相矛盾，已更正。
+- 清单 404 / 解析失败 / 字段类型不对 → 一律按 `model: null` 处理（`parseManifest` 自检覆盖）。
+- 删掉了第一版的 `cubismVersion`（运行时由 `runtime` 决定，重复字段只会不一致）、`eyeLeft/eyeRight/angleY/angleZ/bodyAngleZ`（眨眼与呼吸由模型自带的 `physics`/`Idle` 动作驱动，覆盖它们反而破坏动作）、`stateMotion`（五个状态里四个都映射到 `Idle`，只有「点击 → TapBody」有意义，直接写死）。
 
-**③ 必需模型格式**
+**④ 必需模型格式**
 
 | 项 | 要求 |
 |---|---|
-| 版本 | Live2D Cubism **3 / 4 / 5**（`.moc3` 内核）；Cubism 2（`.moc`）**不支持** |
-| 入口 | `.model3.json`（相对路径引用 `moc3` / 纹理 / 动作 / 物理） |
-| 纹理 | PNG，单边 ≤ 2048px，**单人模型**（不做多角色切换） |
-| 动作 | 至少 `Idle`（循环）与 `TapBody`（点击触发）两组 `.motion3.json` |
-| 参数 | `ParamMouthOpenY`、`ParamEyeLOpen`、`ParamEyeROpen`、`ParamAngleX/Y/Z`、`ParamBodyAngleZ`；缺失的参数**不报错**，只是少了对应动效 |
-| 体积 | 整目录 ≤ 8 MB（首屏不加载，动态 import + 点击/监听时预取） |
-| 许可 | **官方 sample 模型（Hiyori/Haru 等）仅限非商用**，见附录 C.4；商用必须换成自有或已授权模型，并在 `README.md` 写明来源与许可 |
+| 版本 | Cubism **3 / 4**（`.moc3`）；Cubism 2（`.moc`）不支持 |
+| 入口 | `.model3.json`（相对路径引用 moc3 / 纹理 / 动作） |
+| 动作 | `Idle`（循环）+ `TapBody`（点击） |
+| 参数 | `ParamMouthOpenY`（口型）、`ParamAngleX`（聆听时朝向屏幕中心）；缺失**不报错**，只少动效 |
+| 体积 | 模型 + 运行时整目录 ≤ 8 MB |
+| 许可 | 官方 sample（Hiyori/Haru）**仅限非商用**；商用换自有/授权模型，并在 `README.md` 写来源 |
 
-**④ 三级降级顺序（必须实现，答辩前逐级演练）**
+**⑤ 三级降级（必须实现，答辩前逐级演练）**
 
 | 级 | 触发条件 | 表现 | 记录 |
 |---|---|---|---|
-| L1 模型 | `model.manifest.json` 的 `model` 非空 **且** 加载成功（≤3s） | Live2D 渲染；`state` → 动作组；`level` → `ParamMouthOpenY` | — |
-| L2 Canvas-2D（**默认**） | `model` 为空 / 加载失败 / 超时 3s / WebGL 不可用 | 现 `Avatar.tsx` 的眨眼、呼吸、嘴高 = `level` | `track("avatar_fallback", "canvas")` |
-| L3 静态头像 | Canvas `getContext("2d")` 也失败 | 品牌头像 PNG + `aria-live` 状态文字，主按钮与 SOS 照常可用 | `track("avatar_fallback", "static")` |
+| L1 模型 | 清单 `model` 非空 **且** 3s 内加载成功 | Live2D；`level` → `ParamMouthOpenY`；单击播 `TapBody` | `track("avatar_mode", {mode:"live2d"})` |
+| L2 Canvas-2D（**默认**） | `model` 为空 / 加载失败 / 超时 / WebGL 不可用 | 眨眼、呼吸、嘴高 = `level`；聆听时微微前倾、瞳孔朝中心；空闲约每 10 秒轻点一次头 | 不记（默认态，记了只是噪声） |
+| L3 静态头像 | `canvas.getContext("2d")` 返回 null | 内联字符头像 + 状态文字，主按钮与 SOS 照常 | `track("avatar_fallback", {mode:"static"})` |
 
-**⑤ 自检断言（进 M2 门禁）**
+三级**都包在同一个 `<button>` 里**，所以单击重说 / 长按聆听在任何一级都成立。纯装饰场景（如 SOS 全屏里的小头像）不传 `onTap`/`onLongPress`，组件自动退化为 `role="img"`，不占焦点。
+
+**⑥ 自检断言（进 M2 门禁）**
 
 ```bash
-# 1) 默认仓库无模型二进制（"先留空"的硬约束）
-test -z "$(find web/public/live2d -name '*.moc3' -o -name '*.model3.json' 2>/dev/null)" && echo "PASS: 模型留空"
-# 2) 清单可解析且 model 为 null
-node -e 'const m=require("./web/public/live2d/model.manifest.json");if(m.model!==null)throw 1;console.log("PASS: manifest 占位")'
-# 3) 拔掉清单文件仍能构建与渲染（走 L2）
-mv web/public/live2d/model.manifest.json /tmp/ && (cd web && npm run build) && mv /tmp/model.manifest.json web/public/live2d/
-# 4) 静态断言：Avatar 内不得出现顶层 import 'pixi.js'（必须动态 import，避免进首屏包）
-! grep -q "^import .*pixi" web/src/components/Avatar.tsx
+cd web
+# 1) 默认仓库无模型、无运行时
+test -z "$(find public/live2d \( -name '*.moc3' -o -name '*.model3.json' -o -name '*.min.js' \) 2>/dev/null)" && echo "PASS: 模型留空"
+# 2) 清单可解析且 model 为 null（node src/selfcheck.ts 内同时断言 parseManifest 的降级）
+node -e 'const m=require("./public/live2d/model.manifest.json");if(m.model!==null)throw 1;console.log("PASS: manifest 占位")'
+# 3) 拔掉清单仍能构建（运行时 404 → L2）
+mv public/live2d/model.manifest.json /tmp/ && npm run build; mv /tmp/model.manifest.json public/live2d/
+# 4) 不得出现任何 pixi / live2d 的 import（只能运行时脚本注入）
+! grep -rnE "from ['\"](pixi|pixi-live2d-display)" src && echo "PASS: 无静态依赖"
 ```
 
 ### 2.4 任务分解（可直接认领的步骤）
 
-#### A0 · 基线确认与改名落地（0.5 天）
+#### A0 · 基线确认与改名落地（0.5 天，M0）
 
-1. 跑 `cd web && npm run typecheck && npm run selfcheck`，记录基线全绿。
-2. 按 §1.3 第 1–3 项改 `i18n.ts` / `Avatar.tsx` / `useWakeWord.ts`。
-3. 在 `web/src/selfcheck.ts` 增加断言：`t("zh-HK","greeting")` 含「憶伴」且**不含**「靈犀」；`WAKE_NAMES` 不含旧词。
-4. 验收：`node src/selfcheck.ts` → `selfcheck: OK`；页面语言切换后无「灵犀」残留（`grep -r "灵犀\|靈犀" web/src` 为空）。
+1. 跑 `npm run typecheck && node src/selfcheck.ts`，基线全绿（已核实）。
+2. 改 `i18n.ts`（`我係憶伴` / `我是忆伴`；`叫聲「小憶」我就應你` / `叫一声「小忆」我就应您`）、`Avatar.tsx` 状态标签、`useWakeWord.ts`（`小忆/小憶/阿忆/阿憶/忆伴/憶伴/memomate/memo mate`）、`layout.tsx`、`caregiver/page.tsx`。
+3. `native.ts` 的 `homeWidgetPayload` 默认 title 属 B（§1.3 第 5 项），**A 不改**，只在调用处传 `t(locale,"appName")`——这是 B 预留的第 4 个参数。
+4. 自检断言：三语言 `greeting` 含新名、全字典不含「灵犀/靈犀」；`WAKE_NAMES` 不含旧词。
+5. 验收：`grep -rn "灵犀\|靈犀\|lingxi" web/src` 只允许命中 B 的 `native.ts` 默认值（B0 处理）。
 
-#### A1 · 访谈脚本与对话状态机（1 天）
+#### A1 · 访谈脚本与对话状态机（1 天，M1/M3）
 
-**步骤**
+**题库设计原则**：每题都是**开放式、无对错**的日常话题；不出现「考你」「记不记得」这类测验口吻；答不上来给提示（不是答案），再答不上就跳过并说「唔緊要」。
 
-1. 定义 `InterviewItem`（见 §2.5 契约），先落 5 类题各 3 条（共 15 条），全部**可跳过**。
-2. 实现 `nextQuestion(state)`：按「上次答不上来的题降级、最近 7 天没问的优先」选题，**同一天不重复**。
-3. 实现会话结束条件：答满 4 题 / 累计 180 秒 / 长者连续 2 次说「唔想讲」「不想说」/ 检测到情绪词「攰」「累」→ 温柔收尾。
-4. 在 `page.tsx` 用 `converse()` 串起来：**一次只问一句**，每句问完必等回答或 8 秒超时；超时则复述一次，再超时就跳过。
-5. 每问一题写一条 `interview` 记录（题目 ID、开始/结束时间、回答文本长度、STT 置信度、是否超时）。
-
-**验收**
-
-- 长者沉默 8 秒 → 数字人复述一次；再沉默 8 秒 → 自动跳到下一题并说「唔緊要，我哋講第二樣」。
-- 长者说「唔想讲」→ 立即结束并说收尾语，当天不再主动发起访谈。
-- 5 类题在 `zh-HK` / `zh-MO` / `zh-CN` 三语言下都有文案（自检断言之）。
-
-#### A2 · 主动调度器（1 天）
+| 类 | 测什么（只采派生量） | 示例（zh-HK） |
+|---|---|---|
+| memory | 近期情节回忆 → 回答长度、超时 | 「今朝食咗啲咩早餐呀？」 |
+| orientation | 时间/地点定向 → 回答后**温和播报当天日期**，从不纠正 | 「今日係星期幾呀？」 |
+| language | 语义流畅度 → 字数 | 「講幾樣街市買得到嘅生果畀我聽吓？」 |
+| daily_living | 顺序性 → 字数、时长 | 「沖一杯茶，要點樣做呀？」 |
+| mood | 睡眠/情绪自述 → 只记时长，不判情绪 | 「最近瞓得好唔好呀？」 |
 
 **步骤**
 
-1. `planProactive()` 输入输出见 §2.5；纯函数，无 `window`。
-2. **打扰预算**：每天最多 3 次主动开口；两次间隔 ≥ 90 分钟；21:00–08:00 静默（SOS 与未确认服药提醒除外）。
-3. 三源优先级：`提醒到期` > `唤醒词` > `每日访谈` > `沉默关怀`（连续 2 天无交互才触发）。
-4. `page.tsx` 内用一个 `setInterval(60_000)` 调 `planProactive()`；命中则走现有 `converse()`。
-5. 原生侧（与 B 协同）：每日访谈时间点由 B 用 `AlarmManager` 精确唤醒（网页计时器在后台会被挂起）。
+1. `InterviewItem` 按 §2.5 定义，15 条全部有 `hk` / `cn` 两种写法（`zh-MO` 复用 `hk`，与 `i18n.ts` 一致）。
+2. `pickNext(state, history, now)`：同一天不重复；**7 天内没问过**的优先；上次超时的题排后（降级）；同优先级按题号稳定排序（可复现）。
+3. `shouldStop(state, now)`：答满 4 题 / 累计 ≥180s / 出现拒答或疲倦。**拒答一次即结束**（第一版写了「连续 2 次」，与其验收「说唔想讲即结束」矛盾，取尊严优先的那一条）。
+4. `careCue(text)`：`refuse`（唔想講/不想说/唔講喇…）/ `tired`（攰/累）/ `sad`（唔開心/難過…）/ `lost`（唔見咗/搵唔到…）；访谈和普通对话共用这一个函数。
+5. `page.tsx` 的访谈循环：**一次只问一句** → `listenOnce(8s)` → 超时则复述一次（有 `followUp` 用提示）→ 再超时说「唔緊要，我哋講第二樣」并记 `timedOut` → 下一题；任意回答若 `parseIntent === "sos"`，**立即中止访谈并打开 SOS 覆盖层**（安全优先于采样）。
+6. 每题写一条 `track("interview_answer", { item, domain, durationMs, textLen, confidence, timedOut })`——**无原文**；原文走既有的会话记忆通道（C5 已加密 + TTL）。访谈结束写 `track("interview_end", { answered, reason })`，`reason ∈ done | refuse | tired | sad | unavailable | sos | abort`。
+7. 打断：访谈中长者按「講嘢」或长按数字人 → 取消当前播报、结束访谈、转入普通聆听。
 
 **验收**
 
-- 单元断言：给定 09:00、当日已说 3 次 → 返回 `null`；给 22:30 + 有未确认服药 → 仅返回 `reminder`。
-- 装机：锁屏 30 分钟后到点，App 被 Alarms 唤起并主动说话（依赖 B 的 M2 交付）。
+- 长者沉默 8 秒 → 复述一次；再沉默 → 说「唔緊要，我哋講第二樣」跳题。
+- 说「唔想講」→ 立即收尾，当天不再主动访谈（`interviewAt` 在**开始时**就写入，失败/拒答都算当天已做）；普通对话里说「唔講喇」同样写入，当天静默。
+- 自检：15 题 × 2 种写法齐全、5 类各 3 题；`pickNext` 同日不重复、7 天新鲜度、超时降级；`shouldStop` 四个条件。
 
-#### A3 · 数字人模型挂载、Live2D 与口型（2 天）
+#### A2 · 主动调度器（1 天，M2）
 
-**步骤**
+**规则（纯函数 `planProactive`，按优先级短路）**
 
-1. **先做挂载层（A-8，§2.3.1）**：`MountLive2D.ts` 只做四件事——`fetch("/live2d/model.manifest.json")`（404/超时按空处理）→ `model === null` 直接返回 `null` → 否则动态 import PIXI 与模型 → 超时 3s 或抛错返回 `null`。`Avatar.tsx` 依据返回值决定 L1/L2/L3，**渲染路径之外零耦合**。
-2. 建 `web/public/live2d/README.md` 与 `model.manifest.json`（`model: null`），**不提交任何模型二进制**；README 写明 §2.3.1 的格式表与「商用需自带授权」。
-3. 引入 `pixi.js` + `pixi-live2d-display`（**只在 `MountLive2D.ts` 内动态 import**，不进首屏包）。
-4. `state` → 动作：按清单 `stateMotion` 映射取 `motionGroups`；`idle` 播 `Idle` 循环、点击播 `TapBody`、`speaking` 期间暂停随机微动。
-5. 口型：`speak()` 时把 TTS 输出接 `AnalyserNode`（若 TTS 无音频流，用 `visemeFromText` 序列按时长推进），0..1 写入清单指定的 `params.mouthOpen`（默认 `ParamMouthOpenY`）。
-6. 视线：`listening` 时 `ParamAngleX` 轻微朝屏幕中心；`idle` 每 8–12 秒一次随机微动（`prefers-reduced-motion` 时全部关闭，仅保留嘴部与眨眼）。
-7. 点击数字人 = 重说一遍上一句（适老化高频需求）——**L1/L2/L3 三级都必须响应点击**。
+| 序 | 条件 | 结果 | 是否消耗预算 |
+|---|---|---|---|
+| 1 | 有到期未确认提醒 | `reminder`（**静默时段也执行**；由既有 `ReminderOverlay` 播报，调度器只负责压住其他三源） | 否 |
+| 2 | `trigger === "boot"` | `null`（开机只重排闹钟，**不开口**，避免清晨惊吓） | — |
+| 3 | 21:00–08:00 | `null` | — |
+| 4 | 今日已主动 3 次，或距上次主动 < 90min | `null` | — |
+| 5 | 连续 ≥2 天无交互 | `silence`（≥3 天时文案附带「叫我『小憶』或者撳大掣」的唤醒指引） | 是 |
+| 6 | 今日未访谈 | `interview` | 是 |
+| 7 | `trigger === "open"`（开屏/回前台/通知点击） | `greeting`（20s 冷却由页面侧保留） | 否 |
+
+- 第一版的优先级「访谈 > 沉默关怀」会导致沉默关怀**永远不触发**（连续 2 天无交互 ⇒ 今天必然没访谈 ⇒ 永远先命中访谈），已调换。
+- 「唤醒词」是长者主动发起，不属于调度器，也不消耗预算。
+- `greeting` 是对「长者自己打开 App」的回应，不算打扰，不消耗预算，但仍受静默时段约束。
+
+**落地**
+
+1. 页面每 60s `tick` 一次，仅在 `idle` 且页面可见时调用；`open`/`alarm` 由 `visibilitychange` 与 `onForeground` 触发。
+2. 状态存 `meta` store 一条 `{ id:"proactive", lastSpokeAt, spokenToday, lastInteractionAt, interviewAt }`（访谈题历史另存一条 `{ id:"interview", items }`），**不新增 store、不动 B 的 `db.ts` 版本号**。
+3. `onForeground` 原因映射**统一走 B 的 `planForeground(reason, locale)`**（`lib/foreground.ts`，自检覆盖）：`boot` → `silent`；`widget` → `listen`（先说一句「我喺度」，再直接聆听）；`alarm` → `speak`（早晨问候）；`reminder`/`notification` → `refresh`（只重读提醒/卡片状态，不说话）。A 的 `page.tsx` 只执行 `plan.kind`，不再自己写映射分支。
+4. 启动时 `bridge()?.scheduleDaily(10, 0)`：每天 10:00 由 B 的精确闹钟把 App 叫起来做访谈（网页计时器后台会被挂起）。
+5. 每次主动开口写 `track("proactive", { kind, trigger })`；长者有效应答时 `lastInteractionAt` 更新并写 `track("interaction", { source })`——B 的 `BehaviourDaily.interactionCount` 从这里取（issue #3 第 3 问）。
+
+**验收（自检断言）**：09:00 已说 3 次 → `null`；22:30 有到期提醒 → 仅 `reminder`；22:30 无提醒 → `null`；距上次 60min → `null`；连续 2 天无交互 → `silence` 先于 `interview`；`boot` → `null`。
+
+#### A3 · 数字人模型挂载、Live2D 与口型（1.5 天，M2）
+
+1. `lib/live2d.ts`：`fetch("/live2d/model.manifest.json")` → `parseManifest()` → `model` 为空直接返回 `null` → 否则按 `runtime` 顺序注入 `<script>` → `PIXI.live2d.Live2DModel.from(modelPath)` → 整体 3s 超时，任何异常返回 `null`。
+2. L1 下 `level` 在 `beforeModelUpdate` 里写入 `params.mouthOpen`；聆听时 `model.focus()` 朝屏幕中心；单击播 `motionGroups.tap`。
+3. 口型：`visemeFromText` 每字 4 帧 × 65ms（0.85 语速下粤语约 260ms/字），帧形为「开-全开-半开-收」，标点为闭口停顿；`speak()` 用 `setInterval(65)` 推进，`SpeechSynthesisUtterance.onboundary` 到来时**按 `charIndex×4` 跳帧校准**（平台事件，零依赖）；不支持 boundary 的设备退化为纯时间推进（`ponytail:` 注明天花板）。
+4. L2 Canvas 修复：`reduced-motion` 只关掉位移（呼吸、前倾），**眨眼与嘴照常**（修 §2.0 缺陷①）；聆听时轻微前倾 + 瞳孔朝中心。
+5. 单击数字人 = 重说上一句（适老化高频需求）；长按 1s = 取消播报并进入聆听，播报「你想講咩？」；长按期间不触发任何播报（issue #1 第 2 问）。
+
+**验收**：默认（`model:null`）无 4xx、无脚本下载，直接 L2；§2.3.1 ⑥ 四条断言全过；`reduced-motion` 下无位移但眼睛会眨；口型与语音同步误差 < 150ms（支持 boundary 的设备录屏抽查 3 段）。
+
+#### A4 · 采集质量门控（0.5 天，M1）
+
+1. `snrDb(frames)`：帧 dB 的 P90 − P10（P10 即噪声底，P90 即语音峰段）。风扇/空调这类稳态噪声、以及经过响度压缩的电视声，P90 与 P10 很接近 → SNR 低 → `reject`；这正是能量 VAD 分不出、而 SNR 能分出的那一类。
+2. `qualityOf({speechRatio, snrDb, durationMs}, minMs)`：任一项低于下限（0.25 / 15dB / `minMs`）→ `reject`；全部高于「舒适线」（0.4 / 20dB）→ `good`；其余 `fair`。屏幕录音 `minMs=8000`，访谈单题 `3000`。
+3. `recordScreening()` 在**裁剪前**的帧上算 SNR（裁剪会删掉噪声底），结果带 `quality` / `snrDb` **照常上传**，由 C 决定是否入基线——前端丢弃会让 C 丢分母（issue #3 约定）。
+4. 录屏前已有「请随便讲一分钟」播报；ScreeningOverlay 加录音指示环（家属在场可见，长者不必看）。
+
+**验收（自检断言）**：持续 −30dB 噪声 30s → `reject`；−60dB 底噪上有 −20dB 语音、占比 50%、10s → `good`；时长 5s → `reject`。
+
+#### A5 · 日常唤起与无障碍（1.5 天，M2）
+
+> 判据：长者不用读字、不用记路径、不用精准点击，也能完成「叫出数字人 → 说需求 → 确认 → 收尾」；语音整条坏掉时纯按钮也能走完。
+
+1. **唤起通路（五条，§2.7 ①）**：唤醒词（改名）/ 主按钮 / 长按数字人 1s / widget 点击（`onForeground("widget")` → `planForeground` 的 `listen`）/ 通知与闹钟（`onForeground` → `speak` / `refresh`）。锁屏 widget 的 SOS 热区：订阅 `memomate:sos` → **直接打开 SOS 覆盖层**，不等语音确认；`shouldRaiseSos` 做 10s 防抖（口袋误触不重复通知家属），事件带 `source: "widget"`。
+2. **忘记唤醒词兜底**：主按钮下方常驻一行提示「叫我『小憶』，或者撳『講嘢』」；连续 3 天无交互时沉默关怀文案带同样指引（调度器第 5 条）。
+3. **无障碍语义**：`main` 单一地标；数字人是 `<button>` + 动态 `aria-label`（「忆伴正在聆听，撳一下再講一次」）；状态行 `aria-live="polite"`；SOS 覆盖层既有 `assertive`；**禁止 `div onClick`**。
+4. **焦点顺序** = 数字人 → 主按钮 → SOS → 次要按钮 → 工具面板（第一版把「食药提醒/高对比/语言」放在数字人之前，已下移到主按钮之后，主操作区落在屏幕下半）；工具面板经语音打开时焦点移入，`Esc` 关闭并把焦点还给主按钮。
+5. **触控与反馈**：主按钮/SOS ≥120×80px；任何按钮按下 `navigator.vibrate(30)`（页面级一个 `pointerdown` 监听，不逐个加）；关键失败（麦克风被拒、网络断）用语音 + 字幕双通道，不显示错误码。
+6. **字幕**：数字人说的每一句同步显示在**数字人正下方**的字幕条（2 行截断、48px，大字档 64px，高对比黑底黄字）。放在脸旁边而不是屏幕最底部：听力差的长者读字幕时视线不用离开数字人，也不会被底部卡片流遮挡。
+7. **三档显示**：原「高对比」按钮改为循环「顯示：標準 → 高對比 → 大字」，按钮文字即当前档位；大字档在 `<html>` 上把根字号放大 1.25 倍，所有 rem 尺寸一次到位；选择存本机，重启保留；色觉安全（状态永远配文字）。
+8. **语音不可用的纯按钮通路**：STT 不支持或**连续 2 次没听到** → 自动展开工具面板，顶部是「常用三件事」：食药 / 今日安排 / 打畀屋企人（`tel:` 链接到健康卡紧急联系人，平台原生拨号，无新权限）。第一版的「打电话」与「找家人」对长者是同一件事，合并（§2.8 D-5）。
+9. **接桥（issue #1）**：`useAgentBridge({ locale, reminders, onCards: pushCards, onSpeak: speakLine, onConfirm: askYesNo, onSos })`；所有语音/文字输入先过 `agent.handleUtterance()`，返回 `false` 才走原 `runIntent`。`askYesNo` = 播报问题 + `listenOnce(8s)` + 是/否词表，**沉默或听不清一律判否**（不误执行）。`recentTurns` 由 B 在桥里攒（A 的 `historyRef` 已存在，B 需要时 A 加一个只读导出）。
+10. `repeat` 意图 = 重说上一句；`cancel` 意图 = 「好，唔做住」并回到空闲。
 
 **验收**
 
-- 默认仓库（`model: null`）首屏无 Live2D 依赖、无 4xx 请求，直接渲染 Canvas-2D。
-- 按 §2.3.1 ⑤ 四条断言全过；把任一合规模型按目录丢入后**不改代码**即渲染 L1，删掉立刻回 L2。
-- `prefers-reduced-motion` 下无位移动画，仅嘴部与眨眼。
-- 口型与语音同步误差 < 150ms（录屏逐帧抽查 3 段）。
-
-#### A4 · 采集质量门控（0.5 天）
-
-1. `vad.ts` 换 Silero，`createVad` 签名不变；加载失败回退能量 VAD 并在 `track("vad_fallback")` 记一次。
-2. `qualityOf()` 三项判据：语音占比 ≥ 0.25、SNR ≥ 15dB、时长 ≥ 8s（访谈单题 ≥ 3s）。不合格样本标记 `quality: "reject"`，**仍上传特征但标记**，由 C 决定是否入基线。
-3. 每次采集前播报「我而家聽住，你慢慢講」，并在屏幕显示录音指示环（不要求看屏幕，仅为家属在场时可见）。
-
-**验收**
-
-- 播放电视噪声 30 秒 → `quality` 为 `reject`（不得进入基线）。
-- 正常对话 → `good`。
-
-#### A5 · 日常唤起与无障碍（1.5 天）
-
-> 规格表见 §2.7，本节只写落地步骤。**判据**：长者不用读文字、不用记路径、不用精准点击，也能完成「叫出数字人 → 说需求 → 确认 → 收尾」全流程；语音链路完全坏掉时，纯按钮也能走完同样流程。
-
-1. **唤起通路（五条，缺一条都不算完成）**：
-   - 前台唤醒词（既有 `useWakeWord`，改名「小忆/阿忆/忆伴」）。
-   - 后台上锁唤醒（B 的 `WakeListenService`，A 只对接回调）。
-   - **长按数字人 1s**（`onPointerDown` 计时）：不依赖麦克风权限，永不失效。
-   - **主按钮单击**（≥120×80px）：等同于说一句「小忆」。
-   - **锁屏小组件 / 通知点击**（B 的 `HomeWidgetProvider` → `bringToForeground`）。
-2. **忘记唤醒词的兜底**：连续 3 天无任何交互 → 主动播报「你叫我一聲『小憶』就得，或者㩒下面個大掣」；同时在主按钮下方常驻一行 24px 提示（不抢焦点）。
-3. **无障碍语义**：`main` 单一地标；数字人 `role="img"` + 动态 `aria-label`；状态变化走 `aria-live="polite"`（SOS 用 `assertive`）；所有可点元素必须是 `<button>`/`<a>`，**禁止 `div onClick`**。
-4. **焦点与可达**：逻辑焦点顺序 = 数字人 → 主按钮 → SOS → 工具面板；工具面板打开时焦点移入、`Esc`/返回键关闭并归还焦点；主操作区落在屏幕下半 60%（单手拇指可达）。
-5. **触控与反馈**：所有触控目标 ≥ 120×80px、间距 ≥ 16px；点击有视觉按下态 + `navigator.vibrate(30)`（不支持则静默）；关键失败（麦克风被拒、网络断）用**声音 + 字幕**双通道说明，不弹错误码。
-6. **视觉适配**：高对比模式（既有）扩展为三档「标准 / 高对比 / 大字（字幕 64px）」；色觉安全（不单独用颜色传达状态，永远配文字/图形）；尊重 `prefers-reduced-motion`。
-7. **语音不可用的纯按钮通路**：STT 失败两次 → 自动展开「常用四件事」按钮组（吃药 / 打电话 / 今日安排 / 找家人），每个按钮直接触发对应的本地卡片，不要求再说话。
-8. 演示开关（仅 dev 构型）：`?demo=1` 时把 STT 替换为预置脚本，用于嘈杂展台。**必须走环境变量，生产不打包。**
-
-**验收**
-
-- 关掉麦克风权限 → 主按钮仍能进入对话，且 8 秒内出现「常用四件事」按钮组；全程无死路。
-- TalkBack 开启 → 从冷启动到「说一句话」不超过 4 次滑动，朗读内容包含当前状态与按钮用途。
-- 连续 3 天无交互 → 冷启动时首次播报含「小忆」唤醒词与按钮指引。
-- `grep -rn "onClick" web/src --include=*.tsx` 中不存在挂在非交互元素上的处理器（人工复核白名单）。
+- 关掉麦克风权限 → 主按钮仍能进入对话，8 秒内出现「常用三件事」；全程无死路。
+- TalkBack 冷启动到「说一句话」≤ 4 次滑动（数字人 → 主按钮即可）；朗读内容含状态与用途。
+- widget SOS 热区 → SOS 覆盖层直接打开。
+- `grep -rn "div onClick\|span onClick" web/src` 为空。
 
 ### 2.5 第一部分接口契约（对其他两人的接缝）
 
@@ -448,95 +478,134 @@ mv web/public/live2d/model.manifest.json /tmp/ && (cd web && npm run build) && m
 // lib/interview.ts
 export type InterviewDomain = "memory" | "orientation" | "language" | "daily_living" | "mood";
 export interface InterviewItem {
-  id: string;                 // "memory-01"
+  id: string;                         // "memory-01"
   domain: InterviewDomain;
-  prompt: Record<Locale, string>;
-  followUp?: Record<Locale, string>;  // 答不上来时的提示（不是答案）
-  maxSeconds: number;         // 默认 30
-  scoreHint?: "recall" | "fluency" | "sequencing";
+  prompt: { hk: string; cn: string }; // zh-MO 复用 hk
+  followUp?: { hk: string; cn: string }; // 答不上来时的提示（不是答案）
+  scoreHint: "recall" | "fluency" | "sequencing" | "orientation" | "self_report";
+  sayToday?: boolean;                 // 答完后温和播报当天日期（定向支持，不是纠正）
 }
-export interface InterviewState {
-  askedToday: string[];
-  answers: { id: string; at: number; durationMs: number; textLen: number; timedOut: boolean }[];
-  startedAt: number;
-}
-export function pickNext(s: InterviewState, now: number): InterviewItem | null;
+export interface InterviewAnswer { id: string; at: number; durationMs: number; textLen: number; confidence: number; timedOut: boolean }
+export interface InterviewState { startedAt: number; answers: InterviewAnswer[]; stop?: "refuse" | "tired" | "sad" }
+export type InterviewHistory = Record<string, { at: number; timedOut: boolean }>;  // 存 meta，最近一次
+export function pickNext(s: InterviewState, h: InterviewHistory, now: number): InterviewItem | null;
 export function shouldStop(s: InterviewState, now: number): boolean;
+export function careCue(text: string): "refuse" | "tired" | "sad" | "lost" | null;
+export function isYes(text: string): boolean | null;   // null = 不确定，调用方必须当作「否」
+export function todayLine(locale: string, now: number): string;
 ```
 
 ```ts
 // lib/proactive.ts
-export type ProactiveKind = "reminder" | "interview" | "silence" | "greeting";
+export type ProactiveKind = "reminder" | "silence" | "interview" | "greeting";
+export type ProactiveTrigger = "tick" | "open" | "alarm" | "boot";
 export interface ProactiveCtx {
-  now: number;
-  lastSpokeAt: number;
-  spokenToday: number;          // 0..3
-  silentDays: number;
+  now: number; trigger: ProactiveTrigger;
+  lastSpokeAt: number | null; spokenToday: number;   // 跨日自动清零，调用方传原值即可
+  lastInteractionAt: number | null;                    // 算 silentDays（本地日历日）
+  interviewAt: number | null;                          // 与 now 同一天 = 今日已访谈
   hasDueReminder: boolean;
-  interviewDoneToday: boolean;
 }
-export interface ProactiveAction { kind: ProactiveKind; reason: string; }
+export interface ProactiveAction { kind: ProactiveKind; reason: string; silentDays: number }
 export function planProactive(c: ProactiveCtx): ProactiveAction | null;
+export function recordSpoke(r: ProactiveRecord, now: number): ProactiveRecord;  // 纯函数，更新预算计数
 ```
 
 ```ts
 // lib/viseme.ts
-export function visemeFromText(text: string, locale: Locale): number[]; // 0..1，每 60–90ms 一帧
-export function visemeFromAnalyser(a: AnalyserNode): number;            // 0..1
+export const VISEME_FRAME_MS = 65, FRAMES_PER_CHAR = 4;
+export function visemeFromText(text: string): number[]; // 0..1，长度 = 字数 × 4
+// 第一版的 visemeFromAnalyser 删除：Web Speech TTS 不暴露音频流，没有可接的 AnalyserNode；
+// 麦克风侧的 RMS 已由 audio.ts#createAmplitudeMeter 提供。原生 TTS 上线时再按需加。
 ```
 
-**A 对 B 的需求（写进 B 的 M2 任务）**
+```ts
+// lib/types.ts（A 提议，C 已 extra="allow" 可直接收）
+export interface ScreeningSession { /* …既有字段… */ quality?: "good" | "fair" | "reject"; snrDb?: number }
+```
 
-| 需求 | 接口 | 说明 |
+**A → C 的上送口径（issue #3）**
+
+| 数据 | 通道 | 内容 | 不含 |
+|---|---|---|---|
+| 访谈逐题 | `POST /telemetry/events`，`name:"interview_answer"` | `item / domain / durationMs / textLen / confidence / timedOut` | 原文、音频 |
+| 访谈结束 | 同上，`name:"interview_end"` | `answered / reason` | — |
+| 主动开口 / 交互 | 同上，`proactive` / `interaction` | `kind / trigger` / `source` | — |
+| 质量门控 | `POST /screening/sessions` 的 `quality` / `snrDb` | 三档 + dB | — |
+| 回答原文 | `POST /conversation/turns`（既有，C5 加密 + TTL） | 原话 | — |
+
+**风险分层三档文案（A 的唯一显示口径）**：`low` 一切如常 / `watch` 值得留意 / `elevated` 建议检查（`i18n.ts#riskBandLabel`）。长者端**不显示**任何分层、分数或颜色；家属端只显示中文三档，`sufficient=false` 或 `insufficientStreams=true` 时显示「样本不足，继续观察」。
+
+**A 对 B 的需求（W3 已全部交付，A 只消费）**
+
+| 需求 | 接口 | 状态 |
 |---|---|---|
-| 定时唤醒 | `MemoNative.scheduleDaily(hour: number, minute: number)` | `AlarmManager` 精确闹钟 + 开机重排 |
-| 到点前置 | `MemoNative.bringToForeground(reason: string)` | 点击通知或闹钟触发，WebView 前置并带 `reason` 参数 |
-| 原生 TTS 可选 | `MemoNative.speak(text, locale)` | 仅在 Web Speech 不可用时启用 |
+| 定时唤醒 | `bridge()?.scheduleDaily(10, 0)` | ✅ B W3 |
+| 前置原因 | `onForeground(({reason}) => …)` | ✅ B W3（冷启动补发） |
+| 锁屏 SOS | `window` 事件 `memomate:sos` | ✅ B W3 |
+| 听力代理 | `MemoNative.getMediaVolume()`（新提） | ⏳ M4，见 §2.8 D-7 |
 
 ### 2.6 第一部分自检
 
 ```bash
 cd web
 npm run typecheck
-node src/selfcheck.ts          # 新增：访谈选题/停止条件/打扰预算/viseme 长度/改名无残留/清单降级判定
-grep -rn "灵犀\|靈犀\|lingxi" src/ || echo "PASS: 无旧名残留"
-# 模型留空与降级（§2.3.1 ⑤ 四条）
-test -z "$(find public/live2d -name '*.moc3' -o -name '*.model3.json' 2>/dev/null)" && echo "PASS: 模型留空"
-# 无障碍：不允许非交互元素挂点击
-! grep -rn "div onClick" src --include=*.tsx && echo "PASS: 无 div onClick"
+node src/selfcheck.ts   # 新增：改名无残留 / 唤醒词 / 访谈题库与选题停止 / careCue / 打扰预算七条 /
+                        #       viseme 长度与闭口 / parseManifest 降级 / snrDb & qualityOf / 风险三档 / 无责备措辞
+grep -rn "灵犀\|靈犀\|lingxi" src/ | grep -v "lib/native.ts\|selfcheck.ts" || echo "PASS: 无旧名残留（native.ts 默认值属 B0）"
+test -z "$(find public/live2d \( -name '*.moc3' -o -name '*.model3.json' -o -name '*.min.js' \) 2>/dev/null)" && echo "PASS: 模型留空"
+! grep -rnE "(div|span) onClick" src --include='*.tsx' && echo "PASS: 无非交互元素点击"
+! grep -rnE "from ['\"](pixi|pixi-live2d-display)" src && echo "PASS: 无 Live2D 静态依赖"
 ```
 
 ### 2.7 日常唤起与无障碍交互规格（A 主责，B 供原生能力）
 
-**① 唤起通路矩阵（「日常唤起」的全集）**
+**① 唤起通路矩阵**
 
-| # | 通路 | 前提 | 触发后发生什么 | 归属 | 里程碑 |
+| # | 通路 | 前提 | 触发后发生什么 | 归属 | 状态 |
 |---|---|---|---|---|---|
-| 1 | 说唤醒词「小忆 / 阿忆 / 忆伴」 | 麦克风权限 | 停止当前 TTS → `state=listening` → 播报「我喺度」 | A（前台）/ B（锁屏） | M0 / M2 |
-| 2 | 单击主按钮 | 无 | 同上（等价于通路 1） | A | **已有** |
-| 3 | 长按数字人 1s | 无 | `state=listening`，并播报「你想講咩？」 | A | M2 |
-| 4 | 点击桌面小组件 | 已加小组件 | `bringToForeground("widget")` → 自动进入 listening | B | M2 |
-| 5 | 点击通知 / 到点闹钟 | 通知权限 | 前置 → 按 `reason` 播报（提醒 / 访谈 / 晨间问候） | B | M2 |
-| 6 | 开机自启 | B 的 `BOOT_COMPLETED` | 只重排闹钟，**不主动开口**（避免清晨惊吓） | B | M2 |
-| 7 | 耳机线控 / 蓝牙键 | 系统媒体键 | 播放中 → 暂停；空闲 → 进入 listening | B | M4（可选） |
-| 8 | 硬件音量键长按 | 无障碍服务（可选） | 进入 listening | B | M4（可选，权限敏感） |
+| 1 | 说「小忆 / 阿忆 / 忆伴」 | 麦克风 | 停当前播报 → 「我喺度…」→ 聆听 | A（前台）/ B（锁屏） | M0 |
+| 2 | 单击主按钮 | 无 | 打断播报 → 聆听 | A | 已有 + 打断修复 |
+| 3 | 长按数字人 1s | 无 | 打断播报 → 「你想講咩？」→ 聆听 | A | M2 |
+| 4 | 点击桌面小组件 | 已加小组件 | `onForeground("widget")` → 直接聆听 | B 原生 / A 响应 | M2 |
+| 5 | 点击通知 / 到点闹钟 | 通知权限 | `onForeground("alarm"/"notification"/"reminder")` → 调度器决定说什么 | B 原生 / A 响应 | M2 |
+| 6 | 开机自启 | `BOOT_COMPLETED` | 只重排闹钟；A 收到 `boot` **保持静默** | B | M2 |
+| 7 | 锁屏小组件 SOS 热区 | 已加小组件 | `memomate:sos` → 直接打开 SOS 覆盖层 | B 原生 / A 响应 | M2 |
+| 8 | 耳机线控 / 音量键长按 | 系统媒体键 / 无障碍 | 进入聆听 | B | M4（可选） |
 
-> 前 5 条是**答辩必须演示**的通路；6–8 列为可选，未实现不影响门禁，但必须在答辩时说明取舍理由。
+> 前 5 条 + 第 7 条是**答辩必须演示**的通路。
 
 **② 无障碍验收基线（TalkBack / VoiceOver 通用）**
 
 | 项 | 硬性要求 | 检查方式 |
 |---|---|---|
-| 语义角色 | 每个可交互元素是 `button`/`a`/`input`；数字人 `role="img"` + `aria-label` | TalkBack 逐元素朗读 |
-| 状态播报 | `aria-live="polite"` 播报状态切换；SOS 用 `assertive` | 开关麦克风/触发 SOS 各听一次 |
-| 焦点顺序 | 数字人 → 主按钮 → SOS → 工具面板，无跳过、无陷阱 | 键盘 Tab 走一遍 |
-| 触控目标 | ≥ 120×80px，间距 ≥ 16px | 量 `getBoundingClientRect()` |
-| 非视觉反馈 | 关键状态有振动或提示音 | 静音屏幕外操作一次 |
-| 无语音可用 | 纯按钮完成「提醒/通话/今日安排/找家人」四件事 | 断麦克风权限演练 |
+| 语义角色 | 可交互元素是 `button`/`a`/`input`；数字人是带 `aria-label` 的 `button` | TalkBack 逐元素朗读 |
+| 状态播报 | 状态行 `aria-live="polite"`；SOS `assertive` | 开关麦克风 / 触发 SOS 各听一次 |
+| 焦点顺序 | 数字人 → 主按钮 → SOS → 次要按钮 → 工具面板 | 键盘 Tab 走一遍 |
+| 触控目标 | 主按钮 ≥120×80px；次要按钮 ≥60×60px；间距 ≥16px | `getBoundingClientRect()` |
+| 非视觉反馈 | 按下振动 30ms；关键状态有语音 | 静音屏幕外操作一次 |
+| 无语音可用 | 纯按钮完成「食药 / 今日安排 / 打畀屋企人」 | 断麦克风权限演练 |
 | 动效 | `prefers-reduced-motion` 下零位移，仅嘴部/眨眼 | 系统开关切换 |
-| 对比度 | 文字 ≥ 4.5:1；高对比档 ≥ 7:1 | 取色器抽 3 处 |
+| 对比度 | 文字 ≥4.5:1；高对比档 ≥7:1 | 取色器抽 3 处 |
 
-**③ 与 §1.8 的对应关系**：`A【缺】` 两行（听力/视力适配、餐点关注）由本节 ② 与 A5 覆盖；`B【缺】` 三行（诈骗提示、夜间觉醒、数字能力指标）由 B 的 B7/B8 与 M3–M4 补齐，A 不实现。晨间问候与夜间静默属 B7 的 `reason` 播报，不由 A 单独排程。
+**③ 与 §1.8 的对应**：`A【缺】` 两行中，视觉适配由 A5 第 6–7 条覆盖；听力代理需 B 的原生音量接口（D-7，M4）；餐点关注由 C 的周报从 `interaction` 事件计算。认知类各行：访谈（A1）、定向题不纠正（A1）、停顿不插话（`listenOnce` 8s 不打断）、反复提问**只计数**（`track("repeat_question")`，从不提醒长者「你问过了」）、找不到东西只安抚 + 计数（`careCue === "lost"`）、情绪主诉只陪伴（`careCue === "sad"`）、无责备措辞（自检词表断言）。
+
+### 2.8 决策记录（相对第一版的偏离，均按 ponytail「能删就删、能复用就复用」裁决）
+
+| # | 第一版 | 本版 | 理由 |
+|---|---|---|---|
+| D-1 | `vad.ts` 换 Silero（`@ricky0123/vad-web`） | **不引入**；新增 `snrDb()` + `qualityOf()` | 质量门控要拦的是「电视/风扇这类持续声」，Silero 只回答「是不是人声」——**电视里也是人声**，拦不住。而电视节目经过响度压缩、风扇空调是稳态噪声，二者的帧能量动态范围都窄，SNR（P90−P10）正好区分。省掉一个依赖 + ~2MB ONNX/wasm。天花板（离麦克风很近、动态大的电视对白仍可能过门）用 `ponytail:` 标在 `signal.ts`，升级路径：Silero 判人声 × SNR 判清晰度，二者相乘 |
+| D-2 | npm 引入 `pixi.js` + `pixi-live2d-display`，动态 import | **运行时脚本注入**，清单 `runtime` 字段 | Cubism Core 本就只能脚本加载；统一后零依赖、零首屏体积，许可证边界集中在 `public/live2d/vendor/` |
+| D-3 | `visemeFromAnalyser(a)` | 删除 | Web Speech TTS 无音频流，没有调用方；改用 `onboundary` 逐字校准 |
+| D-4 | `?demo=1` 预置脚本替换 STT | 删除 | 工具面板已有文字输入，走同一条 `runIntent`；嘈杂展台直接打字，不需要第二套构型 |
+| D-5 | 「常用四件事」：吃药 / 打电话 / 今日安排 / 找家人 | 「常用三件事」：食药 / 今日安排 / 打畀屋企人 | 「打电话」和「找家人」对长者是同一个动作；`tel:` 链接是平台原生拨号，无需 B 的 `CALL_PHONE` 权限 |
+| D-6 | 数字人 `role="img"` 且可点击 | 外层 `<button>` | 可点击的 `img` 违反本节自己的「禁止非交互元素挂点击」，读屏也不会告诉长者「可以点」 |
+| D-7 | 「音量 ≤30% → 自动调高 TTS 一级」 | 推迟 M4，需 B 提供 `getMediaVolume()` | Web 读不到系统音量，`SpeechSynthesisUtterance.volume` 默认已是最大值 1.0，「调高一级」在 Web 上不存在 |
+| D-8 | 访谈「连续 2 次拒答才停」 | 拒答一次即停 | 与同节验收矛盾；尊严优先 |
+| D-9 | 调度优先级 访谈 > 沉默关怀 | 沉默关怀 > 访谈 | 原顺序下沉默关怀永不触发（见 A2） |
+| D-10 | `StaticPortrait.tsx`、`components/avatar/MountLive2D.ts` 两个新文件 | 并入 `Avatar.tsx` / `lib/live2d.ts` | 最少文件；L3 只是几行 JSX |
+| D-11 | `checkin.ts` 每日签到 | 删除，并入调度器 | 两套「今天是否第一次」判定会互相打架 |
+| D-12 | 清单 `model:null` 时「连网络请求都不发」 | 只发一次清单请求 | 不读清单无法知道它是 null；要零请求只能构建期内联，而那会破坏「拔掉清单仍能构建」 |
 
 ---
 
@@ -1179,11 +1248,11 @@ cd web && node src/selfcheck.ts && cd ../backend && python selfcheck.py
 
 | 依赖 / 资源 | 许可证 | 对闭源商业化的影响 | 行动 |
 |---|---|---|---|
-| `pixi.js` | MIT | 无 | 保留版权声明 |
-| `pixi-live2d-display` | MIT | 无（库本身） | 保留版权声明 |
+| `pixi.js` | MIT | 无 | 不进 npm 依赖；接入模型时放 `public/live2d/vendor/` 并保留版权声明（§2.3.1 ①） |
+| `pixi-live2d-display` | MIT | 无（库本身） | 同上，运行时脚本注入 |
 | **Live2D Cubism 模型（官方 sample）** | **Live2D Proprietary / Free Material License** | **不可直接商用**；sample 模型仅限演示与开发 | 演示可用；商用必须自建模型或购买授权。**答辩材料需注明"演示用 sample 模型"** |
 | Cubism SDK / Cubism Core | Live2D Proprietary | 有营收门槛与发行条款 | 上线前替换为已授权版本 |
-| `@ricky0123/vad-web`（Silero VAD） | MIT（模型 MIT） | 无 | 可直接用 |
+| `@ricky0123/vad-web`（Silero VAD） | MIT（模型 MIT） | 无 | **本轮不引入**（§2.8 D-1：SNR 门控已覆盖持续噪声场景） |
 | Picovoice Porcupine（若替换唤醒词） | 商用许可（免费额度有限） | 有 | 现阶段继续用 `SpeechRecognizer`，不引入 |
 | Next.js / React | MIT | 无 | — |
 | Capacitor | MIT | 无 | — |
