@@ -338,8 +338,9 @@ class BehaviourDailyEnvelope(_Base):
 class TaskEvent(_Base):
     """One task state transition from the device.
 
-    PROVISIONAL shape until B lands `TaskEvent` in web/src/lib/types.ts; the
-    fields are a superset of what the daily rollup needs, so additions are safe.
+    Mirrors `TaskEvent` in web/src/lib/types.ts (B confirmed the same field names
+    and enums). Deliberately ids/states only — the task text never leaves the
+    device.
     """
 
     id: str
