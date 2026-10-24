@@ -9,13 +9,13 @@
 
 | 数据 | 产生位置 | 是否离开设备 | 保存位置 | 保留期 |
 |---|---|---|---|---|
-| 原始音频波形 | 手机麦克风 | **否** | 内存，特征提取后立即归零（`extract-and-burn`） | 秒级 |
-| 声学特征（eGeMAPS 88 维） | 端侧 / 后端分析 | 是（仅特征） | `backend/.data/memomate.db`（SQLite） | 按 90 天 TTL 清理（当前 `purge.py` 只覆盖会话） |
-| 转写文本 | Whisper（端侧或后端） | 仅派生指标入库，**原文不入库** | 仅长度/词汇指标 | 90 天 |
+| 原始音频波形 | 手机麦克风 | **否**（后端 `/screening/analyze` 仅内存处理） | 内存；解码副本在特征提取后清零（best-effort） | 秒级 |
+| 声学特征（eGeMAPS 88 维） | 后端分析（端侧 88 维接入待 A/M3） | 是（仅特征） | `backend/.data/memomate.db`（SQLite，`screening_metrics`） | **暂无 TTL（待补）**；当前 `purge.py` 只删会话 |
+| 转写文本 | Whisper（端侧或后端） | 仅派生指标入库，**原文不入库** | 仅长度/词汇指标（随 `screening_metrics`） | **暂无 TTL（待补）** |
 | 对话文字 | 长者端语音转写 | 是（假名 + AES-GCM 密文） | `records.payload`（`v1:` 密文） | 90 天（`scripts/purge.py`）+ 可单条撤回 |
-| 步态窗口 / 跌倒 | `DeviceMotionEvent` | 是（摘要） | `records` | 90 天 |
-| 行为日汇总 | 端侧任务/屏幕/充电事件 | 是（计数） | `docs['behaviour:<day>']` | 90 天 |
-| 越界事件 | 前台定位 | 是（距离/时长，无坐标） | `docs['geofence_event:<id>']` + 家属 outbox | 90 天 |
+| 步态窗口 / 跌倒 | `DeviceMotionEvent` | 是（摘要） | `records` | **暂无 TTL（待补）** |
+| 行为日汇总 | 端侧任务/屏幕/充电事件 | 是（计数） | `docs['behaviour:<day>']` | **暂无 TTL（待补）** |
+| 越界事件 | 前台定位 | 是（距离/时长，无坐标） | `docs['geofence_event:<id>']` + 家属 outbox | **暂无 TTL（待补）** |
 | 健康卡 | 家属/机构录入 | 是 | `docs['health_card']` | 至更新/删除 |
 | 审计链 | 筛查决策 | 否（本地哈希链） | `backend/.data/audit.jsonl` | 与结果同期 |
 | **桌面组件待办文本** | 长者原话（`Task.text`） | **否** | 应用私有 `SharedPreferences`（WebView 之外） | 卸载即清除 |
@@ -73,23 +73,24 @@
 
 | 问题 | 我们的答案 | 落地动作 |
 |---|---|---|
-| 算法偏见 | 训练集为单一中文数据集（322 人），粤语/葡语覆盖不足；低教育年限人群可能高估语言流风险 | 语言流去掉纯词汇丰富度（`mattr`）；报告标注「教育年限未校正」；补粤语样本 |
+| 算法偏见 | 训练集为单一中文数据集（322 人），粤语/葡语覆盖不足；低教育年限人群可能高估语言流风险 | **当前训练产物与推理仍含 `mattr`**；下一版重训时移除（需重跑 322 人评估）；报告标注「教育年限未校正」；补粤语样本 |
 | 数字排斥 | 不用智能机的长者被完全排除 | 明确「不能替代入户探访」；提供家属/照护者代办模式；演示时说明覆盖边界 |
 | 家庭动态与自主性 | 周报可能被家属用作「监控」 | L3 归长者本人；措辞用「建议关心」而非「异常警报」；支持「不发给某位家属」 |
 | 技术与人类护理 | 可能被理解为「替代护工」 | 定位为「提醒护工该去看一眼」；高风险项附「由谁、多久内、做什么」 |
-| 临终与失能数据 | 用户去世/终末期后的数据 | 提供「一键删除全部数据」；TTL 90 天；家属可申请注销 |
+| 临终与失能数据 | 用户去世/终末期后的数据 | 提供「一键删除全部数据」（待补）；会话记忆 TTL 90 天，其余数据 TTL 待补；家属可申请注销 |
 | 误报伤害 | watch 特异性约 0.4（假阳性约 60%） | 分层只用于「是否安排一次访谈」，绝不直接告知「你可能患病」；elevated 一律写「建议由医生评估」 |
 
 ---
 
 ## 6. 数据治理审计清单（可现场演示）
 
-- [x] 原始音频不出端（`vad.ts` 只返回派生特征；后端 `privacy.purge` 归零缓冲）
+- [x] 原始音频不出端（`vad.ts` 只返回派生特征）；后端 `privacy.purge` 为 **best-effort**：只清零解码用的可变副本，原始上传字节不可变、不落盘
 - [x] 假名化：`SHA256(salt + deviceId)` → `dev-xxxx`（`_SALT` 冻结）
 - [x] 审计链：每次筛查写 hash 链（`audit.py`，`integrityOk` 可现场校验）
 - [x] 家属通知只写 outbox，不声称「已送达」（`notify.dispatch` 返回 `delivered: false`）
 - [x] 桌面组件待办文本纯端侧（`SharedPreferences`，见 §1）
-- [x] TTL 与删除接口（C5：`scripts/purge.py` + `DELETE /conversation/turns/{id}`）
+- [x] 会话记忆 TTL 与单条撤回（C5：`scripts/purge.py` + `DELETE /conversation/turns/{id}`）
+- [ ] 步态 / 行为 / 越界 / 筛查特征的 TTL（目前仅会话有清理，其余暂无到期删除）
 - [x] 会话记忆 AES-GCM 加密（C5；缺 `AURA_ENCRYPTION_KEY` 拒绝启动）
 - [x] k≥20 聚合门槛（`anonymity.py#assert_k_anonymity` + `merge_small_bands`；当前无跨境导出入口）
 - [ ] 家属端导出与撤销（A/M3）

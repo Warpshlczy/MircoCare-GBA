@@ -61,6 +61,7 @@ AURA_LLM_ENABLED=false python selfcheck.py   # 三流权重、缺流回归、单
 1. 招募 ≥300 人前瞻队列，采集同日 `BehaviourDaily` + 语音样本；
 2. 以「敏感度 ≥0.80」为约束，在 0.0–0.4 行为权重网格上最大化特异性；
 3. 记录每个网格点的 AUC / 敏感度 / 特异性，用 k≥20 的聚合口径发布；
-4. 结果回填本文件，并递增 `FUSION_VERSION`（当前 `latefusion-v3`）。
+4. 结果回填本文件，并递增 `FUSION_VERSION`（当前 `latefusion-v3`）；
+5. 语义流移除 `mattr` 后重跑 `train_semantic_model.py` 与 `eval_fusion.py`（当前产物仍含 mattr，见附录 E.4 注记）。
 
 **在此之前，任何「三流 AUC 更高」的说法都不成立。**

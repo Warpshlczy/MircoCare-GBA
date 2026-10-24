@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 
 from ..audit import audit_log
 from ..config import ENGINE_VERSION, FEATURE_SET_VERSION, settings
-from ..contract import BaselineReport, ChangePoint, MetricZScore, ScreeningResult
+from ..contract import BaselineReport, ChangePoint, Locale, MetricZScore, ScreeningResult
 from ..privacy import device_id
 from ..store import store
 from ..screening import run_screening
@@ -27,7 +27,9 @@ _MAX_UPLOAD_BYTES = 25 * 1024 * 1024  # ponytail: fixed cap; stream to disk for 
 @router.post("/screening/analyze", response_model=ScreeningResult)
 async def analyze_screening(
     file: UploadFile = File(..., description="WAV/FLAC speech sample"),
-    locale: str = Form("zh-CN"),
+    # Literal-typed form field: an unsupported locale is a 422, never a 500 in
+    # response validation (`ScreeningResult.locale` is the same Literal).
+    locale: Locale = Form("zh-CN"),
     question: str = Form("", description="the digital-human prompt the senior answered"),
     dev: str = Depends(device_id),
 ) -> ScreeningResult:
@@ -36,6 +38,9 @@ async def analyze_screening(
     Raw audio is extract-and-burned: it is zeroed as soon as features exist and
     is never written to disk or returned.
     """
+    # Reject oversized uploads before `read()` buffers them in memory.
+    if file.size is not None and file.size > _MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="audio exceeds 25 MB")
     data = await file.read()
     if not data:
         raise HTTPException(status_code=422, detail="empty audio upload")

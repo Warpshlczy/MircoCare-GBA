@@ -1298,6 +1298,8 @@ cd web && node src/selfcheck.ts && cd ../backend && python selfcheck.py
 | 被动手机行为（CASAS 类） | 服药提醒类任务的完成度区分度最强（δ=0.817） | 行为流权重应不低于声学流 |
 | 数字人/陪伴型交互 | 可提升依从性，但**过度拟人化会引发依赖与伦理争议** | UI 明确"我是程序"，不模拟情感承诺 |
 
+> **现状注记（C，2026-10）**：`mattr` 仍存在于 `model/semantic.py`、`semantic_lr.joblib` 与 `scripts/eval_fusion.py` 的特征列中；移除需重跑 322 人训练/评估，已列为 M4 待办。本文档的“去掉 mattr”是目标口径，不代表当前代码已完成，答辩时不得声称已去掉。
+
 ---
 
 ## 附录 F · 交付与答辩对照表（三人共看）

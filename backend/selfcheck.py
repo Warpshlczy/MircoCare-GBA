@@ -562,9 +562,18 @@ with tempfile.TemporaryDirectory() as tmp:
     st.record("dev-sql", "metrics", {"at": 1_000, "v": 1})
     st.record("dev-sql", "metrics", {"at": 2_000, "v": 2})
     st.record("dev-sql", "gait", {"startedAt": 3_000, "steps": 4})
-    assert [r["v"] for r in st.history("dev-sql", "metrics")] == [1, 2], "insertion order"
+    assert [r["v"] for r in st.history("dev-sql", "metrics")] == [1, 2], "chronological order"
     assert [r["v"] for r in st.history("dev-sql", "metrics", since_ms=1_500)] == [2]
     assert st.history("dev-sql", "gait", since_ms=2_500)[0]["steps"] == 4, "startedAt is the time column"
+
+    # Outbox replay can insert an OLD sample after a newer one; history must still
+    # come back in time order or baseline/CUSUM/report all read the wrong "today".
+    st.record("dev-sql", "out_of_order", {"at": 3_000, "v": 3})
+    st.record("dev-sql", "out_of_order", {"at": 1_000, "v": 1})
+    st.record("dev-sql", "out_of_order", {"at": 2_000, "v": 2})
+    assert [r["v"] for r in st.history("dev-sql", "out_of_order")] == [1, 2, 3], (
+        "history must be ordered by `at`, not by insertion id"
+    )
 
     assert st.get_doc("dev-sql", "health_card") is None
     st.set_doc("dev-sql", "health_card", {"name": "陳阿婆"})
@@ -659,6 +668,17 @@ with tempfile.TemporaryDirectory() as tmp:
     finally:
         weekly_mod.settings = _real_weekly_settings
     assert _triage.claimLevel == "triage_support" and "辅助分诊" in _triage.disclaimer
+
+    # zh-HK / zh-MO must actually change the copy, not just the `locale` field.
+    for _loc in ("zh-HK", "zh-MO"):
+        _hk = build_weekly_report("dev-rep", st, now=now_ms, locale=_loc)
+        assert _hk.locale == _loc
+        assert _hk.sections[0].title == "這一週他講了多少話", f"{_loc} title not localized"
+        assert "本報告是認知變化的輔助觀察" in _hk.disclaimer
+        assert _hk.sections[4].counts[0].value == "盡快就醫"
+        _hk_blob = _hk.model_dump_json() + render_html(_hk)
+        for _word in DIAGNOSTIC_WORDS:
+            assert _word not in _hk_blob, f"diagnostic word leaked into {_loc}: {_word}"
 
 # --- k-anonymity gate (DPIA D.3) ---------------------------------------------
 _small = (

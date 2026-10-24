@@ -1,6 +1,6 @@
 # 忆伴 MemoMate 后端 — MCI/AD 多模态筛查引擎
 
-Python / FastAPI 服务：通过分析长者日常对话语音中的**数字生物标志物**，做轻度认知障碍（MCI）与阿尔茨海默病（AD）的早期筛查，并向家属 / 护理员同步。前端契约见仓库根目录 [DEV.md](../DEV.md) §8。
+Python / FastAPI 服务：通过分析长者日常对话语音中的**数字生物标志物**，做轻度认知障碍（MCI）与阿尔茨海默病（AD）的早期筛查，并向家属 / 护理员同步。前端契约见 [docs/dev.md](../docs/dev.md)。
 
 > **非诊断设备。** 输出仅用于演示、评估与人工复核，不做任何自动化临床决策。
 > 内置模型虽在公开数据集上训练，但**未经临床验证**，效力边界见「已训练模型」一节。
@@ -193,7 +193,7 @@ backend/
 ## 四项目标理念的落地位置
 
 1. **非侵入式数字生物标志物** — `audio/features.py`（F0、Jitter、Shimmer、F1/F2、发音/停顿比）+ `nlp/`（TTR、名动比、语义连贯度）。
-2. **隐私保护管线** — `privacy.py`：`extract-and-burn`（特征提取后原始音频归零）、`vector-only` 摄入、PII 擦除、加盐 SHA256 假名化。
+2. **隐私保护管线** — `privacy.py`：`extract-and-burn`（特征提取后清零解码用的可变缓冲；**best-effort，原始上传字节不可变且不落盘**）、`vector-only` 摄入、PII 擦除、加盐 SHA256 假名化。
 3. **个人基线动态追踪** — `baseline.py`：与长者专属 14 天历史基线做 Z-score 对比，而非总体固定阈值。
 4. **STEMB 与 SaMD** — `economics.py`（QALY / 成本）+ `audit.py`（防篡改审计链）；
    每条筛查记录还会写入**模型来源指纹**（`screening.py`：模型文件路径、SHA256 前 8 位、是否加载成功），

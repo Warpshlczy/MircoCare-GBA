@@ -88,15 +88,30 @@ def post_screening_session(s: ScreeningSession, dev: str = Depends(device_id)) -
 
 @router.post("/sos", status_code=202)
 def post_sos(e: SosEvent, dev: str = Depends(device_id)) -> dict:
-    """Record the SOS and queue a family notification.
+    """Record the SOS and queue a family notification (idempotent per event id).
 
-    The outbox row is durable and the caregiver dashboard reads it; the demo
-    provider is a log line (+ optional `AURA_NOTIFY_WEBHOOK`). We return 202
-    because delivery is queued, not confirmed — never claim "sent".
+    The outbox is at-least-once: the client may retry after a response timeout
+    even though the server already processed the event. Without de-duplication
+    that retry pages the family a second time. The marker stores the first
+    outcome so a replay returns it verbatim without dispatching again.
+
+    `ponytail:` the marker is written after dispatch, so a crash in between can
+    still replay — for an SOS a duplicate alert is safer than a missed one.
     """
+    key = f"sos_event:{e.id}"
+    existing = store.get_doc(dev, key)
+    if existing is not None:
+        return {
+            "id": e.id,
+            "notified": list(existing.get("notified") or []),
+            "channel": "outbox",
+            "delivered": False,
+        }
+
     store.record(dev, "sos", e.model_dump())
     store.set_doc(dev, "sos_last", {"at": e.at, "status": "pending", "reason": e.reason})
     notified = notify_dispatch(dev, "sos", e.model_dump())
+    store.set_doc(dev, key, {"id": e.id, "at": e.at, "notified": notified})
     # Tamper-evident ledger entry: who was queued, not what was said.
     audit_log.append(
         kind="sos",

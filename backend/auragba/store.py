@@ -95,7 +95,10 @@ class Store:
         if since_ms is not None:
             query += " AND at >= ?"
             params.append(int(since_ms))
-        query += " ORDER BY id ASC"
+        # Time-series callers (baseline/CUSUM/report) need chronological order,
+        # not insertion order: an outbox replay can insert an OLD sample after a
+        # newer one. `id` is only a tie-breaker for identical timestamps.
+        query += " ORDER BY at ASC, id ASC"
         with self._connect() as db:
             rows = db.execute(query, params).fetchall()
         return [json.loads(row["payload"]) for row in rows]
