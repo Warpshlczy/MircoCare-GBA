@@ -1043,7 +1043,7 @@ assert.equal(magnitude(3, 4, 0), 5);
   assert.equal(blank.taskTimeoutRate, null);
   assert.equal(blank.taskConfirmDelayMin, null);
   assert.equal(blank.gaitCv, null, "no window is not cv=0");
-  assert.equal(blank.fallEvents, 0);
+  assert.equal(blank.fallEvents, null, "no window observed -> no fall reading, not 0");
   assert.equal(hasMeasuredSignal(blank), false);
   assert.equal(hasMeasuredSignal(b), true);
 

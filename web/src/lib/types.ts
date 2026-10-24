@@ -362,7 +362,13 @@ export interface BehaviourDaily {
   interactionCount: number;
   /** coefficient of variation of inter-step intervals; null = no gait window */
   gaitCv: number | null;
-  fallEvents: number;
+  /**
+   * Falls counted from gait windows; null = gait was not measured that day.
+   * Mirrors the backend (`contract.py` `fallEvents: int | None`): "0 falls" with
+   * no window at all is a missing reading, not a zero, and C's validator
+   * normalises the ambiguity anyway — we simply send the truth.
+   */
+  fallEvents: number | null;
   /**
    * Report-only proxies from the interview capture (contract.py:307). 0..1
    * shares, NOT a hearing test or a sight test: C shows them in the weekly

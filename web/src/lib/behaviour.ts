@@ -208,6 +208,8 @@ export function behaviourForDay(input: BehaviourInputs): BehaviourDaily {
   const base =
     input.gaitAcc && input.gaitAcc.day === input.day ? input.gaitAcc : emptyAccumulator(input.day);
   const acc = mergeGaitAcc(base, input.gait ?? []);
+  // "0 falls" only means something if a window was actually observed.
+  const gaitObserved = acc.ids.length > 0 || acc.cvCount > 0;
 
   return {
     id: `bd-${input.day}`,
@@ -218,7 +220,7 @@ export function behaviourForDay(input: BehaviourInputs): BehaviourDaily {
     deferCount: stats.deferredCount,
     interactionCount: Math.max(0, Math.round(input.interactionCount)),
     gaitCv: accCv(acc),
-    fallEvents: acc.fallEvents,
+    fallEvents: gaitObserved ? acc.fallEvents : null,
     // Sent as null when unmeasured — they are report-only, never scored.
     hearingProxy: input.hearingProxy ?? null,
     visionProxy: input.visionProxy ?? null,
@@ -275,7 +277,7 @@ export function hasMeasuredSignal(b: BehaviourDaily): boolean {
     b.taskConfirmDelayMin !== null ||
     b.taskCompletionRate !== null ||
     b.gaitCv !== null ||
-    b.fallEvents > 0 ||
+    (b.fallEvents ?? 0) > 0 ||
     b.interactionCount > 0
   );
 }
