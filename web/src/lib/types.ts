@@ -107,7 +107,17 @@ export type ActivityState = "sleeping" | "awake";
 // A card is EITHER frontend-rendered structured data (`data`) OR backend-rendered
 // HTML (`html`) — mutually exclusive.
 // ---------------------------------------------------------------------------
-export type CardKind = "task" | "med" | "weather" | "camera" | "info";
+export type CardKind =
+  | "task"
+  | "med"
+  | "weather"
+  | "camera"
+  | "info"
+  // B (agent layer) adds three kinds; CardRenderer renders by `data`/`html`,
+  // never by `kind`, so these need no renderer branch — only a card factory.
+  | "place" // geofence / whereabouts ("你而家喺街市附近")
+  | "alarm" // time-based ("聽日十點覆診")
+  | "agentPlan"; // multi-step preview ("我準備做呢三件事")
 
 export interface CardRow {
   label: string;
@@ -160,7 +170,29 @@ export interface AgentIntentRequest {
 // ---------------------------------------------------------------------------
 // Intent parsing (pure, testable) + privacy-first telemetry
 // ---------------------------------------------------------------------------
-export type Intent = "weather" | "medication" | "tasks" | "camera" | "sos" | "help" | "tools" | "followup" | "note" | "recall" | "unknown";
+// NOTE: this union is mirrored by `Intent = Literal[...]` in
+// backend/auragba/contract.py:15. Adding a value here WITHOUT adding it there
+// makes POST /agent/cards answer 422 for that intent (the client then falls
+// back locally, so nothing crashes — but it logs an error on every utterance).
+export type Intent =
+  | "weather"
+  | "medication"
+  | "tasks"
+  | "camera"
+  | "sos"
+  | "help"
+  | "tools"
+  | "followup"
+  | "note"
+  | "recall"
+  // B (agent layer) intents — each maps to one tool in lib/tools.ts:
+  | "navigate" // locate / navigate_home
+  | "call" // call_contact
+  | "alarm" // set_alarm
+  | "message" // send_message
+  | "repeat" // re-say the last sentence (no tool)
+  | "cancel" // abort what is on screen (no tool)
+  | "unknown";
 
 export interface TelemetryEvent {
   id: string;
@@ -197,4 +229,131 @@ export interface MedicationPlanRequest {
   /** recent local conversation memory — lets the agent learn from what was said */
   history: ConversationTurn[];
   now: number;
+}
+
+// ---------------------------------------------------------------------------
+// B (agent layer) — tasks, offline outbox, behaviour channels, /agent/turn.
+// Everything below is a CONTRACT: `web/src/lib/tools.ts` declares the tool
+// schemas, `backend/auragba/contract.py` mirrors these shapes. Change here
+// first, then tell A and C (§0.2 of docs/dev.md).
+// ---------------------------------------------------------------------------
+
+/**
+ * A local, on-device task. "Say anything → a task" and "我食咗药" both land
+ * here. `doneAt - dueAt` is the confirm delay that feeds the behaviour stream.
+ */
+export interface Task {
+  id: string;
+  text: string;
+  /** undefined = no deadline ("记住买药") */
+  dueAt?: number;
+  done: boolean;
+  doneAt?: number;
+  source: "voice" | "reminder" | "followup" | "agent";
+  /** how many times the senior pushed it back — an executive-function signal */
+  deferredCount: number;
+  createdAt: number;
+  /** set when the senior re-confirms within 30min of a previous confirmation */
+  duplicateOf?: string;
+}
+
+export type OutboxKind =
+  | "gait"
+  | "screening"
+  | "telemetry"
+  | "sos"
+  | "reminder"
+  | "behaviour"
+  | "taskEvent"
+  | "conversation";
+
+/**
+ * One entry in the offline replay queue. Replay is at-least-once, so every
+ * consumer must de-duplicate by `payload.id` (the backend already does for
+ * gait/screening/telemetry).
+ */
+export interface OutboxItem {
+  id: string;
+  kind: OutboxKind;
+  payload: unknown;
+  createdAt: number;
+  attempts: number;
+  /** epoch ms of the next allowed attempt (exponential backoff) */
+  nextAttemptAt: number;
+  /** last transport error, for the doctor page; never shown to the senior */
+  lastError?: string;
+}
+
+/**
+ * Daily behaviour rollup — the ONLY input C's behaviour stream accepts.
+ * Missing readings are `null`, never 0: a senior without the usage-stats
+ * permission must not look like "0 app switches" (that would read as decline).
+ */
+export interface BehaviourDaily {
+  id: string;
+  /** local date key "YYYY-MM-DD" */
+  day: string;
+  /** minutes from reminder dueAt to voice confirmation; null = no reminder due */
+  taskConfirmDelayMin: number | null;
+  /** 0..1 share of due tasks never confirmed; null = nothing was due */
+  taskTimeoutRate: number | null;
+  /** 0..1 share of tasks completed; null = no tasks at all */
+  taskCompletionRate: number | null;
+  deferCount: number;
+  interactionCount: number;
+  /** coefficient of variation of inter-step intervals; null = no gait window */
+  gaitCv: number | null;
+  fallEvents: number;
+}
+
+/** Screen/unlock/charging broadcast rollup. No permission required. */
+export interface CircadianDaily {
+  id: string;
+  day: string;
+  firstActiveAt: number;
+  lastActiveAt: number;
+  nightWakeCount: number;
+  chargingHours: number;
+}
+
+/**
+ * Digital-skill proxy. Every field is nullable: when PACKAGE_USAGE_STATS is
+ * not granted the whole row is omitted (we never prompt the senior to grant it).
+ */
+export interface DigitalSkillDaily {
+  id: string;
+  day: string;
+  appSwitchCount: number | null;
+  opFailRate: number | null;
+  firstTouchDelayMs: number | null;
+}
+
+/** One tool invocation the agent wants the device to perform. */
+export interface ToolCall {
+  name: string;
+  args: Record<string, unknown>;
+}
+
+/** Request to POST /agent/turn — the tool list is supplied by the client. */
+export interface AgentTurnRequest {
+  utterance: string;
+  locale: Locale;
+  now: number;
+  context: {
+    /** ≤10, oldest first */
+    recentTurns: { role: "user" | "assistant"; text: string }[];
+    openTasks: { id: string; text: string; dueAt?: number }[];
+    riskBand?: "low" | "watch" | "elevated";
+  };
+  /** the 10 declarations from lib/tools.ts, in OpenAI function-calling shape */
+  tools: { name: string; description: string; schema: unknown }[];
+}
+
+/** Response from POST /agent/turn. `calls` is capped at 3 by contract. */
+export interface AgentTurnResponse {
+  reply: string;
+  calls: ToolCall[];
+  cards: AgentCard[];
+  /** present when a `confirm`-risk call needs a spoken yes/no first */
+  needsConfirm?: { callIndex: number; question: string };
 }

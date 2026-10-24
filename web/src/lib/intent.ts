@@ -10,12 +10,21 @@ import type { Intent } from "./types";
 // Order matters: more specific intents first (sos before help).
 const RULES: { intent: Intent; words: string[] }[] = [
   { intent: "sos", words: ["救命", "唔舒服", "不舒服", "嗌人", "求助", "急", "sos"] },
+  // Abort and "say that again" must precede everything else: "取消聽日覆診"
+  // contains the follow-up keyword, and "再講一次食藥" would otherwise hit med.
+  { intent: "cancel", words: ["取消", "唔使", "唔驶", "唔駛", "算了", "算啦", "唔要", "cancel", "never mind"] },
+  { intent: "repeat", words: ["再講", "再讲", "講多次", "讲多次", "大聲", "大声", "聽唔清", "听唔清", "repeat", "say again"] },
   // Explicit memory/appointment commands win over the generic "药" keyword:
   // "记住买药" should save a note, not just show the medication list.
   // Recall MUST precede note: "我记低咗咩" also contains the note keyword "记低".
   { intent: "recall", words: ["我記低咗咩", "我记低咗咩", "記低咗咩", "记低咗咩", "我記咗咩", "我记咗咩", "上次記", "上次记", "有咩記錄", "有咩记录", "notes", "note list"] },
   { intent: "followup", words: ["覆診", "覆诊", "復診", "复诊", "預約", "预约", "appointment", "followup", "follow up"] },
   { intent: "note", words: ["記住", "记住", "記低", "记低", "記一下", "记一下", "幫我記", "帮我记", "remember"] },
+  // B intents. `call` MUST precede `help`, because "幫我打畀阿明" contains 幫.
+  { intent: "alarm", words: ["鬧鐘", "闹钟", "叫醒", "叫我起身", "幾點叫", "几点叫", "較時間", "校时间", "alarm", "wake me"] },
+  { intent: "call", words: ["打電話", "打电话", "撥打", "拨打", "致電", "致电", "打畀", "打俾", "打電話畀", "call "] },
+  { intent: "message", words: ["發訊息", "发訊息", "發消息", "发消息", "發短訊", "发短信", "發信息", "发信息", "whatsapp", "send message"] },
+  { intent: "navigate", words: ["導航", "导航", "點去", "点去", "怎麼去", "怎么去", "帶我去", "带我去", "路線", "路线", "幾遠", "几远", "navigate", "route"] },
   { intent: "weather", words: ["天气", "天氣", "落雨", "雨", "气温", "氣溫", "冻", "熱", "热", "天晴", "weather"] },
   { intent: "medication", words: ["吃药", "食药", "食藥", "药", "藥", "降压", "降壓", "血糖", "med"] },
   { intent: "camera", words: ["拍照", "影相", "相机", "相機", "照相", "camera", "photo"] },
