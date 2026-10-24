@@ -13,7 +13,10 @@ const config: CapacitorConfig = {
   server: {
     // WebView runs on an https origin so mic/camera/service-worker APIs behave
     // like the web build.
-    androidScheme: "https",
+    // 真机联调：CAP_ANDROID_SCHEME=http 时起源变为 http://localhost，配合
+    // `adb reverse tcp:8000 tcp:8000` 才能用 HttpOnly Cookie 直连本机后端；
+    // 默认仍为 https，避免发布包降级。
+    androidScheme: process.env.CAP_ANDROID_SCHEME === "http" ? "http" : "https",
   },
 };
 

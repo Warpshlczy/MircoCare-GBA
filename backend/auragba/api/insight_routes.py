@@ -17,6 +17,8 @@ from ..contract import BaselineReport, ChangePoint, Locale, MetricZScore, Screen
 from ..privacy import device_id
 from ..store import store
 from ..screening import run_screening
+from ..audio.io import load_audio
+from ..nlp.asr import transcribe as asr_transcribe
 from .. import baseline as baseline_mod
 
 router = APIRouter(tags=["insight"])
@@ -55,6 +57,43 @@ async def analyze_screening(
         store=store,
         audit=audit_log,
     )
+
+
+@router.post("/asr/transcribe")
+async def transcribe_utterance(
+    file: UploadFile = File(..., description="WAV/Opus speech sample"),
+    locale: Locale = Form("zh-CN"),
+    _dev: str = Depends(device_id),  # enforces the X-Device-Id contract; value unused
+) -> dict:
+    """Local-only speech-to-text for the digital human's push-to-talk button.
+
+    The Android WebView has no Web Speech recognizer and the handset's system
+    engine is cloud-backed, so the app records a clip and posts it here. Audio is
+    decoded in memory, transcribed on-box and never persisted (same
+    extract-and-burn rule as `/screening/analyze`). Returns `available=False`
+    instead of raising when no local Whisper engine is installed.
+    """
+    if file.size is not None and file.size > _MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="audio exceeds 25 MB")
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=422, detail="empty audio upload")
+    if len(data) > _MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="audio exceeds 25 MB")
+    try:
+        audio = load_audio(data, file.filename or "")
+    except Exception:
+        raise HTTPException(status_code=422, detail="unsupported audio format")
+    if audio.duration_s < 0.2:  # a tap, not an utterance
+        return {"text": "", "confidence": 0.0, "engine": "none", "available": True, "durationMs": 0}
+    result = asr_transcribe(audio, locale)
+    return {
+        "text": result.text,
+        "confidence": result.confidence,
+        "engine": result.engine,
+        "available": result.available,
+        "durationMs": round(audio.duration_ms),
+    }
 
 
 @router.get("/baseline/me", response_model=BaselineReport)

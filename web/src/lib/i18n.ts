@@ -36,6 +36,8 @@ export type MsgKey =
   | "wakeOn"
   | "wakeListening"
   | "weatherTitle"
+  | "weatherUnavailable"
+  | "sheetClose"
   | "tasksTitle"
   | "cameraTitle"
   | "cameraShutter"
@@ -49,6 +51,8 @@ export type MsgKey =
   | "voiceUnavailable"
   | "todoSaved"
   | "noSpeech"
+  | "noSpeechAlt"
+  | "intentUnknownAlt"
   | "toolsOpened"
   | "langOther"
   | "wakeGreeting"
@@ -150,6 +154,8 @@ const zhHK: Dict = {
   wakeOn: "開語音喚醒",
   wakeListening: "聽緊你叫我…",
   weatherTitle: "今日天氣",
+  weatherUnavailable: "暫時攞唔到實時天氣，請遲啲再問我。",
+  sheetClose: "關閉",
   tasksTitle: "今日要做嘅事",
   cameraTitle: "影相",
   cameraShutter: "影",
@@ -163,6 +169,8 @@ const zhHK: Dict = {
   voiceUnavailable: "呢度用唔到語音，可以用返下面啲掣。",
   todoSaved: "好，幫你記低咗。",
   noSpeech: "聽唔到你把聲，再講多次？",
+  noSpeechAlt: "冇聽到你講嘢，慢慢再講一次得唔得？",
+  intentUnknownAlt: "我唔係好明，你講慢少少，再講一次？",
   toolsOpened: "好，啲掣開咗，你想用邊個就撳。",
   langOther: "普通話",
   wakeGreeting: "阿婆／阿伯，我喺度。今日身體點呀？有冇邊度唔舒服？",
@@ -263,6 +271,8 @@ const zhCN: Dict = {
   wakeOn: "开启语音唤醒",
   wakeListening: "正在听您叫我…",
   weatherTitle: "今日天气",
+  weatherUnavailable: "暂时拿不到实时天气，请稍后再问我。",
+  sheetClose: "关闭",
   tasksTitle: "今天要做的事",
   cameraTitle: "拍照",
   cameraShutter: "拍照",
@@ -276,6 +286,8 @@ const zhCN: Dict = {
   voiceUnavailable: "这里用不了语音，可以用回下面的按钮。",
   todoSaved: "好，帮您记下了。",
   noSpeech: "听不到您的声音，再说一次？",
+  noSpeechAlt: "没有听到您说话，慢慢再说一遍好吗？",
+  intentUnknownAlt: "我不太明白，您慢慢再说一次？",
   toolsOpened: "好，按钮打开了，您想用哪个就点。",
   langOther: "粤语",
   wakeGreeting: "奶奶／爷爷，我在呢。今天身体怎么样？有没有哪里不舒服？",
@@ -350,6 +362,11 @@ const DICTS: Record<string, Dict> = {
 
 export function t(locale: string, key: MsgKey): string {
   return (DICTS[locale] ?? zhCN)[key];
+}
+/** Picks one of several wordings, so offline replies do not repeat verbatim. */
+export function pickT(locale: string, keys: MsgKey[]): string {
+  const dict = DICTS[locale] ?? zhCN;
+  return dict[keys[Math.floor(Math.random() * keys.length)]];
 }
 /** The ONLY wording for a risk band (issue #3): app, weekly report and slides agree. */
 export function riskBandLabel(locale: string, band: string | undefined, insufficient = false): string {

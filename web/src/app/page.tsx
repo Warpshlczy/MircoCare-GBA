@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { Avatar } from "@/components/Avatar";
 import { CardBoard } from "@/components/CardBoard";
+import { CardSheet } from "@/components/CardSheet";
 import { CameraOverlay } from "@/components/CameraOverlay";
 import { ReminderOverlay } from "@/components/ReminderOverlay";
 import { SosOverlay } from "@/components/SosOverlay";
@@ -20,9 +21,10 @@ import {
   listenOnce,
   createAmplitudeMeter,
   sttSupported,
+  usesBackendStt,
 } from "@/lib/audio";
 import { parseIntent, isQuestion } from "@/lib/intent";
-import { localCardsFor, followupCard, photoCard, todoCardFromUtterance } from "@/lib/cards";
+import { localCardsFor, followupCard, photoCard, todoCardFromUtterance, weatherSpoken } from "@/lib/cards";
 import { latestNote, noteCard, noteFromUtterance, recallCard } from "@/lib/notes";
 import { nextDueAt } from "@/lib/datetime";
 import { assistantChat, createPairingCode, ensureSeniorSession, getAgentCards, getHealthCard, getMedicationPlan, postConversationMemory, postReminderEscalation } from "@/lib/api";
@@ -54,7 +56,7 @@ import {
   type InterviewHistory,
   type InterviewState,
 } from "@/lib/interview";
-import { t, type MsgKey } from "@/lib/i18n";
+import { t, pickT, type MsgKey } from "@/lib/i18n";
 import type {
   AgentCard,
   AssistantState,
@@ -141,6 +143,10 @@ const emptyCareDay = (): CareDayCounts => ({
 
 const MAX_CARDS = 6;
 const MEMORY_TURNS = 20;
+/** "今日會唔會落雨?" → the spoken answer must lead with yes/no. */
+function isRainQuestion(text: string): boolean {
+  return /(落雨|下雨|雨|雪)/.test(text ?? "");
+}
 /** Speech must be at least this loud (0..1 meter) to count as a real utterance. */
 const VOICE_PEAK_MIN = 0.08;
 /** Two misses in a row (or no voice at all) → the buttons open by themselves. */
@@ -160,6 +166,8 @@ export default function Page() {
   const [sosReason, setSosReason] = useState<SosEvent["reason"]>("button");
   const [sosSource, setSosSource] = useState<SosEvent["source"]>("app");
   const [cardOpen, setCardOpen] = useState(false);
+  /** Query answers (weather / free chat) take the whole screen, not the card stream. */
+  const [sheetCard, setSheetCard] = useState<AgentCard | null>(null);
   const [cameraOpen, setCameraOpen] = useState(false);
   const [display, setDisplay] = useState<DisplayMode>("standard");
   const [healthCard, setHealthCard] = useState<HealthCard>(DEMO_CARD);
@@ -218,7 +226,7 @@ export default function Page() {
   const careRef = useRef<CareDayCounts>(emptyCareDay());
   // Any overlay owns the screen and the speaker; proactive talk must wait.
   const blockedRef = useRef(false);
-  blockedRef.current = sosOpen || cameraOpen || cardOpen || screeningOpen || followupOpen || !!reminder.due;
+  blockedRef.current = sosOpen || cameraOpen || cardOpen || screeningOpen || followupOpen || !!sheetCard || !!reminder.due;
 
   const clearMeter = useCallback(() => {
     if (levelTimer.current !== null) {
@@ -489,17 +497,52 @@ export default function Page() {
       return;
     }
 
-    // Free-form questions get a short spoken reply; failures fall through to
-    // the normal card/todo path so the senior is never blocked.
-    if ((intent === "unknown" || intent === "help") && isQuestion(utterance)) {
+    // Weather: real data from C (no LLM needed), a direct answer, then the card
+    // on its own screen. The senior asked a yes/no question — never answer with
+    // silence (issue #3 / #4).
+    if (intent === "weather") {
+      let weatherCard: AgentCard | null = null;
       try {
-        const { reply } = await assistantChat({ messages: [{ role: "user", content: utterance }], locale });
+        const planned = await getAgentCards({
+          intent,
+          utterance: utterance || t(locale, "weatherTitle"),
+          locale,
+          now,
+        });
+        weatherCard = planned[0] ?? null;
+      } catch {
+        /* offline: the honest local card below */
+      }
+      const mode: "agent" | "local" = weatherCard ? "agent" : "local";
+      if (!weatherCard) weatherCard = localCardsFor("weather", locale, { reminders: reminder.items, now })[0];
+      pushCards([weatherCard]);
+      track("card_shown", locale, { intent, mode });
+      setSheetCard(weatherCard);
+      await speakLine(weatherSpoken(weatherCard, locale, isRainQuestion(utterance)));
+      return;
+    }
+
+    // Free-form conversation gets a real, non-templated answer from the model
+    // (with the last few turns as context). Failures fall through to the normal
+    // card/todo path so the senior is never blocked by a slow backend.
+    if (intent === "unknown" || intent === "help") {
+      try {
+        const recent = historyRef.current.slice(-8).map((turn) => ({ role: turn.role, content: turn.text }));
+        const last = recent[recent.length - 1];
+        if (!last || last.content !== utterance) recent.push({ role: "user", content: utterance });
+        const { reply } = await assistantChat({ messages: recent, locale });
         const answer = reply.trim();
         if (answer) {
-          pushCards([
-            { id: `chat-${now}`, kind: "info", title: t(locale, "assistantTitle"), createdAt: now, data: { icon: "💬", headline: answer } },
-          ]);
+          const card: AgentCard = {
+            id: `chat-${now}`,
+            kind: "info",
+            title: t(locale, "assistantTitle"),
+            createdAt: now,
+            data: { icon: "💬", headline: answer },
+          };
+          pushCards([card]);
           track("assistant_chat", locale);
+          setSheetCard(card);
           await speakLine(answer);
           return;
         }
@@ -542,8 +585,11 @@ export default function Page() {
     }
     pushCards(next);
     track("card_shown", locale, { intent, mode });
-    if (next.length) settle();
-    else await speakLine(t(locale, "intentUnknown"));
+    // A card that carries an answer is also read out; otherwise the senior just
+    // sees something appear with no explanation.
+    const headline = next[0]?.data?.headline;
+    if (next.length) await speakLine(headline?.trim() ? headline.trim() : t(locale, "todoSaved"));
+    else await speakLine(pickT(locale, ["intentUnknown", "intentUnknownAlt"]));
   };
 
   /** Everything the senior says or types lands here. */
@@ -552,6 +598,12 @@ export default function Page() {
     countRepeat(said);
     go("thinking");
     const intent = parseIntent(said);
+    // Weather is a question with a fixed answer path (real data + card + sheet),
+    // so it must not be swallowed by the agent bridge's card-only shortcut.
+    if (intent === "weather") {
+      await runIntent(intent, said);
+      return;
+    }
     // Safety first: an emergency word skips every other branch.
     if (intent !== "sos") {
       switch (careCue(said)) {
@@ -591,20 +643,24 @@ export default function Page() {
     }
     const my = speechGen.current;
 
-    // amplitude meter doubles as the valid-voice gate (peak loudness)
+    // Amplitude meter doubles as the valid-voice gate (peak loudness). Skipped
+    // when Web Speech is missing: the backend-ASR path below opens its own
+    // recorder, and two live mic streams on Android fight over the input.
     let peak = 0;
     let metered = false;
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      meterRef.current = createAmplitudeMeter(stream);
-      metered = true;
-      levelTimer.current = window.setInterval(() => {
-        const l = meterRef.current?.getLevel() ?? 0;
-        if (l > peak) peak = l;
-        setLevel(l);
-      }, 100);
-    } catch {
-      /* no mic meter: listenOnce below reports whether voice works at all */
+    if (!usesBackendStt()) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        meterRef.current = createAmplitudeMeter(stream);
+        metered = true;
+        levelTimer.current = window.setInterval(() => {
+          const l = meterRef.current?.getLevel() ?? 0;
+          if (l > peak) peak = l;
+          setLevel(l);
+        }, 100);
+      } catch {
+        /* no mic meter: listenOnce below reports whether voice works at all */
+      }
     }
 
     const heard = await listenOnce(locale, ANSWER_TIMEOUT_MS);
@@ -621,7 +677,7 @@ export default function Page() {
       sttFails.current++;
       bumpCare("unheard");
       if (sttFails.current >= STT_FAILS_BEFORE_BUTTONS) failOpen();
-      else void speakLine(t(locale, "noSpeech"));
+      else void speakLine(pickT(locale, ["noSpeech", "noSpeechAlt"]));
       return;
     }
     sttFails.current = 0;
@@ -947,6 +1003,13 @@ export default function Page() {
     talkButtonRef.current?.focus();
   };
 
+  /** Closing an answer sheet stops the reading and gives the mic back. */
+  const closeSheet = () => {
+    cancelSpeech();
+    setSheetCard(null);
+    settle();
+  };
+
   const status =
     state === "listening"
       ? t(locale, "listening")
@@ -1187,7 +1250,17 @@ export default function Page() {
         />
       ) : null}
 
-      <SosOverlay open={sosOpen} locale={locale} reason={sosReason} source={sosSource} onClose={() => setSosOpen(false)} />
+      <SosOverlay
+        open={sosOpen}
+        locale={locale}
+        reason={sosReason}
+        source={sosSource}
+        onClose={() => {
+          setSosOpen(false);
+          settle(); // re-arm the wake listener and clear the "confirming" state
+        }}
+      />
+      <CardSheet card={sheetCard} locale={locale} onClose={closeSheet} />
       <CameraOverlay
         open={cameraOpen}
         locale={locale}

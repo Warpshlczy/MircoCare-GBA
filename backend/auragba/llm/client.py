@@ -53,11 +53,18 @@ class LLMClient:
         except httpx.HTTPError as exc:
             raise LLMUpstreamError(f"LLM request failed: {exc}") from exc
 
-    def _chat(self, messages: list[dict[str, str]], *, json_mode: bool, max_tokens: int | None = None) -> str:
+    def _chat(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        json_mode: bool,
+        max_tokens: int | None = None,
+        temperature: float = 0.2,
+    ) -> str:
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
-            "temperature": 0.2,
+            "temperature": temperature,
             "max_tokens": max_tokens or self.max_tokens,
         }
         if json_mode:
@@ -82,8 +89,14 @@ class LLMClient:
             raise LLMUpstreamError("empty LLM content")
         return content.strip()
 
-    def complete_text(self, messages: list[dict[str, str]], *, max_tokens: int | None = None) -> str:
-        return self._chat(messages, json_mode=False, max_tokens=max_tokens)
+    def complete_text(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_tokens: int | None = None,
+        temperature: float = 0.2,
+    ) -> str:
+        return self._chat(messages, json_mode=False, max_tokens=max_tokens, temperature=temperature)
 
     def complete_tools(
         self,

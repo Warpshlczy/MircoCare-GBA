@@ -244,6 +244,14 @@ export function useAgentBridge(deps: AgentBridgeDeps): AgentBridge {
       turnsRef.current = next;
 
       if (out.reply && d.onSpeak) d.onSpeak(out.reply);
+      // A card with no spoken line just pops up unexplained (issue #3/#5). The
+      // local task/med cards carry only a checklist, so read their title (or
+      // the "nothing today" headline) instead of leaving the senior silent.
+      else if (out.cards.length > 0 && d.onSpeak) {
+        const first = out.cards[0];
+        const line = first.data?.headline?.trim() || first.title;
+        if (line) d.onSpeak(line);
+      }
       if (out.cards.length > 0) d.onCards(out.cards);
 
       // A mutation happened: re-read so the next turn sends correct openTasks

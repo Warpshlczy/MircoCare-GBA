@@ -24,23 +24,15 @@ export function localCardsFor(intent: Intent, locale: Locale, ctx: CardCtx): Age
   const { now } = ctx;
   switch (intent) {
     case "weather":
-      // ponytail: no weather API wired — demo values. Upgrade: backend agent
-      // returns a real weather card (data or pre-rendered html).
+      // No live data (backend unreachable). Never invent a temperature — an
+      // honest "not right now" is better than a fake 27°C the senior will act on.
       return [
         {
           id: `weather-${now}`,
           kind: "weather",
           title: t(locale, "weatherTitle"),
           createdAt: now,
-          data: {
-            icon: "☀️",
-            headline: "27°C 天晴",
-            rows: [
-              { label: "湿度", value: "68%" },
-              { label: "风速", value: "和缓" },
-              { label: "提示", value: "出门带遮" },
-            ],
-          },
+          data: { icon: "🌤️", headline: t(locale, "weatherUnavailable") },
         },
       ];
     case "tasks":
@@ -60,6 +52,44 @@ export function localCardsFor(intent: Intent, locale: Locale, ctx: CardCtx): Age
     default:
       return [];
   }
+}
+
+/**
+ * Does the card say it will rain today? `undefined` when the card carries no
+ * rain row at all (older backend, or the "no live data" fallback).
+ */
+export function weatherWillRain(card: AgentCard): boolean | undefined {
+  const row = card.data?.rows?.find((r) => /雨|雪|雷/.test(r.label));
+  if (!row) return undefined;
+  return !/(冇|沒|没|唔會|不会|不會)/.test(row.value);
+}
+
+/**
+ * Spoken version of exactly what the weather card shows — same words, in the
+ * order the senior reads them. When the question was about rain, the direct
+ * yes/no leads the sentence (issue #4: no dodging the question).
+ */
+export function weatherSpoken(card: AgentCard, locale: Locale, askedRain: boolean): string {
+  const headline = (card.data?.headline ?? "").trim();
+  if (!headline || headline === t(locale, "weatherUnavailable")) {
+    return headline || t(locale, "weatherUnavailable");
+  }
+  const zhCN = locale === "zh-CN";
+  const rain = weatherWillRain(card);
+  const parts: string[] = [];
+  if (askedRain && rain !== undefined) {
+    parts.push(
+      rain
+        ? (zhCN ? "是的，今天会下雨。" : "係，今日會落雨。")
+        : (zhCN ? "不会，今天不下雨。" : "唔係，今日唔會落雨。")
+    );
+  }
+  parts.push(`${headline.replace(/\s+/g, " ")}。`);
+  // Read every row the card shows. The rain row is skipped only when the
+  // yes/no sentence above has already said the same thing.
+  const rows = (card.data?.rows ?? []).filter((r) => !(askedRain && /雨|雪|雷/.test(r.label)));
+  if (rows.length) parts.push(rows.map((r) => `${r.label}${r.value}。`).join(""));
+  return parts.join("");
 }
 
 /** A card for a just-captured photo (frontend-rendered). */

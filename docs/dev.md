@@ -211,7 +211,7 @@ grep -rl "auragba" backend --include=*.py --include=*.txt --include=*.md | \
 | 情绪/社交 | 被骗后自责、怕被骂 | 不评判、不复述损失金额 | 不采集金额与账号 | A | 任何对话中不出现"你怎么这么傻"类措辞（词表断言） |
 | 社交 | 想找人说话（又怕打扰） | 「帮我打畀阿明」→ 二次确认后拨号；未接则提示「留句话」模板 | 通话发起次数（仅计数不录音） | B | 拨号前必须复述姓名确认；拒绝即取消；未接不自动重拨 |
 | 社交 | 家属想知道近况 | 每周一条家属周报（非诊断） | 汇总特征与交互统计 | C | 周报含「本周交互 X 天 / 样本 Y 条 / 分层 Z」+ 免责声明 |
-| **生活** | 忘了带伞 / 出门 | 天气卡 + 出行提醒 | 位置 + 天气 API | B | 说「听日天气」→ 卡片含温度/降雨；断网回退本地文案 |
+| **生活** | 忘了带伞 / 出门 | 天气卡 + 出行提醒 | 位置 + 天气 API | A + C | 说「听日天气」→ 先朗读温度/降雨、整屏弹窗、单个大号关闭键；问「會唔會落雨」先答是/否；断网只回「暂时拿不到实时天气」，不编造数值（§2.4 A6） |
 | 生活 | 要覆诊但不会挂号 | 提醒 + 路线卡（**不代付、不代挂号**） | 任务 + 位置 | B | 涉及支付/预约 → 明确拒绝并播报替代建议 |
 | 生活 | 不会操作手机 | 无障碍 Agent 白名单代操作 | 节点点击审计 | B | 仅 3 类白名单场景；失败 3 次即停 |
 | **数字能力** | 越用越不会用（认知下降早期信号） | 不额外打扰，静默记录 | App 切换频次、操作失败率、首触延迟 | B【缺】 | 每日 1 条 `DigitalSkillDaily`，字段含 `appSwitchCount` / `opFailRate`；权限关闭时为 `null` |
@@ -371,6 +371,12 @@ mv public/live2d/model.manifest.json /tmp/ && npm run build; mv /tmp/model.manif
 ! grep -rnE "from ['\"](pixi|pixi-live2d-display)" src && echo "PASS: 无静态依赖"
 ```
 
+**⑦ 单实例与销毁（2026-10-25 真机回归）**
+
+- `mountLive2D` 全局只允许 **1 个实例**：SOS 覆盖层里的装饰头像保持 L2 Canvas-2D，不再挂第二个 PIXI 应用。
+- 根因：PIXI 6 的 `app.destroy(true)` 默认同时销毁 stage 的 `texture` / `baseTexture`，而 `pixi-live2d-display` 通过**全局 TextureCache** 加载贴图——SOS 遮罩卸载时把主页模型的贴图一并销毁，于是「关掉 SOS 回主页模型空白」。现在改为 `app.destroy(true, { children: true, texture: false, baseTexture: false })`，只释放自己的 DOM 节点。
+- 验收：打开 SOS → 关闭 → 主页模型仍在；连续进出两次仍正常。
+
 ### 2.4 任务分解（可直接认领的步骤）
 
 #### A0 · 基线确认与改名落地（0.5 天，M0）
@@ -482,6 +488,26 @@ mv public/live2d/model.manifest.json /tmp/ && npm run build; mv /tmp/model.manif
 - TalkBack 冷启动到「说一句话」≤ 4 次滑动（数字人 → 主按钮即可）；朗读内容含状态与用途。
 - widget SOS 热区 → SOS 覆盖层直接打开。
 - `grep -rn "div onClick\|span onClick" web/src` 为空。
+
+#### A6 · 语音优先的问答弹窗与自由对话（0.5 天，M3 · 2026-10-25 真机回归）
+
+真机暴露：天气卡只在卡片流里静默出现（不弹窗、不朗读、问「會唔會落雨」也不正面回答）；自由对话回复趋同；任何卡片出现都没有朗读。
+
+1. **天气不进接桥**：`handleSaid` 在 `agent.handleUtterance()` **之前**短路 `weather`。B 的 `runTurn` 对 `LOCAL_CARD_INTENTS` 只推卡不发声，会把天气吞掉；`weather` 已从 `LOCAL_CARD_INTENTS` 移除（现为 `{tasks, medication}`）。
+2. **真实数据**：weather 分支先 `POST /agent/cards`（C 的 weather 分支短路不经 LLM，直接读 Open-Meteo）；失败才用本地卡。本地卡**不再编造 27°C**，只诚实说「暂时拿不到实时天气」。
+3. **整屏答案层**：新增 `components/CardSheet.tsx`（`role="dialog"` + `aria-modal`），只有一个 ≥96px 高的关闭键（文字 5xl），打开即聚焦关闭键；支持 `html` / `image` / `headline` / `rows` / `checklist`。它同时占用 `blockedRef`，弹窗期间不发起主动唠嗑。
+4. **读的就是卡上的字**：`weatherSpoken(card, locale, askedRain)` 按阅读顺序把 `headline` 与各行拼成一句话；问句含「雨/落雨/雪」时**先给是/否**（「係，今日會落雨」/「唔係，今日唔會落雨」），再读温度与其余行。
+5. **自由对话不再以 `isQuestion` 为门槛**（老人说「我好悶」「今日有咩做」也算），请求带最近 8 轮 `user`/`assistant` 历史；答案进 `CardSheet` 并朗读；后端失败才落到本地兜底。
+6. **兜底不重复**：`agent.ts` 的 `COPY` 每槽改为 3 句随机池，`i18n.ts` 新增 `pickT()`，`noSpeech` / `intentUnknown` 同样随机取句。
+7. 其他卡片带 `headline` 时也朗读该行；不再出现「屏幕上多了一张卡但没人解释」。
+
+**验收**
+
+- 说「今日天氣」→ 先听到温度/降雨，整屏弹窗出现，只有一个大号「關閉」；关闭后回到主页且唤醒词重新武装。
+- 说「今日會唔會落雨？」→ 第一句就是「係/唔係」，卡片首行有「今日落雨」。
+- 连续问 3 个不同问题 → 3 条回复措辞明显不同（C 侧 temperature 0.85 + 保留 assistant 轮次，见 C3）。
+- 断网说天气 → 「暂时拿不到实时天气」，不出现任何编造数值。
+- 构建门禁：`npm run build`、`node src/selfcheck.ts` 全绿。
 
 ### 2.5 第一部分接口契约（对其他两人的接缝）
 
@@ -662,7 +688,7 @@ done; echo "PASS: 运行时与模型齐备"
 |---|---|---|
 | `web/src/lib/tools.ts` | 新增 | 工具声明：`name / description / schema / risk / permissions / run()` |
 | `web/src/lib/toolrun.ts` | 新增 | 执行器：参数校验 → 风险确认 → 执行 → 结果 → 审计写库 |
-| `web/src/lib/agent.ts` | 新增 | `runTurn(utterance, ctx)`：本地意图 → 后端 `/agent/turn` → 工具调用计划 → 执行 |
+| `web/src/lib/agent.ts` | 新增 | `runTurn(utterance, ctx)`：本地意图 → 后端 `/agent/turn` → 工具调用计划 → 执行。`LOCAL_CARD_INTENTS` 只含 `{tasks, medication}`——**天气不在其中**（本地卡无实时数据，A 走自己的弹窗/朗读路径，见 §2.4 A6）。离线兜底文案每槽 3 句随机池 |
 | `web/src/lib/geofence.ts` | 新增 | 纯函数：`inCircle`、`shouldAlert(prev, cur, fence)`（去抖 + 最小停留 60s） |
 | `web/src/lib/outbox.ts` | 新增 | 指数退避重放：`enqueue` / `drain`（上限 500 条、7 天过期） |
 | [intent.ts](https://github.com/Warpshlczy/MircoCare-GBA/blob/main/web/src/lib/intent.ts) | 扩充 | 保留关键词兜底；新增 `navigate / call / alarm / message / repeat / cancel` |
@@ -981,8 +1007,12 @@ cd android && ./gradlew assembleDebug
    - 出现「胸痛/呼吸困难/跌倒不起/流血」→ `calls: [{name:"sos"}]` 且 `reply` 只说「我而家帮你叫人」；
    - `calls` 里出现未注册工具 → 全部丢弃并返回 `reply` 要求重说。
 3. `POST /assistant/chat`：无工具的纯对话（闲聊 + 安慰 + 引导做访谈）。
+   - **保留 assistant 轮次**：`chat_messages` 按 `user`/`assistant` 原序回放（末 10 条，每条 scrub 后截 300 字）；只发 user 会让模型把每句都当新问题，回复收敛成同一句。
+   - `temperature 0.85`（`complete_text` 可传参，默认仍 0.2）：同一问题连问三次必须给出不同措辞。
+   - system prompt 明确「每次换说法、不复述、可先回应情绪」；**不编造实时天气**，问天气就说「我帮你看天气卡」。
 4. `POST /medication/plan`：从 `history` + `utterance` 抽 `{name, dosage, schedule}`；**只抄不推断**，抽不到就返回空并让前端回退。
 5. 超时 6s → 返回 503，前端走本地兜底（不阻塞长者）。
+6. **weather 卡首行就是答案**（2026-10-25）：`weather.py` 用 Open-Meteo `daily.weather_code` + `precipitation_probability_max` 算出 `rain_today` / `rain_chance`，`service._weather_card` 把它写成第一行「今日落雨」/「唔會落雨（機會 N%）」（zh-CN 简体同义）。前端 `weatherWillRain` 只认这一行的「冇/沒/唔會/不会」否定词，因此首行措辞改动会直接改变语音的是/否回答。
 
 **验收**
 

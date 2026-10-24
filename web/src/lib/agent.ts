@@ -27,7 +27,9 @@ import type {
 } from "./types";
 
 /** Intents the local card factory can satisfy without any backend. */
-export const LOCAL_CARD_INTENTS = new Set(["weather", "tasks", "medication"]);
+// `weather` is deliberately NOT here: the local weather card has no live data,
+// so it must go through A's own path (real card, spoken answer, answer sheet).
+export const LOCAL_CARD_INTENTS = new Set(["tasks", "medication"]);
 
 /** How many turns of history travel with a request (contract: ≤10, oldest first). */
 export const MAX_RECENT_TURNS = 10;
@@ -122,26 +124,81 @@ export interface TurnOutcome {
   skipped: SkippedCall[];
 }
 
-const COPY: Record<Locale, { refusedFallback: string; notWired: string; failed: string; nothing: string }> = {
+/**
+ * Offline spoken fallbacks. Each slot is a POOL, not a sentence: the senior
+ * should never hear the same line twice in a row (issue #2). These are only
+ * used when the model cannot answer at all.
+ */
+const COPY: Record<Locale, { refusedFallback: string[]; notWired: string[]; failed: string[]; nothing: string[] }> = {
   "zh-HK": {
-    refusedFallback: "呢個我做唔到，要你自己或者屋企人做。",
-    notWired: "呢個功能仲未接好，我記低咗，轉頭再試。",
-    failed: "有啲做唔到，你試多次或者叫屋企人幫手。",
-    nothing: "我唔係好肯定，你再講一次？",
+    refusedFallback: [
+      "呢個我做唔到，要你自己或者屋企人做。",
+      "呢件事我幫唔到手，你同屋企人講聲好嗎？",
+      "我唔可以幫你做呢樣，要你本人或者屋企人處理。",
+    ],
+    notWired: [
+      "呢個功能仲未接好，我記低咗，轉頭再試。",
+      "呢樣嘢我暫時做唔到，已經記低咗。",
+      "呢個掣仲未駁通，你遲啲再叫我試。",
+    ],
+    failed: [
+      "有啲做唔到，你試多次或者叫屋企人幫手。",
+      "今次差少少，再講一次好嗎？",
+      "做唔成，你慢慢再試，或者叫屋企人幫你。",
+    ],
+    nothing: [
+      "我唔係好肯定，你再講一次？",
+      "我未聽得明，你慢慢講多一次？",
+      "你再講清楚少少，我驚聽錯。",
+    ],
   },
   "zh-MO": {
-    refusedFallback: "呢個我做唔到，要你自己或者屋企人做。",
-    notWired: "呢個功能仲未接好，我記低咗，轉頭再試。",
-    failed: "有啲做唔到，你試多次或者叫屋企人幫手。",
-    nothing: "我唔係好肯定，你再講一次？",
+    refusedFallback: [
+      "呢個我做唔到，要你自己或者屋企人做。",
+      "呢件事我幫唔到手，你同屋企人講聲好嗎？",
+      "我唔可以幫你做呢樣，要你本人或者屋企人處理。",
+    ],
+    notWired: [
+      "呢個功能仲未接好，我記低咗，轉頭再試。",
+      "呢樣嘢我暫時做唔到，已經記低咗。",
+      "呢個掣仲未駁通，你遲啲再叫我試。",
+    ],
+    failed: [
+      "有啲做唔到，你試多次或者叫屋企人幫手。",
+      "今次差少少，再講一次好嗎？",
+      "做唔成，你慢慢再試，或者叫屋企人幫你。",
+    ],
+    nothing: [
+      "我唔係好肯定，你再講一次？",
+      "我未聽得明，你慢慢講多一次？",
+      "你再講清楚少少，我驚聽錯。",
+    ],
   },
   "zh-CN": {
-    refusedFallback: "这个我做不了，得你自己或者家里人来做。",
-    notWired: "这个功能还没接好，我记下来了，回头再试。",
-    failed: "有些没做成，你再试一次或者让家里人帮忙。",
-    nothing: "我不太确定，你再说一次？",
+    refusedFallback: [
+      "这个我做不了，得你自己或者家里人来做。",
+      "这件事我帮不上，您跟家里人说一声好吗？",
+      "这个我不能替您做，要您本人或者家里人来处理。",
+    ],
+    notWired: [
+      "这个功能还没接好，我记下来了，回头再试。",
+      "这个我暂时做不到，已经记下来了。",
+      "这个按钮还没接好，您晚点再叫我试。",
+    ],
+    failed: [
+      "有些没做成，你再试一次或者让家里人帮忙。",
+      "这次差一点，再说一次好吗？",
+      "没做成，您慢慢再试，或者叫家里人帮您。",
+    ],
+    nothing: [
+      "我不太确定，你再说一次？",
+      "我没听明白，您慢慢再说一遍？",
+      "您再说清楚一点，我怕听错。",
+    ],
   },
 };
+
+const pick = (pool: string[]): string => pool[Math.floor(Math.random() * pool.length)];
 
 function emptyOutcome(): TurnOutcome {
   return { handled: false, refused: false, reply: "", cards: [], steps: [], executed: [], skipped: [] };
@@ -252,10 +309,10 @@ export async function runTurn(utterance: string, deps: AgentDeps): Promise<TurnO
 
   if (executed.length === 0 && res.reply) parts.push(res.reply);
   if (doneLines.length > 0) parts.push(...doneLines);
-  if (skipped.some((s) => s.reason === "no_executor")) parts.push(copy.notWired);
+  if (skipped.some((s) => s.reason === "no_executor")) parts.push(pick(copy.notWired));
   if (failLines.length > 0) parts.push(failLines[0]);
-  else if (executed.some((e) => !e.ok)) parts.push(copy.failed);
-  const reply = parts.join(" ").trim() || (plan.steps.length > 0 ? "" : copy.nothing);
+  else if (executed.some((e) => !e.ok)) parts.push(pick(copy.failed));
+  const reply = parts.join(" ").trim() || (plan.steps.length > 0 ? "" : pick(copy.nothing));
 
   return {
     handled: true,

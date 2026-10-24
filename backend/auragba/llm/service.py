@@ -82,19 +82,27 @@ def plan_medication(req: MedicationPlanRequest, device_id: str) -> MedicationPla
 
 
 def assistant_reply(req: AssistantChatRequest, device_id: str) -> str:
-    lines = [
-        scrub_text(message.content, keep=False)[:500]
+    # Keep the assistant side of the conversation: without it the model answers
+    # every turn as a brand-new question and converges on one memorised line
+    # (issue #2: "the replies are always the same few sentences").
+    turns = [
+        (message.role, scrub_text(message.content, keep=False)[:300])
         for message in req.messages
-        if message.role == "user" and message.content.strip()
-    ][-8:]
-    if not lines:
+        if message.role in ("user", "assistant") and message.content.strip()
+    ][-10:]
+    user_lines = [text for role, text in turns if role == "user"]
+    if not user_lines:
         raise LLMInvalidInput("at least one user message is required")
-    if any(safety.is_emergency(line) for line in lines):
+    if any(safety.is_emergency(line) for line in user_lines):
         return safety.emergency_reply(req.locale)
 
     _require_llm()
     usage.reserve(device_id)
-    text = LLMClient().complete_text(prompts.chat_messages(req.locale, lines), max_tokens=220)
+    # 0.85 (vs 0.2 for structured planners) is what makes the wording actually
+    # vary between turns while the rules still keep it short and safe.
+    text = LLMClient().complete_text(
+        prompts.chat_messages(req.locale, turns), max_tokens=220, temperature=0.85
+    )
     return safety.filter_chat_reply(text, req.locale)
 
 
@@ -103,12 +111,15 @@ def assistant_reply(req: AssistantChatRequest, device_id: str) -> str:
 # --------------------------------------------------------------------------- #
 def _weather_card(locale: str, now: int) -> AgentCard:
     snapshot = weather.weather_for_locale(locale)
-    if locale == "zh-CN":
+    zh_cn = locale == "zh-CN"
+    if zh_cn:
         title, unavailable = "今日天气", "暂时拿不到实时天气，请稍后再试。"
         labels = ("湿度", "风速", "地点")
+        rain_label = "今天下雨"
     else:
         title, unavailable = "今日天氣", "暫時攞唔到實時天氣，請遲啲再試。"
         labels = ("濕度", "風速", "地點")
+        rain_label = "今日落雨"
 
     if not snapshot:
         return AgentCard(
@@ -117,6 +128,20 @@ def _weather_card(locale: str, now: int) -> AgentCard:
             title=title,
             createdAt=now,
             data=CardData(icon="🌤️", headline=unavailable),
+        )
+
+    chance = snapshot.get("rain_chance")
+    if snapshot.get("rain_today"):
+        rain_value = (
+            f"会下雨（机会 {chance}%）" if chance is not None else "会下雨"
+        ) if zh_cn else (
+            f"會落雨（機會 {chance}%）" if chance is not None else "會落雨"
+        )
+    else:
+        rain_value = (
+            f"不会下雨（机会 {chance}%）" if chance is not None else "不会下雨"
+        ) if zh_cn else (
+            f"唔會落雨（機會 {chance}%）" if chance is not None else "唔會落雨"
         )
 
     return AgentCard(
@@ -128,6 +153,8 @@ def _weather_card(locale: str, now: int) -> AgentCard:
             icon=str(snapshot["icon"]),
             headline=f"{snapshot['temperature_c']:.0f}°C {snapshot['condition']}",
             rows=[
+                # First row is the direct answer to "今天会下雨吗?".
+                CardRow(label=rain_label, value=rain_value),
                 CardRow(label=labels[0], value=f"{snapshot['humidity']}%"),
                 CardRow(label=labels[1], value=f"{snapshot['wind_kmh']:.0f} km/h"),
                 CardRow(label=labels[2], value=str(snapshot["location"])),

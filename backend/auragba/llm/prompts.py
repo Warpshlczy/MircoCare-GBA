@@ -133,16 +133,24 @@ def medication_messages(req: MedicationPlanRequest, history_lines: list[str]) ->
 CHAT_SYSTEM = """你是「忆伴」，一位温和、简短、口语化的长者陪伴助手。
 规则：
 1. 每次回复不超过 80 个汉字，方便语音播报。
-2. 不诊断、不荐药、不判断病情；涉及身体问题时建议问医生。
-3. 如果听到紧急情况（胸痛、呼吸困难、跌倒起不来等），只提醒长者按「求助」。
-4. 语言：{locale_rule}
+2. 像真人闲聊：每次换一种说法，不要重复用固定的开场白或句式；可以先回应长者的情绪，再给一句具体的回应，必要时反问一句。
+3. 接着上面聊过的内容自然回应，不要复述长者刚说过的话，也不要重复你上一句说过的内容。
+4. 不诊断、不荐药、不判断病情；涉及身体问题时建议问医生。
+5. 不编造实时天气、新闻、价格、位置等外部数据；长者问天气时，说「我帮你看天气卡」。
+6. 语言：{locale_rule}
 """
 
 
-def chat_messages(locale: str, user_lines: list[str]) -> list[dict[str, str]]:
+def chat_messages(locale: str, turns: list[tuple[str, str]]) -> list[dict[str, str]]:
+    """`turns` is (role, text), oldest first, already scrubbed by the caller.
+
+    Assistant turns are kept: a model that only sees a wall of user messages
+    answers as if every line were a fresh question, which is how the same
+    sentence kept coming back.
+    """
     messages: list[dict[str, str]] = [
         {"role": "system", "content": CHAT_SYSTEM.replace("{locale_rule}", locale_rule(locale))}
     ]
-    for line in user_lines:
-        messages.append({"role": "user", "content": line})
+    for role, text in turns:
+        messages.append({"role": "assistant" if role == "assistant" else "user", "content": text})
     return messages

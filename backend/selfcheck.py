@@ -267,8 +267,21 @@ _clean_reply = filter_chat_reply("今日天氣幾好，記得飲多啲水。", "
 assert "飲多啲水" in _clean_reply, "benign replies must pass through unchanged"
 
 class _ChatLLM:
-    def complete_text(self, messages, max_tokens=None):
+    def complete_text(self, messages, max_tokens=None, temperature=0.2):
         return "你患有痴呆，建议服用多奈哌齐。"
+
+
+class _VariedChatLLM:
+    """Same prompt twice must not be forced to the same output by the client."""
+
+    def __init__(self) -> None:
+        self.seen: list[list[dict[str, str]]] = []
+        self.temperatures: list[float] = []
+
+    def complete_text(self, messages, max_tokens=None, temperature=0.2):
+        self.seen.append(messages)
+        self.temperatures.append(temperature)
+        return "今日天氣唔錯，不如出去行下？"
 
 
 import auragba.llm.service as service_mod  # noqa: E402
@@ -291,6 +304,32 @@ finally:
 assert _chat_reply == safe_chat_reply("zh-CN")
 for _word in DIAGNOSTIC_WORDS:
     assert _word not in _chat_reply, f"/assistant/chat leaked {_word}"
+
+# Issue #2: the chat turn must carry the assistant side of the conversation and
+# run at a temperature that actually varies the wording.
+_varied = _VariedChatLLM()
+service_mod.settings = replace(settings, llm_enabled=True)
+service_mod.LLMClient = lambda: _varied
+service_mod.usage.reserve = lambda device_id: 0
+try:
+    service_mod.assistant_reply(
+        AssistantChatRequest(
+            messages=[
+                {"role": "user", "content": "今日天氣點呀？"},
+                {"role": "assistant", "content": "幾好呀，有陽光。"},
+                {"role": "user", "content": "咁我出街好唔好？"},
+            ],
+            locale="zh-HK",
+        ),
+        "",
+    )
+finally:
+    service_mod.settings = _real_service_settings
+    service_mod.LLMClient = _real_service_client
+    service_mod.usage.reserve = _real_reserve
+_roles = [m["role"] for m in _varied.seen[0]]
+assert _roles.count("assistant") == 1, "chat must keep the assistant turn for context"
+assert _varied.temperatures[0] > 0.5, "chat temperature must allow varied wording"
 
 import auragba.llm.turn as turn_mod  # noqa: E402
 

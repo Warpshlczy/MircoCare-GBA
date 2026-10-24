@@ -45,6 +45,10 @@ _CONDITIONS: dict[int, tuple[str, str]] = {
 
 _CACHE: dict[str, tuple[float, dict[str, Any] | None]] = {}
 
+# WMO codes that put water on the ground today (drizzle / rain / showers /
+# thunderstorm). Snow is deliberately excluded: "落雨?" is answered "no" then.
+_RAIN_CODES = {51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82, 95, 96, 99}
+
 
 def _condition(code: int, locale: str) -> tuple[str, str]:
     if locale == "zh-CN":
@@ -85,14 +89,26 @@ def weather_for_locale(locale: str) -> dict[str, Any] | None:
                     "latitude": lat,
                     "longitude": lon,
                     "current": "temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m",
+                    # Today's own code + probability, so "今天会下雨吗?" can be
+                    # answered from data instead of guessed from the current sky.
+                    "daily": "weather_code,precipitation_probability_max",
+                    "forecast_days": 1,
                     "timezone": "Asia/Hong_Kong",
                     "wind_speed_unit": "kmh",
                 },
             )
         response.raise_for_status()
-        current = response.json()["current"]
+        body = response.json()
+        current = body["current"]
         code = int(current["weather_code"])
         condition, icon = _condition(code, locale)
+
+        daily = body.get("daily") or {}
+        day_codes = daily.get("weather_code") or []
+        chances = daily.get("precipitation_probability_max") or []
+        today_code = int(day_codes[0]) if day_codes and day_codes[0] is not None else code
+        chance = int(chances[0]) if chances and chances[0] is not None else None
+        rain_condition, _ = _condition(today_code, locale)
         snapshot = {
             "location": location,
             "temperature_c": float(current["temperature_2m"]),
@@ -100,6 +116,11 @@ def weather_for_locale(locale: str) -> dict[str, Any] | None:
             "wind_kmh": float(current["wind_speed_10m"]),
             "condition": condition,
             "icon": icon,
+            # `rain_chance` is a probability; `rain_today` is the verdict the
+            # senior hears ("係，今日會落雨" / "唔係").
+            "rain_today": bool(today_code in _RAIN_CODES or (chance is not None and chance >= 50)),
+            "rain_chance": chance,
+            "rain_condition": rain_condition,
         }
         _CACHE[locale] = (now, snapshot)
         return snapshot

@@ -68,7 +68,8 @@ interface L2DModel {
 interface PixiApp {
   view: HTMLCanvasElement;
   stage: { addChild(m: L2DModel): void };
-  destroy(removeView: boolean): void;
+  /** PIXI 6: second arg is the stage-destroy options bag. */
+  destroy(removeView: boolean, stageOptions?: Record<string, boolean>): void;
 }
 interface PixiGlobal {
   Application: new (o: Record<string, unknown>) => PixiApp;
@@ -126,7 +127,12 @@ async function mount(host: HTMLElement, size: number, signal: AbortSignal): Prom
         if (on) model.focus(size / 2, size * 0.45);
       },
       tap: () => void model.motion(manifest.motionGroups.tap).catch(() => false),
-      destroy: () => app.destroy(true),
+      // PIXI 6 defaults the stage options to `{children, texture, baseTexture}`,
+      // and pixi-live2d-display loads textures through the GLOBAL TextureCache.
+      // Destroying them here would blank any other mounted model that shares the
+      // same base texture, so only our DOM node is released.
+      destroy: () =>
+        app.destroy(true, { children: true, texture: false, baseTexture: false }),
     };
   } catch (e) {
     app.destroy(true);
@@ -134,8 +140,27 @@ async function mount(host: HTMLElement, size: number, signal: AbortSignal): Prom
   }
 }
 
+/**
+ * One canvas only. Two live instances means two WebGL contexts over the same
+ * PIXI globals; the overlay avatar (SOS) used to mount a second model, and
+ * tearing that one down took the shared textures with it — which is why the
+ * model vanished after returning from the SOS screen. A secondary avatar
+ * simply stays on the Canvas-2D face.
+ */
+const MAX_INSTANCES = 1;
+let instances = 0;
+
 /** L1 of the three-level fallback. Resolves null on ANY failure or after 3s. */
 export function mountLive2D(host: HTMLElement, size: number): Promise<Live2DHandle | null> {
+  if (instances >= MAX_INSTANCES) return Promise.resolve(null);
+  instances++;
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    instances = Math.max(0, instances - 1);
+  };
+
   const ctrl = new AbortController();
   const timeout = new Promise<null>((resolve) =>
     setTimeout(() => {
@@ -143,7 +168,18 @@ export function mountLive2D(host: HTMLElement, size: number): Promise<Live2DHand
       resolve(null);
     }, MOUNT_TIMEOUT_MS)
   );
-  const loaded = mount(host, size, ctrl.signal).catch(() => null);
+  const loaded = mount(host, size, ctrl.signal)
+    .then((h) => {
+      if (!h) {
+        release();
+        return null;
+      }
+      return { ...h, destroy: () => { h.destroy(); release(); } };
+    })
+    .catch(() => {
+      release();
+      return null;
+    });
   // A model that finishes after the timeout must not stay mounted behind L2.
   void loaded.then((h) => {
     if (h && ctrl.signal.aborted) h.destroy();

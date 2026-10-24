@@ -97,6 +97,37 @@ export function ensureSeniorSession(): Promise<void> {
   return seniorSession;
 }
 
+/** Backend-local Whisper transcription (the Android WebView has no Web Speech). */
+export interface TranscribedUtterance {
+  text: string;
+  confidence: number;
+  engine: string;
+  available: boolean;
+  durationMs: number;
+}
+
+/** WAV clip -> text. Audio is decoded in memory server-side and never stored. */
+export async function transcribeAudio(blob: Blob, locale: Locale, timeoutMs = 30_000): Promise<TranscribedUtterance> {
+  const form = new FormData();
+  form.append("file", blob, "utterance.wav");
+  form.append("locale", locale);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(`${API_BASE}/asr/transcribe`, {
+      method: "POST",
+      headers: { "X-Device-Id": deviceId() }, // no Content-Type: the browser sets the multipart boundary
+      body: form,
+      credentials: "include",
+      signal: controller.signal,
+    });
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText} @ /asr/transcribe`);
+    return (await res.json()) as TranscribedUtterance;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function request<T>(path: string, init: RequestInit = {}, timeoutMs = TIMEOUT_MS): Promise<T> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);

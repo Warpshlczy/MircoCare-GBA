@@ -4,6 +4,8 @@
 import { FRAMES_PER_CHAR, VISEME_FRAME_MS, visemeFromText } from "./viseme";
 import { bridge, nativeAvailable } from "./native";
 import type { VoiceProfile } from "./native";
+import { transcribeAudio } from "./api";
+import type { Locale } from "./types";
 
 // --- minimal SpeechRecognition typings (not in TS DOM lib yet) ---
 interface SpeechRecognitionAlternative {
@@ -45,6 +47,16 @@ function srCtor(): SpeechRecognitionCtor | null {
 
 export function sttSupported(): boolean {
   return srCtor() !== null;
+}
+
+/**
+ * Which recognizer to use. The Android shell also exposes Web Speech, but the
+ * handset forwards it to the system ASR engine (cloud-backed on this ROM), so
+ * inside the app we always take the on-box Whisper route instead. Plain
+ * browsers keep Web Speech.
+ */
+export function usesBackendStt(): boolean {
+  return nativeAvailable() || !sttSupported();
 }
 
 /** Voices that read younger/higher; used only to break ties within a locale. */
@@ -201,11 +213,188 @@ export interface Heard {
   confidence: number;
   /** From "start listening" to the final result — the response time. */
   durationMs: number;
+  /** Loudness 0..1 of the clip; only the backend-ASR path reports it. */
+  peak?: number;
 }
 
 /** Errors that mean "voice cannot work here", as opposed to "nobody spoke". */
 const VOICE_UNAVAILABLE = new Set(["not-allowed", "service-not-allowed", "audio-capture"]);
 const MAX_ANSWER_MS = 30_000;
+/** RMS above this counts as speech (mic float samples, 0..1). */
+const SPEECH_RMS = 0.02;
+
+function audioCtor(): typeof AudioContext | null {
+  if (typeof window === "undefined") return null;
+  const w = window as unknown as { AudioContext?: typeof AudioContext; webkitAudioContext?: typeof AudioContext };
+  return w.AudioContext ?? w.webkitAudioContext ?? null;
+}
+
+/** Raw mono 16-bit WAV — the backend decodes this with the stdlib `wave` module. */
+function encodeWav16k(samples: Float32Array, sampleRate: number): Blob {
+  const buffer = new ArrayBuffer(44 + samples.length * 2);
+  const view = new DataView(buffer);
+  const ascii = (offset: number, text: string) => {
+    for (let i = 0; i < text.length; i++) view.setUint8(offset + i, text.charCodeAt(i));
+  };
+  ascii(0, "RIFF");
+  view.setUint32(4, 36 + samples.length * 2, true);
+  ascii(8, "WAVE");
+  ascii(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true); // PCM
+  view.setUint16(22, 1, true); // mono
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  ascii(36, "data");
+  view.setUint32(40, samples.length * 2, true);
+  for (let i = 0; i < samples.length; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    view.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+  }
+  return new Blob([buffer], { type: "audio/wav" });
+}
+
+/** MediaRecorder container (webm/opus on Android) -> mono 16 kHz WAV. */
+async function toWav16k(blob: Blob): Promise<Blob | null> {
+  const Ctx = audioCtor();
+  if (!Ctx) return null;
+  const ctx = new Ctx();
+  try {
+    const decoded = await ctx.decodeAudioData(await blob.arrayBuffer());
+    const mono = new Float32Array(decoded.length);
+    for (let c = 0; c < decoded.numberOfChannels; c++) {
+      const ch = decoded.getChannelData(c);
+      for (let i = 0; i < mono.length; i++) mono[i] += ch[i] / decoded.numberOfChannels;
+    }
+    const target = 16_000;
+    if (decoded.sampleRate === target) return encodeWav16k(mono, target);
+    const ratio = decoded.sampleRate / target;
+    const n = Math.floor(mono.length / ratio);
+    const out = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      const pos = i * ratio;
+      const i0 = Math.floor(pos);
+      const frac = pos - i0;
+      const a = mono[i0] ?? 0;
+      const b = mono[i0 + 1] ?? a;
+      out[i] = a + (b - a) * frac;
+    }
+    return encodeWav16k(out, target);
+  } catch {
+    return null;
+  } finally {
+    void ctx.close();
+  }
+}
+
+/**
+ * Records one utterance and stops on end-of-speech (or the cap). Returns null
+ * when the mic is refused or nothing was said, so the caller can fail open.
+ */
+export async function recordUtterance(silenceMs: number, maxMs: number): Promise<{ blob: Blob; peak: number } | null> {
+  if (typeof window === "undefined" || typeof MediaRecorder === "undefined") return null;
+  if (!navigator.mediaDevices?.getUserMedia) return null;
+  let stream: MediaStream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+    });
+  } catch {
+    return null;
+  }
+  const mime = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"].find((m) => MediaRecorder.isTypeSupported(m));
+  let rec: MediaRecorder;
+  try {
+    rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+  } catch {
+    stream.getTracks().forEach((t) => t.stop());
+    return null;
+  }
+
+  const chunks: Blob[] = [];
+  rec.ondataavailable = (e) => {
+    if (e.data.size) chunks.push(e.data);
+  };
+
+  const Ctx = audioCtor();
+  const ctx = Ctx ? new Ctx() : null;
+  const analyser = ctx ? ctx.createAnalyser() : null;
+  if (ctx && analyser) {
+    analyser.fftSize = 1024;
+    ctx.createMediaStreamSource(stream).connect(analyser);
+  }
+  const buf = new Float32Array(analyser?.fftSize ?? 1024);
+  let peak = 0;
+  let spoke = false;
+  let lastVoice = Date.now();
+
+  const done = new Promise<{ blob: Blob; peak: number } | null>((resolve) => {
+    rec.onstop = () => {
+      stream.getTracks().forEach((t) => t.stop());
+      if (ctx) void ctx.close();
+      if (!spoke) {
+        resolve(null);
+        return;
+      }
+      void toWav16k(new Blob(chunks, { type: rec.mimeType || mime || "audio/webm" })).then((wav) =>
+        resolve(wav ? { blob: wav, peak } : null)
+      );
+    };
+  });
+
+  rec.start();
+  const t0 = Date.now();
+  const timer = window.setInterval(() => {
+    let rms = 0;
+    if (analyser) {
+      analyser.getFloatTimeDomainData(buf);
+      let sum = 0;
+      for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+      rms = Math.sqrt(sum / buf.length);
+      if (rms > peak) peak = rms;
+    }
+    const now = Date.now();
+    if (rms > SPEECH_RMS) {
+      spoke = true;
+      lastVoice = now;
+    }
+    const ended = spoke && now - lastVoice > silenceMs;
+    const tooLong = now - t0 > maxMs;
+    const neverSpoke = !spoke && now - t0 > Math.min(6000, maxMs);
+    if (ended || tooLong || neverSpoke) {
+      window.clearInterval(timer);
+      try {
+        rec.stop();
+      } catch {
+        /* already stopped */
+      }
+    }
+  }, 100);
+
+  return done;
+}
+
+/**
+ * No Web Speech here (Android WebView): record a clip and let the on-box
+ * Whisper transcribe it via `/asr/transcribe`. Audio stays on the local network,
+ * so the senior's speech never reaches a third-party cloud ASR.
+ */
+async function listenOnceBackend(locale: string, silenceMs: number): Promise<Heard | null> {
+  const t0 = Date.now();
+  // 1.5 s of silence after speech ends the clip — the interview's much longer
+  // ANSWER_TIMEOUT_MS is a "nobody spoke" budget, not an end-of-speech window.
+  const clip = await recordUtterance(Math.min(silenceMs, 1500), 12_000);
+  if (!clip) return null; // mic refused / silence -> caller fails open
+  try {
+    const r = await transcribeAudio(clip.blob, locale as Locale);
+    return { text: (r.text ?? "").trim(), confidence: r.confidence ?? 0, durationMs: Date.now() - t0, peak: clip.peak };
+  } catch {
+    // backend unreachable: report "nothing heard" instead of looping silently
+    return { text: "", confidence: 0, durationMs: Date.now() - t0, peak: clip.peak };
+  }
+}
 
 /**
  * One question → one answer. Resolves `{text: ""}` after `silenceMs` without
@@ -213,7 +402,9 @@ const MAX_ANSWER_MS = 30_000;
  * the caller can fail open to buttons instead of re-asking forever.
  */
 export function listenOnce(locale: string, silenceMs: number): Promise<Heard | null> {
-  if (!sttSupported()) return Promise.resolve(null);
+  // The Android shell goes to the on-box Whisper (see usesBackendStt): the
+  // WebView's Web Speech would hand the audio to the handset's cloud ASR.
+  if (usesBackendStt()) return listenOnceBackend(locale, silenceMs);
   return new Promise((resolve) => {
     const t0 = Date.now();
     let best = { text: "", confidence: 0 };
