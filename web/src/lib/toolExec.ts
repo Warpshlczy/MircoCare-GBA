@@ -38,12 +38,12 @@ import type { PlannedStep } from "./toolrun.ts";
 import type { Locale, SosEvent, Task, TaskEvent } from "./types";
 
 /**
- * Tools this runner can actually perform. Everything else (set_alarm,
- * navigate_home, call_contact, send_message, open_app, ui_tap_text) needs a
- * native method that does not exist yet; `canRun()` reports them as unrunnable
- * so the orchestrator never asks "shall I call 阿明?" and then admits it cannot.
+ * Tools this runner can actually perform. Everything else (navigate_home,
+ * call_contact, send_message, open_app, ui_tap_text) needs a native method that
+ * does not exist yet; `canRun()` reports them as unrunnable so the orchestrator
+ * never asks "shall I call 阿明?" and then admits it cannot.
  */
-const LOCAL_TOOLS = new Set(["sos", "create_task", "complete_task", "locate"]);
+const LOCAL_TOOLS = new Set(["sos", "create_task", "complete_task", "locate", "set_alarm"]);
 
 export interface ToolRunnerDeps {
   locale: Locale;
@@ -59,6 +59,8 @@ export interface ToolRunnerDeps {
   raiseSos?: (event: SosEvent) => void;
   /** foreground coarse location; resolve null when denied or unavailable */
   locate?: () => Promise<{ lat: number; lng: number; accuracy?: number } | null>;
+  /** arm a one-shot alarm; resolve false when the OS refused (permission/slot) */
+  setAlarm?: (atMs: number, label: string) => Promise<boolean>;
 }
 
 export interface ToolRunner {
@@ -91,6 +93,12 @@ interface Copy {
   sosQueued: string;
   sosLocalOnly: (emergency: string) => string;
   notFound: string;
+  /** the alarm really is armed, and when it will ring (already resolved to a day) */
+  alarmSet: (when: string) => string;
+  /** the model sent something that is not HH:MM */
+  alarmBadTime: string;
+  /** native refused: no exact-alarm permission, or the OS rejected it */
+  alarmFailed: string;
 }
 
 // Cantonese for HK/MO, plain Mandarin for the mainland. Short sentences, no
@@ -111,6 +119,9 @@ const COPY: Record<Locale, Copy> = {
     sosQueued: "我記低咗你嘅求助，一有網就通知屋企人。",
     sosLocalOnly: (n) => `我仲未接到屋企人。你打 ${n}。`,
     notFound: "我搵唔到呢件事。",
+    alarmSet: (w) => `好，${w}叫你。`,
+    alarmBadTime: "我聽唔清幾點，你講多次，例如「朝早八點」。",
+    alarmFailed: "我設唔到鬧鐘，你睇下手機有冇閂咗鬧鐘權限。",
   },
   "zh-MO": {
     taskSaved: (t) => `好，我記低咗：${t}`,
@@ -127,6 +138,9 @@ const COPY: Record<Locale, Copy> = {
     sosQueued: "我記低咗你嘅求助，一有網就通知屋企人。",
     sosLocalOnly: (n) => `我仲未接到屋企人。你打 ${n}。`,
     notFound: "我搵唔到呢件事。",
+    alarmSet: (w) => `好，${w}叫你。`,
+    alarmBadTime: "我聽唔清幾點，你講多次，例如「朝早八點」。",
+    alarmFailed: "我設唔到鬧鐘，你睇下手機有冇閂咗鬧鐘權限。",
   },
   "zh-CN": {
     taskSaved: (t) => `好，我记下了：${t}`,
@@ -143,6 +157,9 @@ const COPY: Record<Locale, Copy> = {
     sosQueued: "我记下了你的求助，一联网就通知家里人。",
     sosLocalOnly: (n) => `我还没联系上家里人。你打 ${n}。`,
     notFound: "我找不到这件事。",
+    alarmSet: (w) => `好，${w}叫你。`,
+    alarmBadTime: "我没听清几点，你再说一次，比如说「早上八点」。",
+    alarmFailed: "我设不了闹钟，你看看手机是不是关了闹钟权限。",
   },
 };
 
@@ -150,8 +167,7 @@ function norm(text: unknown): string {
   return typeof text === "string" ? text.trim().replace(/\s+/g, " ") : "";
 }
 
-/** Spoken words -> the one task they can only mean, or null. */
-function matchTask(tasks: Task[], query: string, now: number): Task | null {
+/** Spoken words -> the one task they can only mean, or null. */function matchTask(tasks: Task[], query: string, now: number): Task | null {
   const q = query.trim();
   if (!q) return null;
 
@@ -180,6 +196,53 @@ function matchTask(tasks: Task[], query: string, now: number): Task | null {
   return null;
 }
 
+/** Tomorrow is the furthest anyone means by "叫我起身". */
+export const ALARM_MAX_DAY_OFFSET = 1;
+
+/**
+ * "HH:MM" (+ dayOffset) -> epoch ms, or null when it is not a clock time.
+ *
+ * WHY THE MODEL DOES NOT SEND AN EPOCH: asking a language model to add "聽日八點"
+ * to a millisecond timestamp is arithmetic it gets wrong quietly — the alarm then
+ * rings at 3am and nobody knows why. The model only reports the time of day it
+ * heard; the device resolves the date.
+ *
+ * A time already past today ("八點" said at 9am) rolls to tomorrow rather than
+ * being rejected: that is what a person means, and the spoken confirmation says
+ * which day it picked so he can correct it.
+ */
+export function alarmAtFrom(time: string, dayOffset: number, now: number): number | null {
+  const m = /^(\d{1,2}):(\d{2})$/.exec((time ?? "").trim());
+  if (!m) return null;
+  const hour = Number(m[1]);
+  const minute = Number(m[2]);
+  if (!Number.isInteger(hour) || !Number.isInteger(minute) || hour > 23 || minute > 59) return null;
+
+  const offset = Number.isFinite(dayOffset)
+    ? Math.max(0, Math.min(ALARM_MAX_DAY_OFFSET, Math.trunc(dayOffset)))
+    : 0;
+
+  const at = new Date(now);
+  at.setDate(at.getDate() + offset);
+  at.setHours(hour, minute, 0, 0);
+  if (offset === 0 && at.getTime() <= now) at.setDate(at.getDate() + 1);
+  return at.getTime();
+}
+
+/** "今日三點" / "聽日八點" — the day is stated out loud so a mistake is correctable. */
+export function alarmWhenLabel(atMs: number, now: number, locale: Locale): string {
+  const at = new Date(atMs);
+  const hour = at.getHours();
+  const minute = at.getMinutes();
+  const sameDay = new Date(now).toDateString() === at.toDateString();
+  const cjk = locale === "zh-CN";
+  const clock = cjk
+    ? `${hour}点${minute ? `${minute}分` : ""}`
+    : `${hour}點${minute ? `${minute}分` : ""}`;
+  const day = cjk ? (sameDay ? "今天" : "明天") : sameDay ? "今日" : "聽日";
+  return `${day}${clock}`;
+}
+
 export function createToolRunner(deps: ToolRunnerDeps): ToolRunner {
   const copy = COPY[deps.locale];
 
@@ -187,6 +250,7 @@ export function createToolRunner(deps: ToolRunnerDeps): ToolRunner {
     if (!LOCAL_TOOLS.has(name)) return false;
     if (name === "locate") return typeof deps.locate === "function";
     if (name === "sos") return typeof deps.sendSos === "function" || typeof deps.raiseSos === "function";
+    if (name === "set_alarm") return typeof deps.setAlarm === "function";
     return true; // create_task / complete_task need nothing but storage
   }
 
@@ -286,6 +350,25 @@ export function createToolRunner(deps: ToolRunnerDeps): ToolRunner {
     }
   }
 
+  async function setAlarm(args: Record<string, unknown>): Promise<ToolExecResult> {
+    const label = norm(args.label)
+      || norm(args.time);
+    if (!label) return { ok: false, message: copy.alarmBadTime };
+
+    const dayOffset = typeof args.dayOffset === "number" ? args.dayOffset : 0;
+    const at = alarmAtFrom(typeof args.time === "string" ? args.time : "", dayOffset, deps.now);
+    if (at === null) return { ok: false, message: copy.alarmBadTime };
+    if (!deps.setAlarm) return { ok: false, message: copy.alarmFailed };
+
+    try {
+      if (!(await deps.setAlarm(at, label))) return { ok: false, message: copy.alarmFailed };
+    } catch {
+      return { ok: false, message: copy.alarmFailed };
+    }
+    // Say WHICH day it landed on: "八點" at 9am means tomorrow, and he must hear that.
+    return { ok: true, message: copy.alarmSet(alarmWhenLabel(at, deps.now, deps.locale)) };
+  }
+
   async function run(step: PlannedStep): Promise<ToolExecResult> {
     const args = step.args ?? {};
     switch (step.name) {
@@ -297,6 +380,8 @@ export function createToolRunner(deps: ToolRunnerDeps): ToolRunner {
         return locate();
       case "sos":
         return sos();
+      case "set_alarm":
+        return setAlarm(args);
       default:
         // Reached only if the orchestrator ignored canRun().
         return { ok: false, message: copy.notFound };

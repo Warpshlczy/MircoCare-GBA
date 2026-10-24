@@ -60,6 +60,12 @@
             android:name=".DailyAlarmReceiver"
             android:exported="false" />
 
+        <!-- One-shot alarm from `set_alarm`. exported=false: only our own
+             PendingIntent is meant to reach it. -->
+        <receiver
+            android:name=".OnceAlarmReceiver"
+            android:exported="false" />
+
         <!-- W3: re-arm the alarm after reboot. Must be exported=true: the system
              broadcast comes from another UID, so exported=false would drop it. -->
         <receiver

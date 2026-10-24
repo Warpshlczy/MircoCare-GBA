@@ -106,14 +106,22 @@ export const TOOLS: readonly ToolDecl[] = [
   {
     name: "set_alarm",
     description:
-      "Set a local alarm at an exact time ('听日八点叫我'). Requires the exact-alarm permission on Android 12+.",
+      "Set a local alarm at a clock time ('听日八点叫我'). Pass the time of day the senior said, NOT a computed timestamp.",
     schema: {
       type: "object",
       properties: {
-        at: { type: "number", description: "Epoch ms of the alarm." },
+        time: {
+          type: "string",
+          description: "24-hour clock time, exactly HH:MM, local time (e.g. '08:00').",
+        },
+        dayOffset: {
+          type: "number",
+          description:
+            "0 = today (or tomorrow if that time already passed), 1 = tomorrow. Omit for 'today'.",
+        },
         label: { type: "string", description: "What the alarm is for, spoken aloud." },
       },
-      required: ["at", "label"],
+      required: ["time", "label"],
       additionalProperties: false,
     },
     risk: "safe",

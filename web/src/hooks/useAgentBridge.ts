@@ -134,6 +134,9 @@ export function useAgentBridge(deps: AgentBridgeDeps): AgentBridge {
     // a home point exists, and it never asks for location permission itself —
     // see geofenceStore.ts for why that is a product decision, not a bug.
     const stopFence = startFenceWatch();
+    // Screen/unlock/charging rollup: a native receiver, because SCREEN_ON is a
+    // protected broadcast and the WebView is asleep exactly when we need it.
+    void bridge()?.startCircadian().catch(() => {});
 
     // One closed day at most per open. Runs after the first flush attempt so an
     // item left over from last night goes out before we enqueue a new one.
@@ -188,6 +191,11 @@ export function useAgentBridge(deps: AgentBridgeDeps): AgentBridge {
               const pos = await bridge()?.getLocation();
               return pos ?? null;
             }
+          : undefined,
+        // One-shot alarm. Without this the executor reports "我設唔到鬧鐘" —
+        // which is true on the web, and honest on a phone with the permission off.
+        setAlarm: bridge()
+          ? async (atMs, label) => (await bridge()?.scheduleOnce(atMs, label)) ?? false
           : undefined,
       });
 

@@ -182,6 +182,64 @@ public class AuraNativePlugin extends Plugin {
         call.resolve();
     }
 
+    /**
+     * One-shot alarm. `at` is epoch ms computed on the JS side (the model only
+     * reports a clock time; see toolExec.ts#alarmAtFrom for why).
+     */
+    @PluginMethod
+    public void scheduleOnce(PluginCall call) {
+        Long at = call.getLong("at");
+        String label = call.getString("label", "");
+        JSObject ret = new JSObject();
+        if (at == null) {
+            ret.put("ok", false);
+            call.resolve(ret);
+            return;
+        }
+        boolean ok = AlarmScheduler.scheduleOnce(getContext(), at, label);
+        ret.put("ok", ok);
+        ret.put("exact", AlarmScheduler.wasExact(getContext()));
+        call.resolve(ret);
+    }
+
+    @PluginMethod
+    public void cancelOnce(PluginCall call) {
+        AlarmScheduler.cancelOnce(getContext());
+        call.resolve();
+    }
+
+    // --- circadian rollup (screen/unlock/charging; no permission) --------------
+
+    /** Registers the dynamic receiver. Safe to call on every app start. */
+    @PluginMethod
+    public void circadianStart(PluginCall call) {
+        CircadianRecorder.start(getContext());
+        JSObject ret = new JSObject();
+        ret.put("ok", true);
+        call.resolve(ret);
+    }
+
+    /**
+     * One day's screen/unlock/charging rollup, or EMPTY when nothing was
+     * observed — the JS side then omits the row instead of sending zeros.
+     */
+    @PluginMethod
+    public void getCircadian(PluginCall call) {
+        String day = call.getString("day", CircadianRecorder.dayKey(System.currentTimeMillis()));
+        CircadianRecorder.CircadianSnapshot snap = CircadianRecorder.read(getContext(), day);
+        JSObject ret = new JSObject();
+        if (snap == null) {
+            call.resolve(ret);
+            return;
+        }
+        ret.put("day", snap.day);
+        ret.put("firstActiveAt", snap.firstActiveAt);
+        ret.put("lastActiveAt", snap.lastActiveAt);
+        ret.put("nightWakeCount", snap.nightWakeCount);
+        ret.put("chargingHours", snap.chargingHours);
+        call.resolve(ret);
+    }
+
     // --- coarse position (foreground only) -----------------------------------
 
     /** Last known fix, foreground only. Resolves EMPTY when denied or unknown. */

@@ -13,7 +13,7 @@
 // Every method degrades to a safe value when the shell is older/missing, so
 // callers never need to feature-detect individually.
 
-import type { AgentCard, ReminderItem } from "./types";
+import type { AgentCard, CircadianDaily, ReminderItem } from "./types";
 
 export interface HomeWidgetPayload {
   updatedAt: number;
@@ -55,6 +55,17 @@ export interface AuraNativeBridge {
   /** Repeats every day; resolves false when the OS refused to schedule. */
   scheduleDaily(hour: number, minute: number): Promise<boolean>;
   cancelDaily(): Promise<void>;
+  /** one-shot alarm at an absolute time; false when the OS refused it */
+  scheduleOnce(atMs: number, label?: string): Promise<boolean>;
+  cancelOnce(): Promise<void>;
+  /**
+   * Starts the screen/unlock/charging rollup. No permission needed, no JS timer:
+   * SCREEN_ON/OFF are protected broadcasts a WebView cannot see once the screen
+   * is off. Resolves false in a browser.
+   */
+  startCircadian(): Promise<boolean>;
+  /** One day's rollup, or null when nothing was observed (NOT zeros). */
+  getCircadian(day: string): Promise<CircadianDaily | null>;
   /** Foreground-only, last known fix. Resolves null when unavailable/denied. */
   getLocation(): Promise<NativeLocation | null>;
   /** Opens the system accessibility list so the senior's family can enable it.
@@ -87,6 +98,10 @@ interface AuraNativePlugin {
   bringToForeground(o?: { reason?: ForegroundReason }): Promise<{ ok?: boolean }>;
   scheduleDaily(o: { hour: number; minute: number }): Promise<{ ok?: boolean; exact?: boolean }>;
   cancelDaily(): Promise<void>;
+  scheduleOnce(o: { at: number; label?: string }): Promise<{ ok?: boolean; exact?: boolean }>;
+  cancelOnce(): Promise<void>;
+  circadianStart(): Promise<{ ok?: boolean }>;
+  getCircadian(o: { day: string }): Promise<Partial<CircadianDaily> | void>;
   getLocation(): Promise<Partial<NativeLocation> | void>;
   openAccessibilitySettings(): Promise<{ ok?: boolean }>;
   consumePendingReason(): Promise<{ reason?: string; at?: number; sos?: boolean } | void>;
@@ -114,6 +129,12 @@ function withDefaults(src: Partial<AuraNativeBridge>): AuraNativeBridge {
       Promise.resolve(src.scheduleDaily?.(hour, minute)).then((v) => !!v).catch(() => false),
     cancelDaily: () =>
       Promise.resolve(src.cancelDaily?.()).then(() => undefined).catch(() => undefined),
+    // A browser has no AlarmManager: report false rather than pretend an alarm
+    // is armed. The executor then says "我設唔到鬧鐘" instead of lying.
+    scheduleOnce: () => Promise.resolve(false),
+    cancelOnce: () => Promise.resolve(),
+    startCircadian: () => Promise.resolve(false),
+    getCircadian: () => Promise.resolve(null),
     getLocation: () =>
       Promise.resolve(src.getLocation?.())
         .then((r) => (r && typeof r.lat === "number" ? (r as NativeLocation) : null))
@@ -150,6 +171,14 @@ export function bridge(): AuraNativeBridge | null {
     // The plugin takes one options object, so wrap the two positional args.
     scheduleDaily: (hour, minute) => p.scheduleDaily({ hour, minute }).then((r) => !!r?.ok),
     cancelDaily: () => p.cancelDaily(),
+    scheduleOnce: (atMs, label) => p.scheduleOnce({ at: atMs, label }).then((r) => !!r?.ok),
+    cancelOnce: () => p.cancelOnce(),
+    startCircadian: () => p.circadianStart().then((r) => !!r?.ok),
+    getCircadian: async (day) => {
+      const r = await p.getCircadian({ day });
+      // Empty object = nothing observed that day; the caller must omit the row.
+      return r && typeof r.firstActiveAt === "number" ? ({ ...r, day } as CircadianDaily) : null;
+    },
     getLocation: async () => {
       const r = await p.getLocation();
       return r && typeof r.lat === "number" ? (r as NativeLocation) : null;

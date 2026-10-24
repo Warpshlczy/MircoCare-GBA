@@ -27,8 +27,12 @@ final class AlarmScheduler {
     static final String KEY_HOUR = "daily_hour";
     static final String KEY_MINUTE = "daily_minute";
     static final String KEY_EXACT = "daily_exact";
+    /** one-shot alarm: absolute epoch ms + what it is for */
+    static final String KEY_ONCE_AT = "once_at";
+    static final String KEY_ONCE_LABEL = "once_label";
 
     private static final int REQUEST_CODE = 8801;
+    private static final int REQUEST_CODE_ONCE = 8804;
 
     private AlarmScheduler() {}
 
@@ -83,6 +87,71 @@ final class AlarmScheduler {
         prefs(ctx).edit().remove(KEY_HOUR).remove(KEY_MINUTE).remove(KEY_EXACT).apply();
     }
 
+    /**
+     * One-shot alarm ("聽日八點叫我"). The epoch is computed on the JS side because
+     * the model must never do that arithmetic; here we only refuse the impossible
+     * (a time already past) and arm it.
+     *
+     * @return true when an alarm was actually set.
+     */
+    static boolean scheduleOnce(Context ctx, long atMs, String label) {
+        if (atMs <= System.currentTimeMillis()) return false; // past time: refuse, never fire instantly
+        AlarmManager am = (AlarmManager) ctx.getSystemService(Context.ALARM_SERVICE);
+        if (am == null) return false;
+
+        final PendingIntent pi = oncePendingIntent(ctx, label);
+        boolean exact = true;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !am.canScheduleExactAlarms()) {
+            exact = false; // same degradation as the daily alarm: ±15min beats a crash
+        }
+        try {
+            if (exact) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, atMs, pi);
+                } else {
+                    am.setExact(AlarmManager.RTC_WAKEUP, atMs, pi);
+                }
+            } else {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, atMs, pi);
+                } else {
+                    am.set(AlarmManager.RTC_WAKEUP, atMs, pi);
+                }
+            }
+        } catch (SecurityException e) {
+            return false;
+        }
+
+        prefs(ctx).edit()
+                .putLong(KEY_ONCE_AT, atMs)
+                .putString(KEY_ONCE_LABEL, label == null ? "" : label)
+                .apply();
+        return true;
+    }
+
+    static void cancelOnce(Context ctx) {
+        AlarmManager am = (AlarmManager) ctx.getSystemService(Context.ALARM_SERVICE);
+        if (am != null) am.cancel(oncePendingIntent(ctx, prefs(ctx).getString(KEY_ONCE_LABEL, "")));
+        prefs(ctx).edit().remove(KEY_ONCE_AT).remove(KEY_ONCE_LABEL).apply();
+    }
+
+    /** Re-arms the saved one-shot alarm after a reboot, unless it is already past. */
+    static void rescheduleOnceFromPrefs(Context ctx) {
+        SharedPreferences p = prefs(ctx);
+        long at = p.getLong(KEY_ONCE_AT, 0L);
+        if (at <= System.currentTimeMillis()) {
+            // Missed while the phone was off: drop it rather than ring at boot.
+            p.edit().remove(KEY_ONCE_AT).remove(KEY_ONCE_LABEL).apply();
+            return;
+        }
+        scheduleOnce(ctx, at, p.getString(KEY_ONCE_LABEL, ""));
+    }
+
+    /** Called by the receiver after it fires, so a stale alarm is never re-armed. */
+    static void clearOnce(Context ctx) {
+        prefs(ctx).edit().remove(KEY_ONCE_AT).remove(KEY_ONCE_LABEL).apply();
+    }
+
     /** Re-arms the saved daily alarm. No-op when nothing was ever scheduled. */
     static void rescheduleFromPrefs(Context ctx) {
         SharedPreferences p = prefs(ctx);
@@ -116,5 +185,18 @@ final class AlarmScheduler {
         int flags = PendingIntent.FLAG_UPDATE_CURRENT;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) flags |= PendingIntent.FLAG_IMMUTABLE;
         return PendingIntent.getBroadcast(ctx, REQUEST_CODE, i, flags);
+    }
+
+    /**
+     * Label goes into the intent: the receiver must show what the alarm is FOR,
+     * and it cannot ask JS anything at 8am with the WebView possibly dead.
+     */
+    private static PendingIntent oncePendingIntent(Context ctx, String label) {
+        Intent i = new Intent(ctx, OnceAlarmReceiver.class)
+                .setAction(OnceAlarmReceiver.ACTION_ONCE)
+                .putExtra(OnceAlarmReceiver.EXTRA_LABEL, label == null ? "" : label);
+        int flags = PendingIntent.FLAG_UPDATE_CURRENT;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) flags |= PendingIntent.FLAG_IMMUTABLE;
+        return PendingIntent.getBroadcast(ctx, REQUEST_CODE_ONCE, i, flags);
     }
 }

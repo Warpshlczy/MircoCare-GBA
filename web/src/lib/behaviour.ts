@@ -25,7 +25,7 @@
 // Tested in src/selfcheck.ts.
 
 import { dayKey, taskStatsForDay } from "./tasks.ts";
-import type { BehaviourDaily, GaitWindow, Task } from "./types";
+import type { BehaviourDaily, CircadianDaily, DigitalSkillDaily, GaitWindow, Task } from "./types";
 
 /** Bound the id list so one day's meta doc cannot grow without limit. */
 export const MAX_ACC_IDS = 500;
@@ -226,11 +226,47 @@ export function behaviourForDay(input: BehaviourInputs): BehaviourDaily {
 }
 
 /**
- * The POST /behaviour/daily body. Only `behaviour` — W4 adds the other two rows
- * when the broadcasts actually exist, and C already accepts their absence.
+ * Validates a native circadian snapshot into a row C will accept, or null.
+ *
+ * The gate is strict on purpose: `firstActiveAt: 0` would be read as "active at
+ * 1970", and a row for the wrong day silently mislabels the night-wake count.
+ * A missing row is honest; a zeroed one is a lie the weekly report would repeat.
  */
-export function behaviourEnvelope(b: BehaviourDaily): { behaviour: BehaviourDaily } {
-  return { behaviour: b };
+export function circadianRow(day: string, raw: Partial<CircadianDaily> | null | undefined): CircadianDaily | null {
+  if (!raw) return null;
+  if (raw.day && raw.day !== day) return null;
+  const first = raw.firstActiveAt;
+  const last = raw.lastActiveAt;
+  if (typeof first !== "number" || typeof last !== "number") return null;
+  if (!Number.isFinite(first) || !Number.isFinite(last) || first <= 0 || last <= 0) return null;
+  if (last < first) return null;
+
+  const night = typeof raw.nightWakeCount === "number" && Number.isFinite(raw.nightWakeCount)
+    ? Math.max(0, Math.round(raw.nightWakeCount))
+    : 0;
+  const hours = typeof raw.chargingHours === "number" && Number.isFinite(raw.chargingHours)
+    ? Math.min(24, Math.max(0, raw.chargingHours))
+    : 0;
+
+  return { id: `cd-${day}`, day, firstActiveAt: first, lastActiveAt: last, nightWakeCount: night, chargingHours: hours };
+}
+
+/**
+ * The POST /behaviour/daily body. `circadian` / `digitalSkill` are OMITTED (not
+ * nulled) when their source did not observe anything — C's envelope allows that,
+ * and an empty row would be indistinguishable from "he never woke at night".
+ */
+export function behaviourEnvelope(
+  b: BehaviourDaily,
+  circadian?: CircadianDaily | null,
+  digitalSkill?: DigitalSkillDaily | null
+): { behaviour: BehaviourDaily; circadian?: CircadianDaily; digitalSkill?: DigitalSkillDaily } {
+  const out: { behaviour: BehaviourDaily; circadian?: CircadianDaily; digitalSkill?: DigitalSkillDaily } = {
+    behaviour: b,
+  };
+  if (circadian) out.circadian = circadian;
+  if (digitalSkill) out.digitalSkill = digitalSkill;
+  return out;
 }
 
 /** True when the day carries at least one measured signal worth uploading. */

@@ -76,13 +76,14 @@ import {
   countInteractions,
   appUsedOn,
   shouldUploadDay,
+  circadianRow,
   MAX_BACKFILL_DAYS,
 } from "./lib/behaviour.ts";
 import { makeSender, behaviourBody, telemetryBatch } from "./lib/outboxRunner.ts";
 import type { OutboxTransport } from "./lib/outboxRunner.ts";
 import { runTurn, appendTurn, isLlmReady, MAX_RECENT_TURNS } from "./lib/agent.ts";
 import type { AgentDeps } from "./lib/agent.ts";
-import { createToolRunner, emergencyNumber } from "./lib/toolExec.ts";
+import { createToolRunner, emergencyNumber, alarmAtFrom, alarmWhenLabel } from "./lib/toolExec.ts";
 import {
   careSignals,
   careLine,
@@ -1063,6 +1064,41 @@ assert.equal(magnitude(3, 4, 0), 5);
 
   // The envelope omits circadian/digitalSkill (W4) rather than nulling them.
   assert.deepEqual(Object.keys(behaviourEnvelope(b)), ["behaviour"]);
+
+  // --- circadian row: a missing day is null, never zeros ---------------------
+  const night = circadianRow(day, {
+    day,
+    firstActiveAt: at(7),
+    lastActiveAt: at(21),
+    nightWakeCount: 2,
+    chargingHours: 6.5,
+  });
+  assert.equal(night?.id, `cd-${day}`);
+  assert.equal(night?.nightWakeCount, 2);
+
+  // Nothing observed -> no row at all (C's envelope allows omission, and a
+  // zeroed row would read as "he never woke tonight").
+  assert.equal(circadianRow(day, null), null);
+  assert.equal(circadianRow(day, { day }), null, "no timestamps is not a zero-length day");
+  assert.equal(circadianRow(day, { day, firstActiveAt: 0, lastActiveAt: 0 }), null);
+  // Wrong day must not be relabelled.
+  assert.equal(circadianRow("2026-10-25", { day, firstActiveAt: at(7), lastActiveAt: at(21) }), null);
+  // Nonsense ordering is refused rather than clamped into a plausible range.
+  assert.equal(circadianRow(day, { day, firstActiveAt: at(21), lastActiveAt: at(7) }), null);
+  // Out-of-range extras are clamped, not passed through.
+  const clamped = circadianRow(day, {
+    day,
+    firstActiveAt: at(7),
+    lastActiveAt: at(21),
+    nightWakeCount: -3,
+    chargingHours: 48,
+  });
+  assert.equal(clamped?.nightWakeCount, 0);
+  assert.equal(clamped?.chargingHours, 24);
+
+  // Row present -> key present; row absent -> key absent (not null).
+  assert.deepEqual(Object.keys(behaviourEnvelope(b, night)), ["behaviour", "circadian"]);
+  assert.deepEqual(Object.keys(behaviourEnvelope(b, null)), ["behaviour"]);
 }
 
 // --- tool executors: create / complete / locate / sos (B, local only) --------
@@ -1674,6 +1710,66 @@ assert.equal(magnitude(3, 4, 0), 5);
   const alerted = markAlerted({ inside: false, since: t0, lastAlertAt: 0, pending: null }, t0 + 90 * 60_000);
   assert.equal(shouldAlert(alerted, t0 + 100 * 60_000, P), false);
   assert.equal(shouldAlert(alerted, t0 + 121 * 60_000, P), true);
+}
+
+// --- set_alarm: the device resolves the date, the model only reports the time -
+{
+  const at = (h: number, m = 0) => new Date(2026, 9, 25, h, m, 0).getTime();
+
+  // "八點" said at 09:00 means TOMORROW 08:00. Setting a past alarm would fire
+  // instantly — the worst possible outcome for a reminder to take medicine.
+  assert.equal(alarmAtFrom("08:00", 0, at(9)), at(8) + 86_400_000);
+  // Said at 07:00 the same words mean today.
+  assert.equal(alarmAtFrom("08:00", 0, at(7)), at(8));
+  // dayOffset=1 is always tomorrow, even when today's time has not passed.
+  assert.equal(alarmAtFrom("08:00", 1, at(7)), at(8) + 86_400_000);
+  // Clamped: nobody means "the week after next", and a model might say so.
+  assert.equal(alarmAtFrom("08:00", 9, at(7)), at(8) + 86_400_000);
+
+  // Garbage is refused, never guessed into a time.
+  for (const bad of ["", "8", "8.30", "25:00", "08:60", "abc", "-1:00"]) {
+    assert.equal(alarmAtFrom(bad, 0, at(9)), null, `must refuse ${JSON.stringify(bad)}`);
+  }
+
+  // The reply names the day, so a wrong day is correctable by the senior.
+  assert.equal(alarmWhenLabel(at(8), at(7), "zh-HK"), "今日8點");
+  assert.equal(alarmWhenLabel(at(8) + 86_400_000, at(7), "zh-HK"), "聽日8點");
+  assert.equal(alarmWhenLabel(at(8, 30) + 86_400_000, at(7), "zh-CN"), "明天8点30分");
+
+  // canRun: without a native method the orchestrator must not even ask.
+  const base = { locale: "zh-HK" as const, now: at(9), tasks: [] as Task[], saveTask: async () => {} };
+  assert.equal(createToolRunner(base).canRun("set_alarm"), false);
+  assert.equal(createToolRunner({ ...base, setAlarm: async () => true }).canRun("set_alarm"), true);
+
+  // Armed: says which day it landed on. Refused: says it could not, never "done".
+  const armed: number[] = [];
+  const okRun = await createToolRunner({
+    ...base,
+    setAlarm: async (ms) => {
+      armed.push(ms);
+      return true;
+    },
+  }).run({ name: "set_alarm", risk: "safe", args: { time: "08:00", label: "食藥" }, say: "" });
+  assert.equal(okRun.ok, true);
+  assert.equal(okRun.message, "好，聽日8點叫你。");
+  assert.equal(armed.length, 1);
+
+  const refused = await createToolRunner({ ...base, setAlarm: async () => false }).run({
+    name: "set_alarm",
+    risk: "safe",
+    args: { time: "08:00", label: "食藥" },
+    say: "",
+  });
+  assert.equal(refused.ok, false, "a refused alarm must not claim success");
+  assert.equal((refused.message ?? "").includes("鬧鐘"), true);
+
+  const badTime = await createToolRunner({ ...base, setAlarm: async () => true }).run({
+    name: "set_alarm",
+    risk: "safe",
+    args: { time: "聽日八點", label: "食藥" },
+    say: "",
+  });
+  assert.equal(badTime.ok, false, "a non-HH:MM time must not reach the scheduler");
 }
 
 console.log("selfcheck: OK");

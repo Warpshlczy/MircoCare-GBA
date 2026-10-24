@@ -20,6 +20,7 @@ public class BootReceiver extends BroadcastReceiver {
                 || Intent.ACTION_MY_PACKAGE_REPLACED.equals(action)
                 || "android.intent.action.QUICKBOOT_POWERON".equals(action)) {
             AlarmScheduler.rescheduleFromPrefs(ctx);
+            AlarmScheduler.rescheduleOnceFromPrefs(ctx);
             HomeWidgetProvider.refresh(ctx);
         }
     }

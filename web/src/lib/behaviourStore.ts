@@ -20,6 +20,7 @@ import {
   appUsedOn,
   behaviourEnvelope,
   behaviourForDay,
+  circadianRow,
   countInteractions,
   dayToUpload,
   emptyAccumulator,
@@ -29,10 +30,11 @@ import {
 } from "./behaviour.ts";
 import type { GaitAccumulator } from "./behaviour.ts";
 import { all, del, get, put } from "./db.ts";
+import { bridge } from "./native.ts";
 import { enqueue } from "./outboxStore.ts";
 import { listTasks } from "./taskStore.ts";
 import { dayKey } from "./tasks.ts";
-import type { BehaviourDaily, ConversationTurn, GaitWindow } from "./types";
+import type { BehaviourDaily, CircadianDaily, ConversationTurn, GaitWindow } from "./types";
 
 const ACC_PREFIX = "behaviour_acc.";
 const INTERACTION_PREFIX = "interaction_acc.";
@@ -172,6 +174,15 @@ async function pruneAccumulators(now: number): Promise<void> {
   }
 }
 
+/** Native circadian snapshot for `day`; null on the web or when nothing was seen. */
+async function readCircadian(day: string): Promise<CircadianDaily | null> {
+  try {
+    return (await bridge()?.getCircadian(day)) ?? null;
+  } catch {
+    return null;
+  }
+}
+
 async function readProxy(day: string): Promise<ProxyDoc | null> {
   const doc = await get<ProxyDoc>("meta", `${PROXY_PREFIX}${day}`).catch(() => undefined);
   return doc ?? null;
@@ -275,7 +286,12 @@ export async function flushClosedDay(now = Date.now()): Promise<BehaviourFlushRe
     return { uploaded: null, checked: day, skipped: "no-signal" };
   }
 
-  await enqueue("behaviour", behaviourEnvelope(behaviour), now);
+  // Screen/unlock/charging row, when the shell actually observed that day.
+  // Null means "we did not see anything", and then the row is OMITTED rather
+  // than sent full of zeros.
+  const circadian = circadianRow(day, await readCircadian(day));
+
+  await enqueue("behaviour", behaviourEnvelope(behaviour, circadian), now);
   await markUploaded(day, now);
   await pruneAccumulators(now);
   return { uploaded: day, checked: day };
