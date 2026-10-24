@@ -97,6 +97,72 @@ export function mentionsDiagnosis(text: string): boolean {
   return DIAGNOSIS_WORDS.some((w) => hay.includes(w.toLowerCase()));
 }
 
+/**
+ * Every counter, in a fixed order. Exported so the store and the tests iterate
+ * the same list — a counter added here and forgotten there is a silent blind
+ * spot in the baseline.
+ */
+export const CARE_KEYS = [
+  "interactions",
+  "unheard",
+  "repeats",
+  "painMentions",
+  "nightWakeCount",
+  "fallEvents",
+  "sosEvents",
+] as const;
+
+export const BASELINE = {
+  /** look back this many days */
+  windowDays: 14,
+  /**
+   * Fewer than this many measured days -> no baseline for that counter.
+   * Two quiet days are not a "usual level"; a median over 2 points is noise
+   * dressed as a reference range.
+   */
+  minDays: 5,
+} as const;
+
+/** Drops anything that is not a finite non-negative number. */
+export function normalizeCounters(input: Partial<CareCounters> | null | undefined): Partial<CareCounters> {
+  const out: Partial<CareCounters> = {};
+  if (!input) return out;
+  for (const key of CARE_KEYS) {
+    const v = num(input[key]);
+    if (v !== null) out[key] = v;
+  }
+  return out;
+}
+
+/**
+ * Median of the non-null samples, or null when there are not enough of them.
+ * Median rather than mean: one 40-interaction day (a birthday, a visit) must
+ * not raise the bar so high that every ordinary day looks like withdrawal.
+ */
+export function medianOrNull(values: (number | null | undefined)[], minDays = BASELINE.minDays): number | null {
+  const nums = values.filter((v): v is number => typeof v === "number" && Number.isFinite(v) && v >= 0).sort((a, b) => a - b);
+  if (nums.length < Math.max(1, minDays)) return null;
+  const mid = Math.floor(nums.length / 2);
+  return nums.length % 2 === 1 ? nums[mid] : (nums[mid - 1] + nums[mid]) / 2;
+}
+
+/**
+ * Personal baseline from previous days' counters. Keys without enough data are
+ * OMITTED (not set to 0), so the comparison rules stay silent instead of
+ * comparing today against a made-up usual level.
+ */
+export function baselineFrom(
+  days: readonly (Partial<CareCounters> | null | undefined)[],
+  minDays = BASELINE.minDays
+): Partial<CareCounters> {
+  const out: Partial<CareCounters> = {};
+  for (const key of CARE_KEYS) {
+    const median = medianOrNull(days.map((d) => d?.[key] ?? null), minDays);
+    if (median !== null) out[key] = median;
+  }
+  return out;
+}
+
 function num(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
 }
