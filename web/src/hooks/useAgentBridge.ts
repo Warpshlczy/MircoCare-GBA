@@ -29,7 +29,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { appendTurn, isLlmReady, runTurn } from "@/lib/agent";
 import type { RecentTurn } from "@/lib/agent";
 import { getHealth, postAgentTurn } from "@/lib/api";
+import { flushClosedDay } from "@/lib/behaviourStore";
 import { bridge } from "@/lib/native";
+import { flushOutboxOnce, startOutboxAutoFlush } from "@/lib/outboxRunner";
 import { enqueue } from "@/lib/outboxStore";
 import { listTasks, saveTask } from "@/lib/taskStore";
 import { createToolRunner } from "@/lib/toolExec";
@@ -119,6 +121,28 @@ export function useAgentBridge(deps: AgentBridgeDeps): AgentBridge {
     };
   }, []);
 
+  // Start the offline queue flush and the daily behaviour rollup.
+  //
+  // This hook is the only mount point B owns, so the queue is started here
+  // rather than in page.tsx (A's file). Everything below fails closed and
+  // silently: a missing backend must never stop the senior from talking.
+  useEffect(() => {
+    const stop = startOutboxAutoFlush();
+
+    // One closed day at most per open. Runs after the first flush attempt so an
+    // item left over from last night goes out before we enqueue a new one.
+    void (async () => {
+      try {
+        const r = await flushClosedDay();
+        if (r.uploaded) void flushOutboxOnce();
+      } catch {
+        /* offline / no DB — the next open tries again */
+      }
+    })();
+
+    return stop;
+  }, []);
+
   const handleUtterance = useCallback(async (text: string): Promise<boolean> => {
     const d = ref.current;
     const now = Date.now();
@@ -138,10 +162,14 @@ export function useAgentBridge(deps: AgentBridgeDeps): AgentBridge {
         // idempotent per event id, so a replay cannot double-count.
         recordEvent: async (e) => {
           await enqueue("taskEvent", e, now);
+          // Kick, don't wait: the turn must finish speaking before the phone
+          // finishes talking to the backend.
+          void flushOutboxOnce(now);
         },
         // Same id on every replay -> the family is paged once, not once per retry.
         sendSos: async (e) => {
           await enqueue("sos", e, now);
+          void flushOutboxOnce(now);
         },
         raiseSos: () => d.onSos?.(),
         locate: bridge()
