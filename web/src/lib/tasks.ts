@@ -1,0 +1,140 @@
+// tasks.ts — PURE task rules. No IndexedDB, no DOM (that is taskStore.ts).
+//
+// Why split: the confirm-delay maths and the "already taken it" rule are the
+// numbers C's behaviour stream consumes (task_confirm_delay_min / timeout_rate).
+// They must be testable with plain asserts, so they live apart from storage.
+//
+// Tested in src/selfcheck.ts.
+
+import type { Task } from "./types";
+
+/** "You already confirmed this 20 minutes ago" window (docs/dev.md §1.8). */
+export const DUPLICATE_WINDOW_MS = 30 * 60 * 1000;
+
+const PREFIX = /^(提醒我|提我|記住|记住|幫我記|帮我记|記低|记低|記一下|记一下|我要|同我)\s*/;
+
+/** Strips the command verb so the card shows what to do, not how it was asked. */
+export function taskTextFromUtterance(utterance: string): string {
+  return (utterance ?? "").trim().replace(PREFIX, "").trim();
+}
+
+export interface NewTaskInput {
+  text: string;
+  now: number;
+  dueAt?: number;
+  source?: Task["source"];
+  id?: string;
+}
+
+export function newTask(input: NewTaskInput): Task {
+  const text = (input.text ?? "").trim();
+  return {
+    id: input.id ?? `task-${input.now}-${Math.random().toString(36).slice(2, 7)}`,
+    text,
+    dueAt: input.dueAt,
+    done: false,
+    source: input.source ?? "voice",
+    deferredCount: 0,
+    createdAt: input.now,
+  };
+}
+
+/**
+ * Minutes from the reminder's due time to the spoken confirmation.
+ * `null` when the task had no deadline — never 0, because "no reminder was due"
+ * is not "confirmed instantly" (see BehaviourDaily's null contract).
+ */
+export function confirmDelayMin(task: Task, at: number): number | null {
+  if (task.dueAt === undefined) return null;
+  return Math.max(0, Math.round((at - task.dueAt) / 60_000));
+}
+
+export interface DoneResult {
+  task: Task;
+  /** it was already marked done — the caller should say so out loud */
+  alreadyDone: boolean;
+  /** minutes since the earlier confirmation (null when not done before) */
+  elapsedMin: number | null;
+  /** delay vs. dueAt for THIS confirmation; null when there was no deadline */
+  delayMin: number | null;
+}
+
+/**
+ * Idempotent completion. A second "我食咗药" 30 minutes later must NOT create a
+ * second confirmation — it must be flagged so the assistant can say
+ * "你 20 分钟前已确认过".
+ */
+export function markDone(task: Task, at: number): DoneResult {
+  if (task.done && task.doneAt !== undefined) {
+    return {
+      task,
+      alreadyDone: true,
+      elapsedMin: Math.max(0, Math.round((at - task.doneAt) / 60_000)),
+      delayMin: confirmDelayMin(task, task.doneAt),
+    };
+  }
+  const done: Task = { ...task, done: true, doneAt: at };
+  return { task: done, alreadyDone: false, elapsedMin: null, delayMin: confirmDelayMin(task, at) };
+}
+
+/** The senior pushed it back — an executive-function signal, not a failure. */
+export function deferTask(task: Task): Task {
+  return { ...task, deferredCount: task.deferredCount + 1 };
+}
+
+export function openTasks(tasks: Task[]): Task[] {
+  return tasks.filter((t) => !t.done);
+}
+
+/** Most recent still-open task; used by "我食咗药" when no id was spoken. */
+export function latestOpenTask(tasks: Task[], prefer?: (t: Task) => boolean): Task | null {
+  const open = openTasks(tasks);
+  const pool = prefer ? open.filter(prefer) : open;
+  if (pool.length === 0) return null;
+  return pool.reduce((a, b) => (b.createdAt >= a.createdAt ? b : a));
+}
+
+export function isOverdue(task: Task, now: number): boolean {
+  return !task.done && task.dueAt !== undefined && task.dueAt <= now;
+}
+
+/** Local calendar day key "YYYY-MM-DD" (never UTC — the senior lives in HKT). */
+export function dayKey(at: number): string {
+  const d = new Date(at);
+  const m = `${d.getMonth() + 1}`.padStart(2, "0");
+  const day = `${d.getDate()}`.padStart(2, "0");
+  return `${d.getFullYear()}-${m}-${day}`;
+}
+
+export interface DayStats {
+  dueCount: number;
+  doneCount: number;
+  deferredCount: number;
+  /** null when nothing was due — the caller must not substitute 0 */
+  completionRate: number | null;
+  timeoutRate: number | null;
+  avgConfirmDelayMin: number | null;
+}
+
+/**
+ * One-day rollup; maps 1:1 onto BehaviourDaily's task fields.
+ * A task counts for the day it was DUE (not the day it was created), because
+ * the behaviour signal is "did he act on the reminder".
+ */
+export function taskStatsForDay(tasks: Task[], day: string): DayStats {
+  const due = tasks.filter((t) => t.dueAt !== undefined && dayKey(t.dueAt) === day);
+  const done = due.filter((t) => t.done);
+  const delays = done
+    .map((t) => (t.doneAt === undefined ? null : confirmDelayMin(t, t.doneAt)))
+    .filter((x): x is number => x !== null);
+
+  return {
+    dueCount: due.length,
+    doneCount: done.length,
+    deferredCount: due.reduce((sum, t) => sum + t.deferredCount, 0),
+    completionRate: due.length === 0 ? null : done.length / due.length,
+    timeoutRate: due.length === 0 ? null : (due.length - done.length) / due.length,
+    avgConfirmDelayMin:
+      delays.length === 0 ? null : Math.round((delays.reduce((a, b) => a + b, 0) / delays.length) * 10) / 10,
+  };
+}

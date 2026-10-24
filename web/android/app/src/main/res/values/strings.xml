@@ -4,4 +4,12 @@
     <string name="title_activity_main">湾区灵犀</string>
     <string name="package_name">com.auragba.app</string>
     <string name="custom_url_scheme">com.auragba.app</string>
+
+    <!-- Native shell copy (W3). Deliberately next to app_name: a rename becomes
+         one edit here plus the backend/JS strings, no Java touch. -->
+    <string name="widget_sos">SOS 求助</string>
+    <string name="widget_description">今日待办与一键求助</string>
+    <string name="notif_channel_daily">每日提醒</string>
+    <string name="notif_channel_daily_desc">每日定时问候与提醒</string>
+    <string name="notif_daily_body">我喺度，倾两句？</string>
 </resources>
