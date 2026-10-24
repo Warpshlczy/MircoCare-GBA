@@ -1,4 +1,4 @@
-// Shared domain types for AuraGBA. No runtime logic lives here.
+// Shared domain types for MemoMate. No runtime logic lives here.
 
 export type Locale = "zh-HK" | "zh-MO" | "zh-CN";
 
@@ -94,6 +94,22 @@ export interface SosAck {
   notified: string[];
   channel: "outbox";
   delivered: boolean;
+}
+
+/**
+ * One crossing of the home fence (mirrors `GeofenceEvent` in contract.py:74).
+ * Event-shaped, not a daily rollup: the time point IS the signal, so the backend
+ * stores one doc per id and a replay overwrites instead of counting twice.
+ * Deliberately carries no coordinate — distance from home is all the family
+ * needs to act, and a trail of positions is the highest-risk data we could keep.
+ */
+export interface GeofenceEvent {
+  id: string;
+  at: number;
+  kind: "exit" | "enter";
+  distanceM: number;
+  /** set on `enter` only: how long that outing lasted */
+  minutesAway?: number;
 }
 
 export interface HealthCard {

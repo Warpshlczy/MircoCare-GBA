@@ -1,10 +1,10 @@
-// api.ts — authenticated backend endpoints for the AuraGBA apps.
+// api.ts — authenticated backend endpoints for the MemoMate apps.
 
 import type {
   GaitWindow, ScreeningSession, SosEvent, SosAck, HealthCard, Locale, AgentCard,
   AgentIntentRequest, AgentTurnRequest, AgentTurnResponse, TelemetryEvent,
   ConversationTurn, MedicationPlan, MedicationPlanRequest, ReminderKind,
-  BehaviourDaily, CircadianDaily, DigitalSkillDaily, TaskEvent,
+  BehaviourDaily, CircadianDaily, DigitalSkillDaily, TaskEvent, GeofenceEvent,
 } from "./types";
 
 export interface AssistantMessage { role: "system" | "user" | "assistant"; content: string; }
@@ -237,4 +237,13 @@ export async function postBehaviourDaily(body: {
 /** One task transition. 204, keyed by `event.id` server-side (safe to replay). */
 export async function postTaskEvent(event: TaskEvent): Promise<void> {
   await request<void>("/task/events", { method: "POST", body: JSON.stringify(event) });
+}
+
+/**
+ * One fence crossing. 204, idempotent per `event.id`. The backend dispatches it
+ * with `kind="geofence"`, i.e. the same channel as SOS but a different queue —
+ * a visit to the market must never sit in the family's emergency list.
+ */
+export async function postGeofenceEvent(event: GeofenceEvent): Promise<void> {
+  await request<void>("/geofence/events", { method: "POST", body: JSON.stringify(event) });
 }
