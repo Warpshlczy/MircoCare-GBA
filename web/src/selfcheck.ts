@@ -487,6 +487,7 @@ assert.equal(magnitude(3, 4, 0), 5);
   assert.ok(gaitHook.includes("recordGaitForBehaviour("), "gait windows feed the behaviour accumulator");
   assert.ok(page.includes("careForSenior(") && page.includes("saveCareCounters("), "silence care uses B's baseline wording");
   assert.ok(page.includes("setHome("), "the fence has an explicit home confirmation");
+  assert.ok(page.includes("recordInteractionForBehaviour("), "button taps reach B's behaviour counter");
 
   // Walk src/: no old brand left (native.ts's default title belongs to B0), and
   // nothing the assistant can say blames the senior.

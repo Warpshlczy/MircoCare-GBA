@@ -33,6 +33,7 @@ import { planForeground, shouldRaiseSos, SOS_EVENT } from "@/lib/foreground";
 import { dayKey } from "@/lib/tasks";
 import { careForSenior, saveCareCounters } from "@/lib/careStore";
 import { setHome } from "@/lib/geofenceStore";
+import { recordInteractionForBehaviour } from "@/lib/behaviourStore";
 import type { CareCounters } from "@/lib/care";
 import {
   emptyProactiveRecord,
@@ -326,6 +327,8 @@ export default function Page() {
   const noteInteraction = (source: "voice" | "text" | "button" | "interview") => {
     saveProactive({ ...proRef.current, lastInteractionAt: Date.now() });
     bumpCare("interactions");
+    // B's behaviour counter sees taps; conversation memory does not.
+    void recordInteractionForBehaviour(Date.now());
     track("interaction", locale, { source });
   };
 
