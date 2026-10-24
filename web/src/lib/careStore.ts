@@ -32,6 +32,7 @@ import {
 } from "./care.ts";
 import type { CareCounters } from "./care.ts";
 import { addDays } from "./behaviour.ts";
+import { readAccumulator } from "./behaviourStore.ts";
 import { all, del, get, put } from "./db.ts";
 import { dayKey } from "./tasks.ts";
 import type { Locale } from "./types";
@@ -107,14 +108,31 @@ export async function readCareBaseline(now: number, windowDays = BASELINE.window
 }
 
 /**
+ * Falls are the strongest signal and the one counter the UI cannot know: the
+ * gait window is deleted from IndexedDB the moment it uploads, so a page-level
+ * counter would miss everything uploaded earlier in the day. The accumulator in
+ * behaviourStore already dedupes per window, so we borrow it instead of asking
+ * the UI to keep a second tally.
+ *
+ * Absent when nothing was observed today — "no gait window" is not "no fall".
+ */
+async function withLocalFalls(today: Partial<CareCounters>, now: number): Promise<Partial<CareCounters>> {
+  if (today.fallEvents !== null && today.fallEvents !== undefined) return today;
+  const acc = await readAccumulator(dayKey(now)).catch(() => null);
+  if (!acc || acc.ids.length === 0) return today;
+  return { ...today, fallEvents: acc.fallEvents };
+}
+
+/**
  * The line to SAY, or null when there is nothing worth interrupting him about.
  * Records today's counters first, so the baseline grows even on days when no
  * signal fires — otherwise a good week would never become the reference.
  */
 export async function careForSenior(today: Partial<CareCounters>, locale: Locale, now = Date.now()): Promise<string | null> {
-  await saveCareCounters(today, now);
+  const full = await withLocalFalls(normalizeCounters(today), now);
+  await saveCareCounters(full, now);
   const baseline = await readCareBaseline(now);
-  return careLine(careSignals({ today: normalizeCounters(today), baseline }), locale);
+  return careLine(careSignals({ today: full, baseline }), locale);
 }
 
 /** What the family sees: an observation plus a suggestion, never a condition. */
@@ -123,9 +141,10 @@ export async function careForCaregiver(
   locale: Locale,
   now = Date.now()
 ): Promise<string | null> {
-  await saveCareCounters(today, now);
+  const full = await withLocalFalls(normalizeCounters(today), now);
+  await saveCareCounters(full, now);
   const baseline = await readCareBaseline(now);
-  return caregiverLine(careSignals({ today: normalizeCounters(today), baseline }), locale);
+  return caregiverLine(careSignals({ today: full, baseline }), locale);
 }
 
 /** Diagnostics: which days the device actually has counters for. */
