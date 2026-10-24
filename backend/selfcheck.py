@@ -9,6 +9,7 @@ breaks. Pure/engine-level only — it does not boot a server.
 from __future__ import annotations
 
 import io
+import logging
 import math
 import os
 import sys
@@ -41,7 +42,10 @@ from auragba.contract import (  # noqa: E402
 )
 from auragba.crypto import decrypt_text, encrypt_text  # noqa: E402
 from auragba.economics import estimate as economics  # noqa: E402
-from auragba.llm.turn import needs_confirm, plan_turn, sanitize_calls  # noqa: E402
+from auragba.llm.turn import (  # noqa: E402
+    from_llm_message, needs_confirm, plan_turn, sanitize_calls,
+)
+from auragba.llm.errors import LLMUpstreamError  # noqa: E402
 from auragba.model import (  # noqa: E402
     late_fusion, load_stream, score_acoustic, score_behavior, score_semantic,
 )
@@ -186,6 +190,89 @@ assert len(sanitize_calls(
 
 _confirm = needs_confirm([ToolCall(name="call_contact", args={"name": "阿明"})], "zh-CN")
 assert _confirm is not None and _confirm.callIndex == 0 and "阿明" in _confirm.question
+
+# --- C3: real planner message validation + model fallback --------------------
+_llm_req = _turn("帮我记住买药")
+_llm_schemas = {name: schema for name, _, schema in (t.normalized() for t in _TURN_TOOLS)}
+
+_ok = from_llm_message(
+    {"content": "好，我帮你记住。",
+     "tool_calls": [{"function": {"name": "create_task", "arguments": "{\"text\":\"买药\"}"}}]},
+    _llm_req, _llm_schemas,
+)
+assert _ok.calls and _ok.calls[0].name == "create_task" and _ok.calls[0].args["text"] == "买药"
+
+_unknown = from_llm_message(
+    {"content": "好",
+     "tool_calls": [{"function": {"name": "delete_everything", "arguments": "{}"}},
+                    {"function": {"name": "create_task", "arguments": "{\"text\":\"买药\"}"}}]},
+    _llm_req, _llm_schemas,
+)
+assert _unknown.calls == [], "one illegal call discards the whole plan"
+assert "再" in _unknown.reply
+
+_bad_args = from_llm_message(
+    {"content": "好", "tool_calls": [{"function": {"name": "create_task", "arguments": "not json"}}]},
+    _llm_req, _llm_schemas,
+)
+assert _bad_args.calls == [], "malformed args discard the plan"
+
+_confirm_msg = from_llm_message(
+    {"content": "系咪打畀阿明？",
+     "tool_calls": [{"function": {"name": "call_contact", "arguments": "{\"name\":\"阿明\"}"}}]},
+    _llm_req, _llm_schemas,
+)
+assert _confirm_msg.needsConfirm is not None and _confirm_msg.needsConfirm.callIndex == 0
+
+_many = from_llm_message(
+    {"content": "好",
+     "tool_calls": [{"function": {"name": "create_task", "arguments": "{\"text\":\"%d\"}" % i}}
+                    for i in range(4)]},
+    _llm_req, _llm_schemas,
+)
+assert len(_many.calls) == 3, "calls capped at 3"
+
+_advice = from_llm_message(
+    {"content": "你患有痴呆，建议服用多奈哌齐", "tool_calls": []},
+    _llm_req, _llm_schemas,
+)
+assert "痴呆" not in _advice.reply and "建议服用" not in _advice.reply
+
+import auragba.llm.turn as turn_mod  # noqa: E402
+
+
+class _FakeLLM:
+    def complete_tools(self, messages, tools, timeout=None):
+        assert timeout == settings.llm_turn_timeout_s
+        assert any(t["function"]["name"] == "create_task" for t in tools)
+        return {"content": "好，我帮你记住。",
+                "tool_calls": [{"function": {"name": "create_task",
+                                             "arguments": "{\"text\":\"买药\"}"}}]}
+
+
+class _BoomLLM:
+    def complete_tools(self, messages, tools, timeout=None):
+        raise LLMUpstreamError("boom")
+
+
+_real_settings, _real_client = turn_mod.settings, turn_mod.LLMClient
+try:
+    turn_mod.settings = replace(settings, llm_enabled=True)
+    turn_mod.LLMClient = lambda: _FakeLLM()
+    _planned = plan_turn(_turn("帮我记住买药"), "")
+    assert _planned.calls and _planned.calls[0].name == "create_task", "real planner branch"
+
+    turn_mod.LLMClient = lambda: _BoomLLM()
+    _previous_level = turn_mod.logger.level
+    turn_mod.logger.setLevel(logging.CRITICAL)
+    try:
+        _failed = plan_turn(_turn("帮我记住买药"), "")
+    finally:
+        turn_mod.logger.setLevel(_previous_level)
+    assert _failed.calls == [], "upstream failure must not execute a guessed action"
+finally:
+    turn_mod.settings = _real_settings
+    turn_mod.LLMClient = _real_client
 
 # --- behaviour daily envelope (Issue #2 P1b) ----------------------------------
 _beh = BehaviourDaily(

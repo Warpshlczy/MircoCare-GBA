@@ -71,7 +71,7 @@ def root() -> dict:
             "POST /gait/windows", "POST /screening/sessions", "POST /sos (202)",
             "GET /health-card/me",
             "POST /assistant/chat (configurable)", "POST /agent/cards (configurable)",
-            "POST /agent/turn (mock planner)",
+            "POST /agent/turn (LLM planner; mock fallback)",
             "POST /telemetry/events", "POST /conversation/turns",
             "DELETE /conversation/turns/{id}",
             "POST /behaviour/daily", "POST /task/events", "POST /geofence/events",

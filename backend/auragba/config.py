@@ -90,6 +90,9 @@ class Settings:
     llm_api_key: str = os.getenv("AURA_LLM_API_KEY", "")
     llm_model: str = os.getenv("AURA_LLM_MODEL", "deepseek-chat")
     llm_timeout_s: float = _env_float("AURA_LLM_TIMEOUT_S", 15.0)
+    # Tool planning must answer fast enough for a spoken turn; the client falls
+    # back to a local card/task when this budget is exceeded.
+    llm_turn_timeout_s: float = _env_float("AURA_LLM_TURN_TIMEOUT_S", 6.0)
     llm_max_tokens: int = _env_int("AURA_LLM_MAX_TOKENS", 400)
     llm_daily_quota: int = _env_int("AURA_LLM_DAILY_QUOTA", 200)
 

@@ -27,13 +27,13 @@ class LLMClient:
         if settings.llm_api_key:
             self._headers["Authorization"] = f"Bearer {settings.llm_api_key}"
 
-    def _post(self, payload: dict[str, Any]) -> Any:
+    def _post(self, payload: dict[str, Any], *, timeout: float | None = None) -> Any:
         try:
             import httpx
         except ImportError as exc:
             raise LLMNotConfigured("httpx is not installed") from exc
         try:
-            with httpx.Client(timeout=self.timeout) as client:
+            with httpx.Client(timeout=timeout or self.timeout) as client:
                 return client.post(
                     f"{self.base_url}/chat/completions",
                     headers=self._headers,
@@ -72,6 +72,39 @@ class LLMClient:
 
     def complete_text(self, messages: list[dict[str, str]], *, max_tokens: int | None = None) -> str:
         return self._chat(messages, json_mode=False, max_tokens=max_tokens)
+
+    def complete_tools(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        timeout: float | None = None,
+        max_tokens: int | None = None,
+    ) -> dict[str, Any]:
+        """-> the assistant message dict (content + optional tool_calls).
+
+        Unlike `_chat`, empty content is legal: a tool-only turn carries its
+        action in `tool_calls` and may have no prose.
+        """
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": 0.2,
+            "max_tokens": max_tokens or self.max_tokens,
+        }
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
+        response = self._post(payload, timeout=timeout)
+        if response.status_code >= 400:
+            raise LLMUpstreamError(f"LLM HTTP {response.status_code}")
+        try:
+            message = response.json()["choices"][0]["message"]
+        except (ValueError, KeyError, IndexError, TypeError) as exc:
+            raise LLMUpstreamError("malformed LLM response envelope") from exc
+        if not isinstance(message, dict):
+            raise LLMUpstreamError("malformed LLM message")
+        return message
 
     def complete_json(self, messages: list[dict[str, str]]) -> dict[str, Any]:
         content = self._chat(messages, json_mode=True)

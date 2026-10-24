@@ -229,12 +229,12 @@ def post_task_event(event: TaskEvent, dev: str = Depends(device_id)) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Agent turn — the mock planner is always on so B can integrate before the model
-# is wired. The guardrails inside are final; C3 only replaces the planning step.
+# Agent turn — real tool planning when the model is configured, deterministic
+# mock otherwise. Guardrails are identical on both paths.
 # --------------------------------------------------------------------------- #
 @router.post("/agent/turn")
 def agent_turn(req: AgentTurnRequest, dev: str = Depends(device_id)) -> AgentTurnResponse:
-    return llm_turn.plan_turn(req)
+    return llm_turn.plan_turn(req, dev)
 
 
 # --------------------------------------------------------------------------- #

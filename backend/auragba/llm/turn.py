@@ -1,24 +1,34 @@
-"""Agent-turn orchestration — P2 mock planner plus the guardrails that are final.
+"""Agent-turn orchestration — real LLM tool planning plus final guardrails.
 
-The real model call arrives with C3; everything in this module already owns the
-rules that must never depend on the model or on client-side validation:
+When a model is configured (`AURA_LLM_ENABLED=true`), the planner asks it for
+OpenAI-style tool calls; otherwise it falls back to the deterministic
+`create_task` mock so B can keep integrating without an API key.
+
+Everything else is final and model-independent:
 
 * emergency language short-circuits to a single ``sos`` call;
 * money / credential requests never become tool calls;
-* unknown tool names and bad arguments are dropped;
+* unknown tool names and bad arguments discard ALL calls;
 * ``confirm``-risk tools come back with a spoken confirmation question;
 * at most three calls.
 
-`ponytail:` the planner is a fixed ``create_task`` echo so B can exercise the
-client chain with ``dryRun()``. Replace only ``_plan`` with the LLM call later.
+On upstream failure or quota exhaustion the response carries no calls — the
+senior hears "say that again" rather than a guessed action.
 """
 
 from __future__ import annotations
 
+import json
+import logging
 from typing import Any, Iterable
 
+from ..config import settings
 from ..contract import AgentTurnRequest, AgentTurnResponse, NeedsConfirm, ToolCall
-from . import safety
+from . import prompts, safety, usage
+from .client import LLMClient
+from .errors import LLMInvalidOutput, LLMNotConfigured, LLMQuotaExceeded, LLMUpstreamError
+
+logger = logging.getLogger("auragba.llm.turn")
 
 MAX_CALLS = 3
 
@@ -140,14 +150,104 @@ def needs_confirm(calls: list[ToolCall], locale: str) -> NeedsConfirm | None:
     return None
 
 
-def _plan(req: AgentTurnRequest, schemas: dict[str, dict[str, Any]]) -> list[Any]:
-    """P2 mock: echo the senior's words into one `create_task` call."""
+def _mock_plan(req: AgentTurnRequest, schemas: dict[str, dict[str, Any]]) -> list[Any]:
+    """Deterministic planner used when no model is configured (P2 contract)."""
     if "create_task" not in schemas:
         return []
     return [{"name": "create_task", "args": {"text": req.utterance.strip()}}]
 
 
-def plan_turn(req: AgentTurnRequest) -> AgentTurnResponse:
+def _safe_reply(locale: str) -> str:
+    return _RETRY.get(locale, _RETRY["zh-CN"])
+
+
+def _declaration(tool: Any) -> dict[str, Any] | None:
+    """Client declaration -> OpenAI tool wrapper (name/description/schema only)."""
+    name, description, schema = tool.normalized()
+    if not name:
+        return None
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": description,
+            "parameters": schema or {"type": "object", "properties": {}},
+        },
+    }
+
+
+def from_llm_message(
+    message: dict[str, Any],
+    req: AgentTurnRequest,
+    schemas: dict[str, dict[str, Any]],
+) -> AgentTurnResponse:
+    """Validate one assistant message. Any illegal call discards ALL calls.
+
+    The model must never be able to smuggle in an unregistered tool or malformed
+    arguments: if even one call fails validation, the safe outcome is "say that
+    again" with zero actions, not a partial plan.
+    """
+    locale = req.locale
+    raw_content = message.get("content")
+    reply = raw_content.strip() if isinstance(raw_content, str) else ""
+
+    raw_calls = message.get("tool_calls") or []
+    if not isinstance(raw_calls, list):
+        raw_calls = []
+
+    parsed: list[dict[str, Any]] = []
+    invalid = False
+    for item in raw_calls:
+        function = item.get("function") if isinstance(item, dict) else None
+        if not isinstance(function, dict):
+            invalid = True
+            continue
+        name = str(function.get("name") or "")
+        raw_args = function.get("arguments")
+        try:
+            args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+        except (TypeError, ValueError):
+            args = None
+        if not isinstance(args, dict):
+            invalid = True
+            args = {}
+        parsed.append({"name": name, "args": args})
+
+    # Truncation to MAX_CALLS is allowed, but a dropped call (unknown name /
+    # invalid args) means the model lied about the registry, so the whole plan is
+    # discarded.
+    if invalid or any(
+        call["name"] not in schemas or not _valid_args(call["args"], schemas[call["name"]])
+        for call in parsed
+    ):
+        return AgentTurnResponse(reply=_safe_reply(locale))
+    kept = [ToolCall(name=call["name"], args=dict(call["args"])) for call in parsed[:MAX_CALLS]]
+
+    filtered = safety.filter_chat_reply(reply, locale) if reply else ""
+    if not kept:
+        return AgentTurnResponse(reply=filtered or _safe_reply(locale))
+    return AgentTurnResponse(
+        reply=filtered or _REPLY.get(locale, _REPLY["zh-CN"]),
+        calls=kept,
+        needsConfirm=needs_confirm(kept, locale),
+    )
+
+
+def _plan_with_llm(
+    req: AgentTurnRequest, device_id: str, schemas: dict[str, dict[str, Any]]
+) -> AgentTurnResponse:
+    if device_id:
+        usage.reserve(device_id)
+    tools = [decl for decl in (_declaration(tool) for tool in req.tools) if decl]
+    message = LLMClient().complete_tools(
+        prompts.agent_turn_messages(req),
+        tools,
+        timeout=settings.llm_turn_timeout_s,
+    )
+    return from_llm_message(message, req, schemas)
+
+
+def plan_turn(req: AgentTurnRequest, device_id: str = "") -> AgentTurnResponse:
     text = (req.utterance or "").strip()
     locale = req.locale
 
@@ -158,13 +258,30 @@ def plan_turn(req: AgentTurnRequest) -> AgentTurnResponse:
             calls=[ToolCall(name="sos", args={"reason": "voice_emergency"})],
         )
     if not text or is_forbidden(text):
-        reply = _RETRY.get(locale, _RETRY["zh-CN"]) if not text else _REFUSE.get(locale, _REFUSE["zh-CN"])
+        reply = _safe_reply(locale) if not text else _REFUSE.get(locale, _REFUSE["zh-CN"])
         return AgentTurnResponse(reply=reply)
 
     schemas = registry(req)
-    calls = sanitize_calls(_plan(req, schemas), schemas)
+    if settings.llm_available:
+        try:
+            return _plan_with_llm(req, device_id, schemas)
+        except LLMNotConfigured:
+            logger.info("agent turn: model unavailable, using mock planner")
+            return _mock_turn(req, schemas)
+        except LLMQuotaExceeded:
+            logger.warning("agent turn: daily quota exhausted, returning no calls")
+            return AgentTurnResponse(reply=_safe_reply(locale))
+        except (LLMUpstreamError, LLMInvalidOutput):
+            logger.warning("agent turn: model failed, returning no calls")
+            return AgentTurnResponse(reply=_safe_reply(locale))
+    return _mock_turn(req, schemas)
+
+
+def _mock_turn(req: AgentTurnRequest, schemas: dict[str, dict[str, Any]]) -> AgentTurnResponse:
+    locale = req.locale
+    calls = sanitize_calls(_mock_plan(req, schemas), schemas)
     if not calls:
-        return AgentTurnResponse(reply=_RETRY.get(locale, _RETRY["zh-CN"]))
+        return AgentTurnResponse(reply=_safe_reply(locale))
     return AgentTurnResponse(
         reply=_REPLY.get(locale, _REPLY["zh-CN"]),
         calls=calls,
