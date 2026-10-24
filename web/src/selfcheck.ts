@@ -88,17 +88,23 @@ import {
   careSignals,
   careLine,
   caregiverLine,
+  caregiverLineFromTrend,
   carePrompt,
   mentionsDiagnosis,
+  mentionsPain,
+  countPainMentions,
+  hearingProxyFrom,
   medianOrNull,
   baselineFrom,
   normalizeCounters,
   CARE,
+  CARE_DAY_PREFIX,
   CARE_KEYS,
   BASELINE,
   DIAGNOSIS_WORDS,
+  PAIN_WORDS,
 } from "./lib/care.ts";
-import type { CareSignal } from "./lib/care.ts";
+import type { CareSignal, InteractionTrend } from "./lib/care.ts";
 import { planForeground, shouldRaiseSos, SOS_EVENT, SOS_DEBOUNCE_MS } from "./lib/foreground.ts";
 import {
   TOOLS,
@@ -1387,6 +1393,79 @@ assert.equal(magnitude(3, 4, 0), 5);
   assert.ok(DIAGNOSIS_WORDS.length > 5);
 }
 
+// --- pain vocabulary: the counter A asked for in issue #1 --------------------
+{
+  // `careCue` answers "stop the interview"; pain is a separate question. A was
+  // right that `sad`/`tired` must never be read as bodily discomfort.
+  assert.equal(mentionsPain("我今日個頭好痛"), true);
+  assert.equal(mentionsPain("条腰疼了几天"), true);
+  assert.equal(mentionsPain("有啲頭暈"), true);
+  assert.equal(mentionsPain("食唔落飯"), true);
+  assert.equal(mentionsPain("今天有点发烧"), true);
+  assert.equal(mentionsPain("我冇事"), false);
+  assert.equal(mentionsPain("今日好開心"), false);
+  assert.equal(mentionsPain(""), false);
+
+  // Negation is stripped first — 「我唔痛」 contains 痛, and reporting pain for
+  // the sentence that denies it is the one error that ruins every later alert.
+  assert.equal(mentionsPain("唔痛"), false);
+  assert.equal(mentionsPain("我而家唔痛喇"), false);
+  assert.equal(mentionsPain("不痛了"), false);
+  assert.equal(mentionsPain("沒有不舒服"), false);
+  assert.equal(mentionsPain("我冇唔舒服"), false);
+  // Longest-first stripping: 「冇唔舒服」 must not leave 「唔舒服」 behind.
+  assert.equal(mentionsPain("医生问我有冇唔舒服，我话冇"), false);
+  // A genuine complaint survives even next to an unrelated negation.
+  assert.equal(mentionsPain("我唔痛，但係個肚唔舒服"), true);
+
+  // Mood words are NOT pain — the misreading this split exists to prevent.
+  assert.equal(mentionsPain("我今日好唔開心"), false);
+  assert.equal(mentionsPain("好攰"), false);
+
+  // A day nobody spoke is null, not zero.
+  assert.equal(countPainMentions([]), null);
+  assert.equal(countPainMentions(["", "   "]), null);
+  assert.equal(countPainMentions(["今日好痛", "冇事", "唔痛"]), 1);
+  assert.equal(countPainMentions(["頭痛", "肚痛", "腳痛"]), 3);
+  assert.ok(PAIN_WORDS.length >= 10, "the list must cover the common ways he says it");
+}
+
+// --- hearing proxy: report-only, and null when nothing was measured ----------
+{
+  assert.equal(hearingProxyFrom({ interactions: 10, unheard: 1 }), 0.9);
+  assert.equal(hearingProxyFrom({ interactions: 4, unheard: 1 }), 0.75);
+  assert.equal(hearingProxyFrom({ interactions: 10, unheard: 10 }), 0);
+  // Nothing measured -> null. 0 would claim "he could not be heard at all".
+  assert.equal(hearingProxyFrom({}), null);
+  assert.equal(hearingProxyFrom({ interactions: 0, unheard: 0 }), null);
+  assert.equal(hearingProxyFrom({ interactions: 5 }), null, "a missing denominator is not a rate");
+  // Never negative, never > 1 (unheard can exceed interactions after a recount).
+  assert.equal(hearingProxyFrom({ interactions: 2, unheard: 5 }), 0);
+}
+
+// --- caregiver copy over C's interactionTrend -------------------------------
+{
+  const trend: InteractionTrend = { today: 2, baselineMedian: 8, deltaPct: -0.75, decreased: true, samples: 6 };
+  for (const locale of ["zh-HK", "zh-MO", "zh-CN"] as const) {
+    const line = caregiverLineFromTrend(trend, locale) ?? "";
+    assert.ok(line.includes("2") && line.includes("8"), `${locale} must carry both numbers: ${line}`);
+    assert.equal(mentionsDiagnosis(line), false, `${locale} trend copy must not diagnose: ${line}`);
+  }
+  assert.ok((caregiverLineFromTrend(trend, "zh-CN") ?? "").includes("75"), "the drop is quantified");
+  // Not a drop -> nothing to say. A normal week must not generate a warning.
+  assert.equal(caregiverLineFromTrend({ ...trend, decreased: false }, "zh-HK"), null);
+  assert.equal(caregiverLineFromTrend(null, "zh-HK"), null);
+  // A zero baseline has no percentage; the line still reads as a sentence.
+  const zeroBase = caregiverLineFromTrend({ today: 0, baselineMedian: 0, deltaPct: null, decreased: true, samples: 5 }, "zh-HK");
+  assert.ok(zeroBase && !zeroBase.includes("%"), "no percentage when the baseline is zero");
+}
+
+// --- one definition of the care-day key ------------------------------------
+{
+  assert.equal(CARE_DAY_PREFIX, "care_day.");
+  assert.ok(!CARE_DAY_PREFIX.includes("YYYY"), "the prefix is a literal, not a template");
+}
+
 // --- foreground decision table (B / W3 consumption side) --------------------
 {
   for (const reason of FOREGROUND_REASONS) {
@@ -1692,6 +1771,10 @@ assert.equal(magnitude(3, 4, 0), 5);
   assert.equal(step.event?.kind, "exit");
   assert.equal(step.event?.distanceM, 1200, "the family sees a distance, not a track");
   assert.equal(step.event?.id, `gf-exit-${t0 + 61 * 60_000}`, "id is derived from the sample time");
+  // `minutesAway` exists ONLY on `enter`: at exit time nobody knows how long the
+  // trip will last. C's weekly report reads it off `exit` (issue #4 P1) and gets
+  // nothing — this assertion is the contract, not an implementation detail.
+  assert.equal("minutesAway" in (step.event ?? {}), false, "an exit cannot know how long the outing lasts");
   assert.equal(step.presence.lastAlertAt, t0 + 61 * 60_000);
 
   // Coming back needs the 5s dwell first (GPS jitter), and only then closes

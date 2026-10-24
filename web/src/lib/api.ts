@@ -147,6 +147,22 @@ export interface CaregiverOverview {
   }[];
   /** C's baseline-level flag; `null` means "unknown", never "sufficient". */
   sufficient?: boolean | null;
+  /**
+   * Interaction drop over uploaded (closed) days. `null` when fewer than 3
+   * baseline days exist — see C's reply in issue #2 §4 for the exact rules:
+   * `today` is the latest CLOSED day, `baselineMedian` excludes it, and
+   * `deltaPct` is `null` when the median is 0.
+   *
+   * Phrase it with `care.ts#caregiverLineFromTrend()`; the BACKEND decides
+   * whether it dropped, this client only says it.
+   */
+  interactionTrend?: {
+    today: number;
+    baselineMedian: number;
+    deltaPct: number | null;
+    decreased: boolean;
+    samples: number;
+  } | null;
   screeningSessions?: { id?: string; at?: number; durationMs?: number; speechRatio?: number }[];
   activityTrend: { endedAt?: number; steps?: number; cadence?: number; fall?: boolean }[];
   alerts: { id?: string; at?: number; reason?: string; status?: string }[];

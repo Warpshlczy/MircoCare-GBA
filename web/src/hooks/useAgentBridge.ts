@@ -30,7 +30,7 @@ import { appendTurn, isLlmReady, runTurn } from "@/lib/agent";
 import type { RecentTurn } from "@/lib/agent";
 import { getHealth, postAgentTurn } from "@/lib/api";
 import { flushClosedDay } from "@/lib/behaviourStore";
-import { pruneCareHistory } from "@/lib/careStore";
+import { pruneCareHistory, markCareDayOpened, MEASURED_DWELL_MS } from "@/lib/careStore";
 import { startFenceWatch } from "@/lib/geofenceStore";
 import { bridge } from "@/lib/native";
 import { flushOutboxOnce, startOutboxAutoFlush } from "@/lib/outboxRunner";
@@ -138,6 +138,27 @@ export function useAgentBridge(deps: AgentBridgeDeps): AgentBridge {
     // protected broadcast and the WebView is asleep exactly when we need it.
     void bridge()?.startCircadian().catch(() => {});
 
+    // A day the app was OPEN but quiet is still a measured day.
+    //
+    // Without this, `care_day.<day>` only exists for days the senior talked or
+    // tapped, so the 14-day median is built from talkative days only — raising
+    // the reference until an ordinary quiet day looks like withdrawal. A said
+    // in issue #1 that this makes the 5-day baseline arrive late; measuring it
+    // here means A does not have to add anything to page.tsx.
+    //
+    // The dwell gate (60s of visible time) is what keeps a pocket mistap from
+    // writing a 0 into his baseline. Idempotent per day: safe to call every tick.
+    let visibleMs = 0;
+    let visibleSince = typeof document !== "undefined" && document.visibilityState === "visible" ? Date.now() : 0;
+    const tickDwell = () => {
+      const now = Date.now();
+      if (visibleSince) visibleMs += now - visibleSince;
+      visibleSince = typeof document !== "undefined" && document.visibilityState === "visible" ? now : 0;
+      if (visibleMs >= MEASURED_DWELL_MS) void markCareDayOpened(now);
+    };
+    const dwellTimer = typeof window === "undefined" ? null : window.setInterval(tickDwell, 30_000);
+    if (typeof document !== "undefined") document.addEventListener("visibilitychange", tickDwell);
+
     // One closed day at most per open. Runs after the first flush attempt so an
     // item left over from last night goes out before we enqueue a new one.
     void (async () => {
@@ -154,6 +175,9 @@ export function useAgentBridge(deps: AgentBridgeDeps): AgentBridge {
     return () => {
       stopQueue();
       stopFence();
+      if (dwellTimer !== null) window.clearInterval(dwellTimer);
+      if (typeof document !== "undefined") document.removeEventListener("visibilitychange", tickDwell);
+      tickDwell(); // bank the last visible stretch before unmount
     };
   }, []);
 
