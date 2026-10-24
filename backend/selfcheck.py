@@ -718,6 +718,10 @@ with tempfile.TemporaryDirectory() as tmp:
                "distanceM": 12.0, "minutesAway": 45.0})
     st.record("dev-rep", "geofence_events",
               {"id": "gf3", "at": now_ms - 3_800_000, "kind": "exit", "distanceM": 40.0})
+    # A short trip still counts as an outing; it just never pages the family.
+    st.record("dev-rep", "geofence_events",
+              {"id": "gf4", "at": now_ms - 3_700_000, "kind": "exit",
+               "distanceM": 30.0, "alert": False})
     st.record("dev-rep", "reminder_escalations",
               {"id": "r1", "at": now_ms - 7_200_000, "locale": "zh-CN", "kind": "med",
                "stage": "notify-caregiver"})
@@ -778,11 +782,11 @@ with tempfile.TemporaryDirectory() as tmp:
     activity_section = next(s for s in report.sections if s.key == "activity")
     assert "代理指标" in activity_section.note
     assert any(
-        c.label == "听力/视觉代理" and "0.72" in c.value and "—" in c.value
+        c.label == "听力/视觉代理" and "能听清 72%" in c.value and "能看清 —" in c.value
         for c in activity_section.counts
-    ), "report-only proxies appear once, with missing side as dash"
+    ), "proxies are shown as 'can hear %' (higher is better), missing side as dash"
     _activity_counts = {c.label: c.value for c in activity_section.counts}
-    assert _activity_counts["外出次数"] == "2 次", "only exit events count as outings"
+    assert _activity_counts["外出次数"] == "3 次", "every exit counts, alerted or not"
     assert _activity_counts["外出时长"] == "45 分钟（1 次）", "minutesAway lives on enter, not exit"
 
     import auragba.reports.weekly as weekly_mod  # noqa: E402
@@ -990,6 +994,40 @@ with tempfile.TemporaryDirectory() as tmp:
     finally:
         contract_routes.store = _real_contract_store
     assert len(st.history("dev-t", "telemetry")) == 1, "replayed telemetry must be ingested once"
+
+# --- geofence: `alert=false` stays silent but still feeds the weekly count ----
+with tempfile.TemporaryDirectory() as tmp:
+    st = Store(Path(tmp))
+    _real_geo_store = contract_routes.store
+    _real_notify = contract_routes.notify_dispatch
+    _notified: list[dict] = []
+    contract_routes.store = st
+    contract_routes.notify_dispatch = lambda dev, kind, payload: _notified.append(payload) or []
+    _gf_now = int(time.time() * 1000)
+    try:
+        _quiet = GeofenceEvent(
+            id="gf-quiet", at=_gf_now, kind="exit", distanceM=30.0, alert=False
+        )
+        contract_routes.post_geofence_event(_quiet, "dev-gf")
+        # The same crossing escalates at the away threshold: page once, one row.
+        contract_routes.post_geofence_event(
+            GeofenceEvent(id="gf-quiet", at=_gf_now, kind="exit", distanceM=30.0, alert=True),
+            "dev-gf",
+        )
+        # A late silent replay must not downgrade or duplicate the alert.
+        contract_routes.post_geofence_event(_quiet, "dev-gf")
+        contract_routes.post_geofence_event(
+            GeofenceEvent(id="gf-loud", at=_gf_now + 1000, kind="exit", distanceM=620.0),
+            "dev-gf",
+        )
+    finally:
+        contract_routes.store = _real_geo_store
+        contract_routes.notify_dispatch = _real_notify
+    assert [p["id"] for p in _notified] == ["gf-quiet", "gf-loud"], "only escalations page the family"
+    rows = st.history("dev-gf", "geofence_events")
+    assert len(rows) == 2 and all(r["alert"] is True for r in rows), (
+        "one row per outing; the silent start is replaced by the escalation"
+    )
 
 # --- interaction trend: latest closed day vs the senior's own median ----------
 with tempfile.TemporaryDirectory() as tmp:

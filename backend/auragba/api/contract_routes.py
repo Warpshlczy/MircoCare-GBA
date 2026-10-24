@@ -131,11 +131,32 @@ def post_geofence_event(event: GeofenceEvent, dev: str = Depends(device_id)) -> 
 
     Kept separate from `/sos`: a walk out of the fence can happen several times a
     day and must not flood the family's emergency queue. Stored per event id so
-    an outbox replay is idempotent; the family notice goes through the same
-    `notify.dispatch` seam with a different `kind`.
+    an outbox replay is idempotent.
+
+    `alert` separates the two jobs this event serves: every crossing is stored
+    (so the weekly outing count is complete), but only `alert=true` ones page the
+    family. Old clients omit the field and default to True, preserving the old
+    "only long absences produce an event" behaviour.
     """
     key = f"geofence_event:{event.id}"
-    if store.get_doc(dev, key) is None:
+    existing = store.get_doc(dev, key)
+    if existing is None:
+        store.record(dev, "geofence_events", event.model_dump())
+        store.set_doc(dev, key, event.model_dump())
+        if event.alert:
+            notify_dispatch(
+                dev,
+                "geofence",
+                {"id": event.id, "at": event.at, "kind": event.kind,
+                 "distanceM": event.distanceM, "minutesAway": event.minutesAway},
+            )
+        return
+    # The same crossing can arrive twice: silently at departure, then escalated
+    # once the away threshold is crossed. Replace the row (the weekly count must
+    # stay one per outing) and page only on the escalation. Replays of an already
+    # alerted event, and late silent copies, are no-ops.
+    if event.alert and existing.get("alert", True) is False:
+        store.delete_by_id(dev, "geofence_events", event.id)
         store.record(dev, "geofence_events", event.model_dump())
         store.set_doc(dev, key, event.model_dump())
         notify_dispatch(

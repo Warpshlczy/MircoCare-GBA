@@ -121,8 +121,8 @@ _TEXTS: dict[str, dict[str, Any]] = {
             "awayMinutes": "外出时长",
             "awayMinutesValue": "{minutes} 分钟（{n} 次）",
             "proxy": "听力/视觉代理",
-            "proxyValue": "听力 {hearing} / 视觉 {vision}",
-            "proxyNote": "代理指标，非听力学/视力检查；不参与风险分。",
+            "proxyValue": "能听清 {hearing}；能看清 {vision}",
+            "proxyNote": "代理指标，非听力学/视力检查；数值越高表示越常听清/看清，不参与风险分。",
             "note": "外出记录来自手机的家庭围栏事件；时长只写在返家（enter）事件里，没有记录时不显示，不按 0 处理。",
         },
         "advice": {
@@ -248,8 +248,8 @@ _TEXTS: dict[str, dict[str, Any]] = {
             "awayMinutes": "外出時長",
             "awayMinutesValue": "{minutes} 分鐘（{n} 次）",
             "proxy": "聽力/視覺代理",
-            "proxyValue": "聽力 {hearing} / 視覺 {vision}",
-            "proxyNote": "代理指標，非聽力學/視力檢查；不參與風險分。",
+            "proxyValue": "能聽清 {hearing}；能看清 {vision}",
+            "proxyNote": "代理指標，非聽力學/視力檢查；數值越高表示越常聽清/看清，不參與風險分。",
             "note": "外出記錄來自手機的家庭圍欄事件；時長只寫在返家（enter）事件裡，沒有記錄時不顯示，不按 0 處理。",
         },
         "advice": {
@@ -462,6 +462,11 @@ def _count(value: Any) -> str:
     return "—" if value is None else f"{int(value)} 次"
 
 
+def _share(value: Any) -> str:
+    """0..1 report-only proxy -> "72%"; missing stays a dash, never 0."""
+    return "—" if value is None else f"{round(float(value) * 100)}%"
+
+
 def _latest_behaviour(store: Store, device_id: str, start: int, end: int) -> dict[str, Any] | None:
     """Most recent stored rollup inside the report week (today first)."""
     for offset in range(8):
@@ -518,8 +523,7 @@ def _activity_section(
             ReportCount(
                 label=copy["proxy"],
                 value=copy["proxyValue"].format(
-                    hearing="—" if hearing is None else f"{float(hearing):.2f}",
-                    vision="—" if vision is None else f"{float(vision):.2f}",
+                    hearing=_share(hearing), vision=_share(vision)
                 ),
             )
         )

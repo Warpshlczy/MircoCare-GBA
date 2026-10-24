@@ -84,7 +84,12 @@ class GeofenceEvent(_Base):
     at: int
     kind: Literal["exit", "enter"]
     distanceM: float = Field(ge=0)
+    # Only written on `enter` (an exit cannot know how long the outing will last).
     minutesAway: float | None = Field(default=None, ge=0)
+    # Whether this crossing should page the family. B emits every crossing so the
+    # weekly outing count is complete, but only long absences raise an alert.
+    # Old clients omit it -> True preserves the previous "every event alerted".
+    alert: bool = True
 
 
 class RegisterRequest(_Base):
