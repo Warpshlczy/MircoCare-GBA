@@ -1,4 +1,4 @@
-"""AuraGBA (湾区灵犀) backend — multimodal MCI/AD speech-screening engine.
+"""MemoMate (忆伴) backend — multimodal MCI/AD speech-screening engine.
 
 Privacy-first: raw audio and raw sensor streams never leave the device. This
 backend ingests VAD-trimmed derived features (or audio that it extracts-and-burns

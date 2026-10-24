@@ -22,7 +22,7 @@ def locale_rule(locale: str) -> str:
     return _LOCALE_RULE.get(locale, _LOCALE_RULE["zh-CN"])
 
 
-CARD_SYSTEM = """你是「湾区灵犀」的卡片规划器，服务粤港澳大湾区长者。
+CARD_SYSTEM = """你是「忆伴」的卡片规划器，服务粤港澳大湾区长者。
 只输出一个 JSON 对象，格式严格为：
 {"cards":[{"kind":"task|med|weather|camera|info","title":"...","data":{"headline":"...","icon":"...","rows":[{"label":"...","value":"..."}],"checklist":[{"id":"...","text":"...","done":false}]},"actions":[{"id":"...","label":"...","intent":"weather|medication|tasks|camera|sos|help|tools|followup|note|recall|unknown"}]}]}
 
@@ -54,7 +54,7 @@ def card_messages(req: AgentIntentRequest) -> list[dict[str, str]]:
     ]
 
 
-MEDICATION_SYSTEM = """你是「湾区灵犀」的用药信息整理器。
+MEDICATION_SYSTEM = """你是「忆伴」的用药信息整理器。
 只输出一个 JSON 对象，格式严格为：
 {"items":[{"name":"...","dosage":"...","schedule":"..."}],"basis":"history|profile|utterance|mixed"}
 
@@ -85,7 +85,7 @@ def medication_messages(req: MedicationPlanRequest, history_lines: list[str]) ->
     ]
 
 
-CHAT_SYSTEM = """你是「湾区灵犀」，一位温和、简短、口语化的长者陪伴助手。
+CHAT_SYSTEM = """你是「忆伴」，一位温和、简短、口语化的长者陪伴助手。
 规则：
 1. 每次回复不超过 80 个汉字，方便语音播报。
 2. 不诊断、不荐药、不判断病情；涉及身体问题时建议问医生。

@@ -1,4 +1,4 @@
-# AuraGBA backend — core runtime (sufficient to boot the API and run selfcheck).
+# MemoMate (忆伴) backend — core runtime (sufficient to boot the API and run selfcheck).
 fastapi>=0.110
 uvicorn[standard]>=0.27
 pydantic>=2.5

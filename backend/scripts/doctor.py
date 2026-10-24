@@ -1,5 +1,5 @@
 """
-AuraGBA 环境体检脚本（协作用）
+MemoMate (忆伴) 环境体检脚本（协作用）
 
 解决一个协作痛点：`backend/models/`、`backend/data/`、`backend/.env` 都不入库
 （见 .gitignore:25/32/40），克隆下来的仓库是「有代码无产物」。本机究竟缺什么、
@@ -123,7 +123,7 @@ def check_env() -> None:
 
 
 def main() -> int:
-    print(f"AuraGBA doctor  |  interpreter: {sys.executable}\n")
+    print(f"MemoMate doctor  |  interpreter: {sys.executable}\n")
     core_ok = check_core()
     check_heavy()
     check_models()

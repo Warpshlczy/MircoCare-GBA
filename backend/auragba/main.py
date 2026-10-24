@@ -1,4 +1,4 @@
-"""FastAPI application factory for the AuraGBA screening backend.
+"""FastAPI application factory for the MemoMate (忆伴) screening backend.
 
 Run:  uvicorn auragba.main:app --reload --port 8000
 """
@@ -16,7 +16,7 @@ from .config import ENGINE_VERSION, FEATURE_SET_VERSION, settings, validate_runt
 validate_runtime()
 
 _DESCRIPTION = """
-AuraGBA (湾区灵犀) backend — non-invasive MCI/AD screening from everyday speech.
+MemoMate (忆伴) backend — non-invasive MCI/AD screening from everyday speech.
 
 **Privacy-first.** Raw audio and raw sensor streams never leave the device; this
 service ingests VAD-trimmed derived features (or audio it extract-and-burns on the
@@ -27,7 +27,7 @@ review. No automated clinical decisions.
 """
 
 app = FastAPI(
-    title="AuraGBA Screening Engine",
+    title="MemoMate Screening Engine",
     version=ENGINE_VERSION,
     description=_DESCRIPTION,
 )
@@ -49,7 +49,7 @@ app.include_router(caregiver_router)
 @app.get("/", tags=["meta"])
 def root() -> dict:
     return {
-        "name": "AuraGBA Screening Engine",
+        "name": "忆伴 MemoMate",
         "engineVersion": ENGINE_VERSION,
         "featureSetVersion": FEATURE_SET_VERSION,
         "privacyMode": settings.privacy_mode,
