@@ -113,7 +113,17 @@ export interface GeofenceEvent {
   at: number;
   kind: "exit" | "enter";
   distanceM: number;
-  /** set on `enter` only: how long that outing lasted */
+  /**
+   * Set on `enter` ONLY — how long that outing lasted. An `exit` is emitted the
+   * moment the absence becomes an alert, so the trip's length does not exist
+   * yet; a consumer that sums `minutesAway` over `exit` rows always gets zero
+   * (this is exactly the bug in the weekly report, issue #4 P1).
+   *
+   * Consequence worth stating: only outings long enough to page the family
+   * (`awayAlertMs`, currently 60 min) produce a pair of events. A 20-minute
+   * trip to the market leaves no trace, so "outings this week" means "long
+   * outings", not "all outings".
+   */
   minutesAway?: number;
 }
 

@@ -15,6 +15,9 @@
 //    a fence that only works while the app is open is honest about it.
 // 3. Presence is PERSISTED. "Away for 60 minutes" must survive an app restart —
 //    otherwise every cold start resets the clock and the alert never fires.
+// 4. The FIX has two sources: the native shell first, the browser's geolocation
+//    API second. A demo in Chrome has no `bridge()`, and a fence that silently
+//    returns "no-native" there looks broken to everyone in the room.
 //
 // The event goes through the outbox (`enqueue("geofence")`), so an offline
 // evening still reaches the family once the phone reconnects.
@@ -94,10 +97,55 @@ async function readPresence(): Promise<Presence | null> {
 }
 
 export interface FenceSampleResult {
-  /** null when the sample was skipped (no home / no bridge / bad fix) */
+  /** null when the sample was skipped (no home / no location source / bad fix) */
   event: GeofenceEvent | null;
   skipped?: "no-home" | "no-native" | "no-fix" | "inaccurate";
   distanceM?: number;
+  /** which source produced the fix — diagnostics only, never leaves the device */
+  source?: "native" | "browser";
+}
+
+interface Fix {
+  lat: number;
+  lng: number;
+  accuracy: number;
+}
+
+/**
+ * Browser geolocation, shaped like the native call.
+ *
+ * WHY THIS EXISTS: A reported in issue #1 that `bridge()` is null in the
+ * browser, so `sampleFence` returned `skipped: "no-native"` and a demo run on
+ * Chrome produced zero fence events — which reads as "the fence is broken"
+ * rather than "there is no shell". PWA/desktop is how the family screen gets
+ * tested, and the fence math is identical either way.
+ *
+ * `maximumAge` is deliberately generous: a fix up to 4 minutes old is fine for
+ * a 500m fence sampled every 5 minutes, and reusing one avoids waking the radio
+ * for a cached position.
+ */
+function browserFix(timeoutMs = 10_000): Promise<Fix | null> {
+  if (typeof navigator === "undefined" || !navigator.geolocation) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (fix: Fix | null) => {
+      if (settled) return;
+      settled = true;
+      resolve(fix);
+    };
+    navigator.geolocation.getCurrentPosition(
+      (pos) =>
+        done({
+          lat: pos.coords.latitude,
+          lng: pos.coords.longitude,
+          // Older browsers report `null`; treat "unknown" as the accept limit so
+          // a working fix is not discarded for missing a field we can live without.
+          accuracy: typeof pos.coords.accuracy === "number" ? pos.coords.accuracy : MAX_ACCURACY_M,
+        }),
+      () => done(null),
+      { enableHighAccuracy: false, timeout: timeoutMs, maximumAge: 4 * 60 * 1000 }
+    );
+  });
 }
 
 /**
@@ -110,11 +158,21 @@ export async function sampleFence(now = Date.now(), policy: FencePolicy = FENCE_
   if (!home) return { event: null, skipped: "no-home" };
 
   const api = bridge();
-  if (!api) return { event: null, skipped: "no-native" };
-
-  const fix = await api.getLocation().catch(() => null);
-  if (!fix || typeof fix.lat !== "number" || typeof fix.lng !== "number") {
-    return { event: null, skipped: "no-fix" };
+  let fix: Fix | null = null;
+  let source: "native" | "browser" = "native";
+  if (api) {
+    const got = await api.getLocation().catch(() => null);
+    if (got && typeof got.lat === "number" && typeof got.lng === "number") {
+      fix = { lat: got.lat, lng: got.lng, accuracy: typeof got.accuracy === "number" ? got.accuracy : MAX_ACCURACY_M };
+    }
+  }
+  if (!fix) {
+    // No shell, or the shell declined — try the browser before giving up.
+    fix = await browserFix();
+    source = "browser";
+  }
+  if (!fix) {
+    return { event: null, skipped: api ? "no-fix" : "no-native" };
   }
   if (fix.accuracy > MAX_ACCURACY_M) {
     // Keep the previous presence untouched: a bad fix is not evidence of moving.
@@ -131,7 +189,7 @@ export async function sampleFence(now = Date.now(), policy: FencePolicy = FENCE_
     // Payload id = event id, so an outbox replay cannot page the family twice.
     await enqueue("geofence", step.event, now);
   }
-  return { event: step.event, distanceM };
+  return { event: step.event, distanceM, source };
 }
 
 // --------------------------------------------------------------------------- //

@@ -29,6 +29,7 @@ import {
   caregiverLine,
   careSignals,
   normalizeCounters,
+  CARE_DAY_PREFIX,
 } from "./care.ts";
 import type { CareCounters } from "./care.ts";
 import { addDays } from "./behaviour.ts";
@@ -37,7 +38,7 @@ import { all, del, get, put } from "./db.ts";
 import { dayKey } from "./tasks.ts";
 import type { Locale } from "./types";
 
-const DAY_PREFIX = "care_day.";
+const DAY_PREFIX = CARE_DAY_PREFIX;
 /** Keep a little more than the window so a late open can still fill the median. */
 const KEEP_DAYS = BASELINE.windowDays + 7;
 
@@ -101,6 +102,46 @@ export async function readCareDays(now: number, windowDays = BASELINE.windowDays
     if (doc?.counters) days.push(doc.counters);
   }
   return days;
+}
+
+/**
+ * One named day's counters, or `{}` when that day was never measured.
+ * Exported for `behaviourStore.buildDayRollup`, which needs YESTERDAY (the day
+ * being uploaded), not the window this file uses for its median.
+ */
+export async function readCareDayCounters(day: string): Promise<Partial<CareCounters>> {
+  const doc = await get<CareDayDoc>("meta", `${CARE_DAY_PREFIX}${day}`).catch(() => undefined);
+  return doc?.counters ?? {};
+}
+
+/**
+ * How long the app must stay open before "no interaction" counts as a real
+ * observation rather than a mistap.
+ */
+export const MEASURED_DWELL_MS = 60_000;
+
+/**
+ * Marks a day as MEASURED with zero interactions.
+ *
+ * WHY: A opens the app, the senior taps nothing and says nothing, and no
+ * counter is ever written — so that day is missing from the 14-day window and
+ * the median is built only from talkative days. That skews the reference
+ * upwards, which makes `fewer_interactions` fire on ordinary quiet days.
+ * A day he opened the app and stayed on it IS an observation: zero.
+ *
+ * The dwell gate is the guard against the other error — a pocket mistap that
+ * launches and kills the app must not write a 0 into his baseline.
+ *
+ * Only fills `interactions`; every other counter stays absent (we did not
+ * measure them). Existing values are never overwritten downwards.
+ */
+export async function markCareDayOpened(now = Date.now(), dwellMs = 0): Promise<boolean> {
+  if (dwellMs < MEASURED_DWELL_MS) return false;
+  const day = dayKey(now);
+  const existing = await get<CareDayDoc>("meta", dayDocId(day)).catch(() => undefined);
+  if (existing) return false;
+  await put<CareDayDoc>("meta", { id: dayDocId(day), day, counters: { interactions: 0 }, at: now }).catch(() => {});
+  return true;
 }
 
 export async function readCareBaseline(now: number, windowDays = BASELINE.windowDays): Promise<Partial<CareCounters>> {

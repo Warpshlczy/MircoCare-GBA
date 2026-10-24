@@ -34,6 +34,8 @@ import { bridge } from "./native.ts";
 import { enqueue } from "./outboxStore.ts";
 import { listTasks } from "./taskStore.ts";
 import { dayKey } from "./tasks.ts";
+import { CARE_DAY_PREFIX, hearingProxyFrom } from "./care.ts";
+import type { CareCounters } from "./care.ts";
 import type { BehaviourDaily, CircadianDaily, ConversationTurn, GaitWindow } from "./types";
 
 const ACC_PREFIX = "behaviour_acc.";
@@ -189,6 +191,21 @@ async function readProxy(day: string): Promise<ProxyDoc | null> {
 }
 
 /**
+ * The care counters for one day, read straight from the shared `meta` row.
+ *
+ * Deliberately NOT `careStore.readCareDayCounters`: careStore already imports
+ * `readAccumulator` from this file, so calling back into it would close an
+ * import cycle between two IndexedDB modules. The key itself is exported from
+ * care.ts, so there is still one definition of it.
+ */
+async function readCareCountersFor(day: string): Promise<Partial<CareCounters>> {
+  const doc = await get<{ id?: string; counters?: Partial<CareCounters> }>("meta", `${CARE_DAY_PREFIX}${day}`).catch(
+    () => undefined
+  );
+  return doc?.counters ?? {};
+}
+
+/**
  * Report-only hearing/vision proxies from the interview (C's
  * `BehaviourDaily.hearingProxy/visionProxy`, contract.py:307).
  *
@@ -221,7 +238,7 @@ export interface DayRollup {
 
 /** Builds one day's rollup from local tasks + conversation memory + accumulator. */
 export async function buildDayRollup(day: string, now = Date.now()): Promise<DayRollup> {
-  const [tasks, turns, gait, acc, counted, proxy] = await Promise.all([
+  const [tasks, turns, gait, acc, counted, proxy, care] = await Promise.all([
     listTasks().catch(() => []),
     all<ConversationTurn>("conversation").catch(() => []),
     // Windows that never reached the backend are still on the device; the
@@ -230,6 +247,7 @@ export async function buildDayRollup(day: string, now = Date.now()): Promise<Day
     readAccumulator(day),
     readInteractionCount(day),
     readProxy(day),
+    readCareCountersFor(day),
   ]);
 
   // The tap counter WINS when it exists (it is the only source that sees button
@@ -238,6 +256,12 @@ export async function buildDayRollup(day: string, now = Date.now()): Promise<Day
   // Either side of a conversation proves the app was open; so does a tap count.
   const appUsed = appUsedOn(turns, day) || counted !== null;
 
+  // An explicitly recorded proxy wins; otherwise DERIVE the hearing one from the
+  // care counters that already exist on the device. Deriving it here rather than
+  // asking the UI to record it means the weekly report has a real number even
+  // though nobody wired a producer — and `null` (not 0) when the day was silent.
+  const hearingProxy = proxy?.hearing ?? hearingProxyFrom(care);
+
   return {
     behaviour: behaviourForDay({
       day,
@@ -245,7 +269,7 @@ export async function buildDayRollup(day: string, now = Date.now()): Promise<Day
       gait,
       gaitAcc: acc,
       interactionCount: interactions,
-      hearingProxy: proxy?.hearing ?? null,
+      hearingProxy,
       visionProxy: proxy?.vision ?? null,
     }),
     appUsed,
