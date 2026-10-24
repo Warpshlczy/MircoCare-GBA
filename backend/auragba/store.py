@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
@@ -31,6 +32,10 @@ class Store:
         self._dir = Path(data_dir or settings.data_dir)
         self._dir.mkdir(parents=True, exist_ok=True)
         self.path = self._dir / db_name
+        # Serialise writes inside this process. SQLite's busy handler can still
+        # time out when 20 threads each autocommit a statement (observed on
+        # Windows); reads stay lock-free because WAL readers never block.
+        self._lock = threading.Lock()
         self._initialize()
 
     @contextmanager
@@ -50,7 +55,7 @@ class Store:
             conn.close()
 
     def _initialize(self) -> None:
-        with self._connect() as db:
+        with self._lock, self._connect() as db:
             db.execute("PRAGMA journal_mode=WAL")
             db.execute("PRAGMA synchronous=NORMAL")
             db.executescript(
@@ -76,7 +81,7 @@ class Store:
     def record(self, device_id: str, kind: str, obj: dict[str, Any]) -> None:
         """Append a derived-feature / event record under a stream name."""
         at = int(obj.get("at") or obj.get("startedAt") or obj.get("endedAt") or 0)
-        with self._connect() as db:
+        with self._lock, self._connect() as db:
             db.execute(
                 "INSERT INTO records (device_id, kind, at, payload) VALUES (?, ?, ?, ?)",
                 (device_id, kind, at, json.dumps(obj, ensure_ascii=False)),
@@ -103,7 +108,7 @@ class Store:
         return None if row is None else json.loads(row["value"])
 
     def set_doc(self, device_id: str, key: str, value: Any) -> None:
-        with self._connect() as db:
+        with self._lock, self._connect() as db:
             db.execute(
                 "INSERT INTO docs (device_id, key, value) VALUES (?, ?, ?) "
                 "ON CONFLICT(device_id, key) DO UPDATE SET value = excluded.value",

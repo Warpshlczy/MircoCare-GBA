@@ -31,21 +31,28 @@ python3 selfcheck.py                              # 可运行断言自检 → se
 
 前端 `web/src/lib/api.ts` 通过 `NEXT_PUBLIC_API_BASE` 指向本服务（默认 `http://localhost:8000`）。首次加载会 `POST /auth/register` 建立 HttpOnly `aura_session` Cookie（原生/CLI 可用 `Authorization: Bearer`）；之后请求携带该会话与假名 `X-Device-Id` 头。**身份校验通过后**才会把请求映射到授权设备。CORS 由 `AURA_CORS_ORIGINS` 控制，必须是明确来源（`*` 会被拒绝启动）。
 
-**10 个前端契约端点**
+**13 个前端契约端点**
 
 | # | 端点 | 说明 | 状态 |
 |---|---|---|---|
 | 1 | `POST /gait/windows` | 步态窗口（VAD/传感器派生特征） | 204 |
 | 2 | `POST /screening/sessions` | 筛查会话（vector-only 摄入） | 204 |
-| 3 | `POST /sos` | 紧急求助事件 | 204 |
+| 3 | `POST /sos` | 紧急求助 + 家属通知 | **202** + `notified` |
 | 4 | `GET /health-card/me` | 长者健康卡 | 200 |
 | 5 | `POST /assistant/chat` | 数字人对话编排 | ⚙️ 已实现；未配置 501 |
 | 6 | `POST /agent/cards` | Agent 卡片规划 | ⚙️ 已实现；未配置 501 |
-| 7 | `POST /telemetry/events` | 批量埋点（服务端二次脱敏） | 204 |
-| 8 | `POST /conversation/turns` | 会话记忆归档（按假名设备） | 204 |
-| 9 | `POST /medication/plan` | 用药计划生成 | ⚙️ 已实现；未配置 501 |
-| 10 | `POST /reminders/escalate` | 提醒超时事件 + 家属 outbox | 204 |
+| 7 | `POST /agent/turn` | Agent 工具编排 | 🧪 mock planner；护栏已生效 |
+| 8 | `POST /telemetry/events` | 批量埋点（服务端二次脱敏） | 204 |
+| 9 | `POST /conversation/turns` | 会话记忆归档（按假名设备） | 204 |
+| 10 | `POST /medication/plan` | 用药计划生成 | ⚙️ 已实现；未配置 501 |
+| 11 | `POST /reminders/escalate` | 提醒超时事件 + 家属 outbox | 204 |
+| 12 | `POST /behaviour/daily` | 行为流日汇总（`null` 不补 0；按 day 幂等） | 204 |
+| 13 | `POST /task/events` | 任务状态事件（created/completed/deferred/timeout） | 204 |
 
+> `/sos`、`/reminders/escalate`、`/reports/weekly/send` 统一走 `notify.dispatch`：先写家属 outbox，再打印「已通知家属 N 人」；配置 `AURA_NOTIFY_WEBHOOK` 时额外推一条粗粒度通知。demo 不声称“已送达”。
+
+> `/agent/turn` 的 planner 当前是固定 `create_task` 回显（B 用 `dryRun()` 联调）；急救短路、未注册工具丢弃、参数校验、`confirm` 复述、3 次上限已按最终规则实现，C3 只替换 planner。
+>
 > 三个 LLM 端点默认关闭（`AURA_LLM_ENABLED=false`）。未配置返回 501，上游失败/非法 JSON 返回 502，额度用尽返回 429；前端会回退本地卡片/提醒。天气由 Open-Meteo 提供，无需 Key。
 
 **附加洞察端点**（非前端必需）
@@ -118,6 +125,7 @@ uvicorn auragba.main:app --env-file .env --reload --port 8000
 | `AURA_PRIVACY_MODE` | `extract-and-burn` / `vector-only` | `extract-and-burn` |
 | `AURA_BASELINE_DAYS` | 个人基线窗口（天，robust Z） | 14 |
 | `AURA_TREND_DAYS` | 趋势斜率与 CUSUM 的回看窗口（天） | 28 |
+| `AURA_NOTIFY_WEBHOOK` | demo 通知 webhook（留空 = 只写 outbox + 日志） | 空 |
 | `AURA_FUSION_W_ACOUSTIC` / `AURA_FUSION_W_SEMANTIC` | 双流融合权重（自动归一） | 0.2 / 0.8 |
 | `AURA_RISK_WATCH` / `AURA_RISK_ELEVATED` | 风险分档切点 | 0.409 / 0.521 |
 | `AURA_DATA_DIR` | 假名存储 / 审计日志目录 | `./.data` |
@@ -157,6 +165,7 @@ backend/
     ├── auth.py              # HMAC 会话、角色校验、长者-家属配对
     ├── auth_store.py        # SQLite：账号、配对码、失败锁定、家属关系
     ├── notifications.py     # 家属 notification_outbox（推送 provider 的接缝）
+    ├── notify.py            # 通知分发：outbox + 「已通知家属 N 人」日志 + 可选 webhook
     ├── store.py             # SQLite（WAL）：派生特征/事件按设备+类型+时间索引
     ├── audit.py             # SaMD 审计：append-only JSONL hash 链 + verify()
     ├── baseline.py          # 个人 14 天基线 Z-score（normal/watch/elevated）

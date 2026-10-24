@@ -12,7 +12,15 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 Locale = Literal["zh-HK", "zh-MO", "zh-CN"]
-Intent = Literal["weather", "medication", "tasks", "camera", "sos", "help", "tools", "followup", "note", "recall", "unknown"]
+# Mirrors `Intent` in web/src/lib/types.ts. The six agent-layer intents
+# (navigate/call/alarm/message/repeat/cancel) must stay in sync, otherwise
+# POST /agent/cards answers 422 before its own 501 fallback can run.
+Intent = Literal[
+    "weather", "medication", "tasks", "camera", "sos", "help", "tools",
+    "followup", "note", "recall",
+    "navigate", "call", "alarm", "message", "repeat", "cancel",
+    "unknown",
+]
 CardKind = Literal["task", "med", "weather", "camera", "info"]
 
 
@@ -185,6 +193,143 @@ class AgentIntentRequest(_Base):
     utterance: str
     locale: Locale
     now: int
+
+
+# --------------------------------------------------------------------------- #
+# Agent turn (B ↔ C) — tool-calling contract.
+# Mirrors AgentTurnRequest/Response in web/src/lib/types.ts. `tools` accepts both
+# the flat `{name, description, schema}` shape and the OpenAI wrapper emitted by
+# `openAiTools()` (`{type:"function", function:{name, description, parameters}}`).
+# --------------------------------------------------------------------------- #
+class AgentTool(_Base):
+    name: str | None = None
+    description: str = ""
+    schema_: dict[str, Any] | None = Field(default=None, alias="schema")
+    type: str | None = None
+    function: dict[str, Any] | None = None
+
+    def normalized(self) -> tuple[str, str, dict[str, Any]]:
+        """-> (name, description, JSON schema) for either accepted shape."""
+        if isinstance(self.function, dict):
+            return (
+                str(self.function.get("name") or ""),
+                str(self.function.get("description") or ""),
+                dict(self.function.get("parameters") or {}),
+            )
+        return self.name or "", self.description, dict(self.schema_ or {})
+
+
+class AgentHistoryTurn(_Base):
+    role: Literal["user", "assistant"]
+    text: str
+
+
+class AgentOpenTask(_Base):
+    id: str
+    text: str
+    dueAt: int | None = None
+
+
+class AgentTurnContext(_Base):
+    recentTurns: list[AgentHistoryTurn] = Field(default_factory=list)
+    openTasks: list[AgentOpenTask] = Field(default_factory=list)
+    riskBand: Literal["low", "watch", "elevated"] | None = None
+
+
+class AgentTurnRequest(_Base):
+    utterance: str
+    locale: Locale
+    now: int
+    context: AgentTurnContext = Field(default_factory=AgentTurnContext)
+    tools: list[AgentTool] = Field(default_factory=list)
+
+
+class ToolCall(_Base):
+    name: str
+    args: dict[str, Any] = Field(default_factory=dict)
+
+
+class NeedsConfirm(_Base):
+    """Index-based, not name-based: the client confirms `calls[callIndex]`."""
+
+    callIndex: int
+    question: str
+
+
+class AgentTurnResponse(_Base):
+    reply: str
+    calls: list[ToolCall] = Field(default_factory=list)
+    cards: list[AgentCard] = Field(default_factory=list)
+    needsConfirm: NeedsConfirm | None = None
+
+
+# --------------------------------------------------------------------------- #
+# Behaviour stream (B -> C). Mirrors BehaviourDaily / CircadianDaily /
+# DigitalSkillDaily in web/src/lib/types.ts. `null` means "not measured" and is
+# preserved end-to-end — C must never turn it into 0 (a senior without the usage
+# permission would otherwise look like "0 app switches = decline").
+# --------------------------------------------------------------------------- #
+_DAY = r"^\d{4}-\d{2}-\d{2}$"
+
+
+class BehaviourDaily(_Base):
+    id: str
+    day: str = Field(pattern=_DAY)
+    # null = no reminder was due that day / no gait window that day.
+    taskConfirmDelayMin: float | None = Field(default=None, ge=0)
+    taskTimeoutRate: float | None = Field(default=None, ge=0, le=1)
+    taskCompletionRate: float | None = Field(default=None, ge=0, le=1)
+    deferCount: int = Field(default=0, ge=0)
+    interactionCount: int = Field(default=0, ge=0)
+    gaitCv: float | None = Field(default=None, ge=0)
+    fallEvents: int = Field(default=0, ge=0)
+
+
+class CircadianDaily(_Base):
+    """Screen/unlock/charging rollup — no runtime permission required."""
+
+    id: str
+    day: str = Field(pattern=_DAY)
+    firstActiveAt: int
+    lastActiveAt: int
+    nightWakeCount: int = Field(default=0, ge=0)
+    chargingHours: float = Field(default=0.0, ge=0, le=24)
+
+
+class DigitalSkillDaily(_Base):
+    """Usage-stats proxy. Every field is nullable; the whole row is omitted when
+    PACKAGE_USAGE_STATS is not granted."""
+
+    id: str
+    day: str = Field(pattern=_DAY)
+    appSwitchCount: int | None = Field(default=None, ge=0)
+    opFailRate: float | None = Field(default=None, ge=0, le=1)
+    firstTouchDelayMs: float | None = Field(default=None, ge=0)
+
+
+class BehaviourDailyEnvelope(_Base):
+    """Payload of POST /behaviour/daily — the two optional rows are omitted, not
+    filled with nulls, when their permission/source is unavailable."""
+
+    behaviour: BehaviourDaily
+    circadian: CircadianDaily | None = None
+    digitalSkill: DigitalSkillDaily | None = None
+
+
+class TaskEvent(_Base):
+    """One task state transition from the device.
+
+    PROVISIONAL shape until B lands `TaskEvent` in web/src/lib/types.ts; the
+    fields are a superset of what the daily rollup needs, so additions are safe.
+    """
+
+    id: str
+    taskId: str
+    state: Literal["created", "completed", "deferred", "timeout"]
+    at: int
+    source: Literal["voice", "reminder", "followup", "agent"]
+    dueAt: int | None = None
+    doneAt: int | None = None
 
 
 class AssistantMessage(_Base):

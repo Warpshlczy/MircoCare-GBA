@@ -18,7 +18,7 @@ from fastapi.responses import HTMLResponse
 
 from ..auth import Principal, current_principal
 from ..contract import Locale, WeeklyReport
-from ..notifications import notify_families
+from ..notify import dispatch as notify_dispatch
 from ..privacy import device_id
 from ..reports.weekly import build_weekly_report, render_html, report_summary
 from ..store import store
@@ -50,8 +50,8 @@ def send_weekly_report(dev: str = Depends(device_id)) -> dict:
     response says "queued", never "delivered".
     """
     report = build_weekly_report(dev, store)
-    queued = notify_families(dev, "weekly_report", report_summary(report))
-    return {"queued": queued, "delivered": False, "channel": "outbox"}
+    notified = notify_dispatch(dev, "weekly_report", report_summary(report))
+    return {"queued": len(notified), "notified": notified, "delivered": False, "channel": "outbox"}
 
 
 @router.get("/caregiver/reports/weekly", response_model=WeeklyReport)

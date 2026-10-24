@@ -5,6 +5,8 @@ Run:  uvicorn auragba.main:app --reload --port 8000
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -14,6 +16,16 @@ from .config import ENGINE_VERSION, FEATURE_SET_VERSION, settings, validate_runt
 # Refuse to serve with a missing/short AURA_AUTH_SECRET or a wildcard CORS origin.
 # This lives here (not at config import) so `python selfcheck.py` stays runnable.
 validate_runtime()
+
+# Make the coarse audit lines visible under uvicorn (e.g. "已通知家属 N 人").
+# Scoped to the app logger so library importers are unaffected.
+_app_logger = logging.getLogger("auragba")
+if not _app_logger.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+    _app_logger.addHandler(_handler)
+_app_logger.setLevel(logging.INFO)
+_app_logger.propagate = False
 
 _DESCRIPTION = """
 MemoMate (忆伴) backend — non-invasive MCI/AD screening from everyday speech.
@@ -56,9 +68,12 @@ def root() -> dict:
         "privacyMode": settings.privacy_mode,
         "docs": "/docs",
         "contract": [
-            "POST /gait/windows", "POST /screening/sessions", "POST /sos", "GET /health-card/me",
+            "POST /gait/windows", "POST /screening/sessions", "POST /sos (202)",
+            "GET /health-card/me",
             "POST /assistant/chat (configurable)", "POST /agent/cards (configurable)",
+            "POST /agent/turn (mock planner)",
             "POST /telemetry/events", "POST /conversation/turns",
+            "POST /behaviour/daily", "POST /task/events",
             "POST /medication/plan (configurable)", "POST /reminders/escalate",
         ],
         "auth": ["POST /auth/register", "POST /auth/pairing-code", "POST /auth/pair"],

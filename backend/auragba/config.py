@@ -90,6 +90,9 @@ class Settings:
     weather_enabled: bool = _env_bool("AURA_WEATHER_ENABLED", True)
     weather_ttl_s: int = _env_int("AURA_WEATHER_TTL_S", 600)
 
+    # --- Notification provider seam (demo: webhook + log) -------------------
+    notify_webhook: str = os.getenv("AURA_NOTIFY_WEBHOOK", "")
+
     @property
     def llm_available(self) -> bool:
         return bool(self.llm_enabled and self.llm_base_url and self.llm_model)

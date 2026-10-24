@@ -10,6 +10,7 @@ bodies.
 
 from __future__ import annotations
 
+import logging
 import time
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -17,7 +18,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from ..contract import (
     AgentCard,
     AgentIntentRequest,
+    AgentTurnRequest,
+    AgentTurnResponse,
     AssistantChatRequest,
+    BehaviourDailyEnvelope,
     ConversationTurn,
     GaitWindow,
     HealthCard,
@@ -26,9 +30,11 @@ from ..contract import (
     ReminderEscalation,
     ScreeningSession,
     SosEvent,
+    TaskEvent,
     TelemetryEvent,
 )
 from ..llm import service as llm_service
+from ..llm import turn as llm_turn
 from ..llm.errors import (
     LLMInvalidInput,
     LLMInvalidOutput,
@@ -39,9 +45,10 @@ from ..llm.errors import (
 from ..privacy import device_id, scrub_props, scrub_text
 from ..screening import ingest_session
 from ..store import store
-from ..notifications import notify_families
+from ..notify import dispatch as notify_dispatch
 
 router = APIRouter(tags=["contract"])
+logger = logging.getLogger("auragba.contract")
 
 # A demo health card, seeded per device so `GET /health-card/me` returns something
 # real before a clinic backend is wired. Upgrade: sync from the family/clinic side.
@@ -75,17 +82,18 @@ def post_screening_session(s: ScreeningSession, dev: str = Depends(device_id)) -
     ingest_session(s, dev)
 
 
-@router.post("/sos", status_code=204)
-def post_sos(e: SosEvent, dev: str = Depends(device_id)) -> None:
-    """Record the SOS + an escalation ledger entry.
+@router.post("/sos", status_code=202)
+def post_sos(e: SosEvent, dev: str = Depends(device_id)) -> dict:
+    """Record the SOS and queue a family notification.
 
-    ponytail: records the escalation intent only — it does NOT yet notify family
-    / carers over SMS/push (no provider wired). Upgrade: fan out to family +
-    community carer, with HK/MO/CN emergency numbers (DEV.md §8.5.2).
+    The outbox row is durable and the caregiver dashboard reads it; the demo
+    provider is a log line (+ optional `AURA_NOTIFY_WEBHOOK`). We return 202
+    because delivery is queued, not confirmed — never claim "sent".
     """
     store.record(dev, "sos", e.model_dump())
     store.set_doc(dev, "sos_last", {"at": e.at, "status": "pending", "reason": e.reason})
-    notify_families(dev, "sos", e.model_dump())
+    notified = notify_dispatch(dev, "sos", e.model_dump())
+    return {"id": e.id, "notified": notified, "channel": "outbox", "delivered": False}
 
 
 @router.get("/health-card/me")
@@ -121,6 +129,17 @@ def post_conversation_memory(turn: ConversationTurn, dev: str = Depends(device_i
     store.record(dev, "conversation", {**turn.model_dump(), "text": scrub_text(turn.text, keep=True)})
 
 
+@router.post("/behaviour/daily", status_code=204)
+def post_behaviour_daily(body: BehaviourDailyEnvelope, dev: str = Depends(device_id)) -> None:
+    """Daily behaviour rollup (BehaviourDaily + optional circadian/digitalSkill).
+
+    Idempotent per (device, day): an outbox replay overwrites the same doc instead
+    of appending a duplicate. `null` readings are stored as null — never 0 — so C
+    can tell "not measured" apart from "zero".
+    """
+    store.set_doc(dev, f"behaviour:{body.behaviour.day}", body.model_dump())
+
+
 @router.post("/reminders/escalate", status_code=204)
 def post_reminder_escalation(e: ReminderEscalation, dev: str = Depends(device_id)) -> None:
     """A reminder timed out. Record the coarse event and queue a family notice.
@@ -130,7 +149,27 @@ def post_reminder_escalation(e: ReminderEscalation, dev: str = Depends(device_id
     delivered, only that the escalation was recorded.
     """
     store.record(dev, "reminder_escalations", e.model_dump())
-    notify_families(dev, "reminder", e.model_dump())
+    notify_dispatch(dev, "reminder", e.model_dump())
+
+
+@router.post("/task/events", status_code=204)
+def post_task_event(event: TaskEvent, dev: str = Depends(device_id)) -> None:
+    """One task state transition (created/completed/deferred/timeout).
+
+    Stored by event id so an outbox replay overwrites rather than duplicating.
+    Only ids/states are logged — never the task text (it may contain names).
+    """
+    store.set_doc(dev, f"task_event:{event.id}", event.model_dump())
+    logger.info("task_event %s state=%s source=%s", event.id, event.state, event.source)
+
+
+# --------------------------------------------------------------------------- #
+# Agent turn — the mock planner is always on so B can integrate before the model
+# is wired. The guardrails inside are final; C3 only replaces the planning step.
+# --------------------------------------------------------------------------- #
+@router.post("/agent/turn")
+def agent_turn(req: AgentTurnRequest, dev: str = Depends(device_id)) -> AgentTurnResponse:
+    return llm_turn.plan_turn(req)
 
 
 # --------------------------------------------------------------------------- #

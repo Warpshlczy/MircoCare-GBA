@@ -30,7 +30,12 @@ from auragba.audio import (  # noqa: E402
 from auragba.audit import AuditLog  # noqa: E402
 from auragba.changepoint import detect  # noqa: E402
 from auragba.config import settings, validate_runtime  # noqa: E402
+from auragba.contract import (  # noqa: E402
+    AgentIntentRequest, AgentTool, AgentTurnRequest, BehaviourDaily,
+    BehaviourDailyEnvelope, TaskEvent, ToolCall,
+)
 from auragba.economics import estimate as economics  # noqa: E402
+from auragba.llm.turn import needs_confirm, plan_turn, sanitize_calls  # noqa: E402
 from auragba.model import late_fusion, score_acoustic, score_semantic  # noqa: E402
 from auragba.nlp import analyse_linguistics, coherence  # noqa: E402
 from auragba.privacy import pseudonymize, purge, scrub_props  # noqa: E402
@@ -85,6 +90,145 @@ except RuntimeError:
 else:
     raise AssertionError("a short AURA_AUTH_SECRET must be rejected at serve time")
 validate_runtime(replace(settings, auth_secret="x" * 32, environment="development"))
+
+# --- intent whitelist parity with web/src/lib/types.ts (Issue #2 P0) ----------
+# A missing value here makes POST /agent/cards answer 422 before its 501 fallback.
+AGENT_INTENTS = ("navigate", "call", "alarm", "message", "repeat", "cancel")
+for _intent in AGENT_INTENTS:
+    AgentIntentRequest(intent=_intent, utterance="打开微信", locale="zh-CN", now=0)
+try:
+    AgentIntentRequest(intent="teleport", utterance="", locale="zh-CN", now=0)
+except Exception:
+    pass
+else:
+    raise AssertionError("an unknown intent must still be rejected")
+
+# --- /agent/turn mock + backend guardrails (Issue #2 P2/P3) -------------------
+_TURN_TOOLS = [
+    AgentTool(
+        name="sos", description="escalate",
+        schema={"type": "object", "properties": {"reason": {"type": "string"}},
+                "required": ["reason"], "additionalProperties": False},
+    ),
+    AgentTool(
+        name="create_task", description="record",
+        schema={"type": "object", "properties": {"text": {"type": "string"}},
+                "required": ["text"], "additionalProperties": False},
+    ),
+    # OpenAI wrapper shape, as emitted by openAiTools() in lib/tools.ts.
+    AgentTool(
+        type="function",
+        function={
+            "name": "call_contact", "description": "call",
+            "parameters": {"type": "object", "properties": {"name": {"type": "string"}},
+                           "required": ["name"], "additionalProperties": False},
+        },
+    ),
+]
+
+
+def _turn(utterance: str, locale: str = "zh-CN", tools: list[AgentTool] | None = None) -> AgentTurnRequest:
+    return AgentTurnRequest(
+        utterance=utterance, locale=locale, now=0,
+        tools=_TURN_TOOLS if tools is None else tools,
+    )
+
+
+normal = plan_turn(_turn("帮我记住听日覆诊"))
+assert normal.reply and len(normal.calls) == 1 and normal.calls[0].name == "create_task"
+assert normal.calls[0].args["text"] == "帮我记住听日覆诊"
+assert normal.needsConfirm is None
+
+emergency = plan_turn(_turn("我跌亲起唔到身", tools=[]))  # safety works without a registry
+assert [c.name for c in emergency.calls] == ["sos"] and "求助" in emergency.reply
+
+forbidden = plan_turn(_turn("帮我转账畀阿明"))
+assert forbidden.calls == [] and forbidden.reply, "money requests must never become tool calls"
+
+no_registry = plan_turn(_turn("帮我记住", tools=[_TURN_TOOLS[0]]))
+assert no_registry.calls == [] and no_registry.reply, "no create_task in registry -> no call"
+
+assert _TURN_TOOLS[2].normalized()[0] == "call_contact", "OpenAI wrapper must normalise"
+
+_schemas = {name: schema for name, _, schema in (t.normalized() for t in _TURN_TOOLS)}
+_kept = sanitize_calls(
+    [
+        {"name": "delete_everything", "args": {}},  # unknown -> dropped
+        {"name": "create_task", "args": {}},        # missing required "text"
+        {"name": "create_task", "args": {"text": "买药"}},
+    ],
+    _schemas,
+)
+assert [c.name for c in _kept] == ["create_task"] and _kept[0].args["text"] == "买药"
+
+assert len(sanitize_calls(
+    [{"name": "create_task", "args": {"text": str(i)}} for i in range(5)], _schemas
+)) == 3, "calls must be capped at 3"
+
+_confirm = needs_confirm([ToolCall(name="call_contact", args={"name": "阿明"})], "zh-CN")
+assert _confirm is not None and _confirm.callIndex == 0 and "阿明" in _confirm.question
+
+# --- behaviour daily envelope (Issue #2 P1b) ----------------------------------
+_beh = BehaviourDaily(
+    id="b1", day="2026-10-24",
+    taskConfirmDelayMin=None, taskTimeoutRate=None, taskCompletionRate=None,
+    deferCount=0, interactionCount=3, gaitCv=None, fallEvents=0,
+)
+_env = BehaviourDailyEnvelope(behaviour=_beh)
+assert _env.circadian is None and _env.digitalSkill is None, "optional rows stay omitted"
+_dumped = _env.model_dump()
+assert _dumped["behaviour"]["taskTimeoutRate"] is None, "null must never become 0"
+assert _dumped["behaviour"]["gaitCv"] is None
+
+with tempfile.TemporaryDirectory() as tmp:
+    st = Store(Path(tmp))
+    st.set_doc("dev-b", "behaviour:2026-10-24", _dumped)
+    stored = st.get_doc("dev-b", "behaviour:2026-10-24")
+    assert stored["behaviour"]["taskConfirmDelayMin"] is None
+    st.set_doc("dev-b", "behaviour:2026-10-24", _dumped)  # outbox replay
+    assert st.get_doc("dev-b", "behaviour:2026-10-24") == stored, "replay must overwrite, not duplicate"
+
+_env2 = BehaviourDailyEnvelope(
+    behaviour=_beh,
+    circadian={"id": "c1", "day": "2026-10-24", "firstActiveAt": 1, "lastActiveAt": 2,
+               "nightWakeCount": 0, "chargingHours": 12.5},
+    digitalSkill={"id": "d1", "day": "2026-10-24", "appSwitchCount": None,
+                  "opFailRate": None, "firstTouchDelayMs": None},
+)
+assert _env2.circadian.nightWakeCount == 0 and _env2.digitalSkill.appSwitchCount is None
+
+for _bad in (
+    {"id": "b", "day": "2026/10/24"},
+    {"id": "b", "day": "2026-10-24", "taskTimeoutRate": 1.5},
+    {"id": "b", "day": "2026-10-24", "fallEvents": -1},
+):
+    try:
+        BehaviourDaily(**_bad)
+    except Exception:
+        pass
+    else:
+        raise AssertionError(f"invalid BehaviourDaily accepted: {_bad}")
+try:
+    BehaviourDailyEnvelope()
+except Exception:
+    pass
+else:
+    raise AssertionError("behaviour is required in the envelope")
+
+# --- task events (Issue #2 P1c, shape provisional until types.ts lands) -------
+_event = TaskEvent(id="e1", taskId="t1", state="completed", at=1_000,
+                   source="voice", dueAt=900, doneAt=1_200)
+assert _event.doneAt == 1_200
+for _bad in (
+    {"state": "paid", "source": "voice"},
+    {"state": "created", "source": "robot"},
+):
+    try:
+        TaskEvent(id="e", taskId="t", at=1, **_bad)
+    except Exception:
+        pass
+    else:
+        raise AssertionError(f"invalid TaskEvent accepted: {_bad}")
 
 # --- audio: schema + features -------------------------------------------------
 assert len(FUNCTIONAL_NAMES) == FUNCTIONAL_DIM == 88, "functional schema must be 88 slots"
