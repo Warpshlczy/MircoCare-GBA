@@ -5,8 +5,8 @@ local card/reminder path:
 
   LLMNotConfigured  -> 501 (keeps the previous "LLM intentionally blank" contract)
   LLMQuotaExceeded  -> 429
-  LLMUpstreamError  -> 502
-  LLMInvalidOutput  -> 502
+  LLMUpstreamError  -> 503
+  LLMInvalidOutput  -> 503
   LLMInvalidInput   -> 400
 """
 

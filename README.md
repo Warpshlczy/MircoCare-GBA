@@ -98,7 +98,7 @@ npm run android      # cap open android（Android Studio 构建 APK）
 
 - **纯函数层**：`signal.ts` / `intent.ts` / `cards.ts` / `notes.ts` / `datetime.ts` / `native.ts` / `checkin.ts` —— 不触碰 `window`，可被 node 直接断言。
 - **浏览器胶水层**：`audio.ts` / `vad.ts` / `motion.ts` / `nfc.ts` / `camera.ts`。
-- **后端唯一入口**：`web/src/lib/api.ts`（10 个契约函数全部接线；3 个 LLM 端点默认关闭，未配置/失败时返回 501/502 → 前端自动兜底）。
+- **后端唯一入口**：`web/src/lib/api.ts`（10 个契约函数全部接线；3 个 LLM 端点默认关闭，未配置/失败时返回 501/503 → 前端自动兜底）。
 - **原生接缝**：`lib/native.ts` + Capacitor `AuraNative` 插件（后台唤醒已实现；桌面小组件、自动前置仍为桩）。
 
 ### 后端四大理念的落地位置

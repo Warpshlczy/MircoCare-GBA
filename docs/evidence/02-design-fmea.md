@@ -72,7 +72,7 @@
 
 > 1 与 3 并列最高（336），共性缓解是「质量门控 + 分层校准」——这也是 M1 先做质量门控的原因。
 >
-> **FMEA-1 的落地状态（诚实口径）**：端侧 `qualityOf()` 已有 `good/fair/reject` 判定，但 `ScreeningSession` 与 `ScreeningResult` 尚未携带 `quality` 字段，后端基线目前无法强制拒收；在 C 侧契约补齐前，该项只能算**部分缓解**。
+> **FMEA-1 的落地状态（诚实口径）**：端侧 `qualityOf()` 用 `good/fair/reject` 判定采集质量；C 侧契约已补齐 `ScreeningSession` 与 `ScreeningResult` 的 `quality` / `snrDb` 字段，`reject` 样本可回传但**强制不进个人基线**（`usedInBaseline=false`），`fair` 仍计入（居家安静环境很少达到 good）。该风险已从「部分缓解」升级为**已实现缓解**，剩余风险是阈值本身未经临床验证。
 >
 > **声学流三个口径不要混用**：CV5 均值 **0.604**、5 折交叉拟合 OOF **0.616**、LOO **0.653**；融合 AUC **0.717** 使用 OOF 分数。
 

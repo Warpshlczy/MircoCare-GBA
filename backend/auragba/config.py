@@ -89,7 +89,9 @@ class Settings:
     llm_base_url: str = os.getenv("AURA_LLM_BASE_URL", "https://api.deepseek.com/v1").rstrip("/")
     llm_api_key: str = os.getenv("AURA_LLM_API_KEY", "")
     llm_model: str = os.getenv("AURA_LLM_MODEL", "deepseek-chat")
-    llm_timeout_s: float = _env_float("AURA_LLM_TIMEOUT_S", 15.0)
+    # A spoken turn must answer fast; past this budget the caller falls back to
+    # a local card/reminder instead of waiting on a silent assistant.
+    llm_timeout_s: float = _env_float("AURA_LLM_TIMEOUT_S", 6.0)
     # Tool planning must answer fast enough for a spoken turn; the client falls
     # back to a local card/task when this budget is exceeded.
     llm_turn_timeout_s: float = _env_float("AURA_LLM_TURN_TIMEOUT_S", 6.0)

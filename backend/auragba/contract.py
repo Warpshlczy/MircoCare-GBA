@@ -517,6 +517,11 @@ class ScreeningResult(_Base):
     riskBand: Literal["low", "watch", "elevated"]
     fusionWeights: dict[str, float]
     insufficientStreams: bool = False
+    # Same capture gate A applies on device (`signal.ts#qualityOf`). `reject`
+    # results are still returned — the caller must know why a sample should not
+    # be trusted — but never enter the personal baseline.
+    quality: Literal["good", "fair", "reject"] | None = None
+    snrDb: float | None = None
     baseline: BaselineReport | None = None
     changepoints: list[ChangePoint] = Field(default_factory=list)
     economics: ValuationEffect | None = None

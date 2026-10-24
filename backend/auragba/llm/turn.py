@@ -12,8 +12,9 @@ Everything else is final and model-independent:
 * ``confirm``-risk tools come back with a spoken confirmation question;
 * at most three calls.
 
-On upstream failure or quota exhaustion the response carries no calls — the
-senior hears "say that again" rather than a guessed action.
+On upstream failure, timeout or quota exhaustion the error is surfaced to the
+route (503/429) so the device falls back to a local card instead of acting on a
+guessed plan.
 """
 
 from __future__ import annotations
@@ -269,11 +270,13 @@ def plan_turn(req: AgentTurnRequest, device_id: str = "") -> AgentTurnResponse:
             logger.info("agent turn: model unavailable, using mock planner")
             return _mock_turn(req, schemas)
         except LLMQuotaExceeded:
-            logger.warning("agent turn: daily quota exhausted, returning no calls")
-            return AgentTurnResponse(reply=_safe_reply(locale))
+            logger.warning("agent turn: daily quota exhausted")
+            raise
         except (LLMUpstreamError, LLMInvalidOutput):
-            logger.warning("agent turn: model failed, returning no calls")
-            return AgentTurnResponse(reply=_safe_reply(locale))
+            # Surface the failure so /agent/turn can answer 503; the client then
+            # falls back to its local card instead of hearing a vacuous reply.
+            logger.warning("agent turn: model failed")
+            raise
     return _mock_turn(req, schemas)
 
 

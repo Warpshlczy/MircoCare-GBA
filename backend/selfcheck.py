@@ -93,6 +93,8 @@ assert abs(settings.fusion_w_acoustic + settings.fusion_w_semantic - 1.0) < 1e-9
 assert settings.fusion3_w_acoustic == 0.15 and settings.fusion3_w_semantic == 0.65
 assert settings.fusion3_w_behavior == 0.20
 assert abs(settings.fusion3_w_acoustic + settings.fusion3_w_semantic + settings.fusion3_w_behavior - 1.0) < 1e-9
+# A spoken turn must not wait longer than the client's spoken budget.
+assert settings.llm_timeout_s == 6.0 and settings.llm_turn_timeout_s == 6.0
 
 # band boundaries are inclusive on the lower edge
 assert settings.risk_band(0.408) == "low"
@@ -310,10 +312,13 @@ try:
     _previous_level = turn_mod.logger.level
     turn_mod.logger.setLevel(logging.CRITICAL)
     try:
-        _failed = plan_turn(_turn("帮我记住买药"), "")
+        plan_turn(_turn("帮我记住买药"), "")
+    except LLMUpstreamError:
+        pass
+    else:
+        raise AssertionError("upstream failure must surface as 503, not a silent 200")
     finally:
         turn_mod.logger.setLevel(_previous_level)
-    assert _failed.calls == [], "upstream failure must not execute a guessed action"
 finally:
     turn_mod.settings = _real_settings
     turn_mod.LLMClient = _real_client
@@ -703,6 +708,12 @@ with tempfile.TemporaryDirectory() as tmp:
               {"id": "g1", "startedAt": now_ms - 86_400_000, "endedAt": now_ms - 86_400_000 + 5_000,
                "steps": 12, "cadence": 60, "cv": 0.08, "fall": False})
     st.record("dev-rep", "gait_falls", {"at": now_ms - 86_400_000, "reason": "impact"})
+    st.record("dev-rep", "geofence_events",
+              {"id": "gf1", "at": now_ms - 4_000_000, "kind": "exit",
+               "distanceM": 120.0, "minutesAway": 45.0})
+    st.record("dev-rep", "geofence_events",
+              {"id": "gf2", "at": now_ms - 3_900_000, "kind": "enter",
+               "distanceM": 12.0, "minutesAway": None})
     st.record("dev-rep", "reminder_escalations",
               {"id": "r1", "at": now_ms - 7_200_000, "locale": "zh-CN", "kind": "med",
                "stage": "notify-caregiver"})
@@ -761,6 +772,9 @@ with tempfile.TemporaryDirectory() as tmp:
         c.label == "听力/视觉代理" and "0.72" in c.value and "—" in c.value
         for c in activity_section.counts
     ), "report-only proxies appear once, with missing side as dash"
+    _activity_counts = {c.label: c.value for c in activity_section.counts}
+    assert _activity_counts["外出次数"] == "1 次", "only exit events count as outings"
+    assert _activity_counts["外出时长"] == "45 分钟", "minutesAway must be summed per exit"
 
     import auragba.reports.weekly as weekly_mod  # noqa: E402
 
@@ -879,13 +893,18 @@ with tempfile.TemporaryDirectory() as tmp:
     dumped = result.model_dump()
     for key in ("riskIndex", "riskBand", "acousticStream", "semanticStream",
                 "behaviorStream", "insufficientStreams", "engineVersion",
-                "featureSetVersion", "baseline", "changepoints"):
+                "featureSetVersion", "baseline", "changepoints", "quality", "snrDb"):
         assert key in dumped, f"wire payload missing {key}"
+    # The 2s synthetic clip fails A's gate (8s minimum), so it must be labelled
+    # reject and excluded from the baseline.
+    assert result.quality == "reject", f"short capture must be reject, got {result.quality}"
     payload = result.model_dump_json()
     assert '"semanticStream"' in payload
     rows = st.history("dev-check", "screening_results")
     assert rows and rows[-1]["insufficientStreams"] is True
     assert rows[-1]["baselineSufficient"] is False, "family badge needs the baseline flag"
+    assert rows[-1]["quality"] == "reject" and rows[-1]["usedInBaseline"] is False
+    assert st.history("dev-check", "screening_metrics") == [], "reject samples stay out of the baseline"
 
 # --- ingest_session: quality is persisted, reject never enters the baseline ----
 with tempfile.TemporaryDirectory() as tmp:

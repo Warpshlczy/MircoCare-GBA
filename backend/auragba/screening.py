@@ -15,6 +15,8 @@ from __future__ import annotations
 import time
 import uuid
 
+import numpy as np
+
 from . import baseline as baseline_mod
 from .audio import AudioData, extract_features, frame_rms_db, energy_vad, load_audio
 from .audit import AuditLog, audit_log
@@ -70,6 +72,36 @@ def _baseline_report(device_id: str, flat: dict[str, float], store: Store) -> Ba
     )
 
 
+def _capture_quality(
+    frames_db: np.ndarray, vad_ratio: float, segments: list[tuple[int, int]], duration_ms: float
+) -> tuple[str, float | None]:
+    """Grade one capture exactly like A's on-device gate (`signal.ts#qualityOf`).
+
+    Both sides of the contract must agree on what "good" means, otherwise the
+    family report counts samples the phone would have discarded. SNR is the
+    speech-vs-silence median energy difference; returns ``None`` when the clip
+    has no silence to measure a floor from.
+    """
+    speech = np.zeros(frames_db.size, dtype=bool)
+    for start, end in segments:
+        speech[start:end] = True
+    snr = (
+        float(np.median(frames_db[speech]) - np.median(frames_db[~speech]))
+        if speech.any() and (~speech).any()
+        else None
+    )
+    if (
+        vad_ratio < 0.25
+        or snr is None
+        or snr < 15.0
+        or duration_ms < 8_000
+    ):
+        return "reject", snr
+    if vad_ratio >= 0.40 and snr >= 20.0:
+        return "good", snr
+    return "fair", snr
+
+
 def run_screening(
     *,
     data: bytes,
@@ -97,6 +129,7 @@ def run_screening(
     trimmed_audio = AudioData(trimmed, audio.sample_rate, trimmed.size / audio.sample_rate, audio.source)
 
     features = extract_features(trimmed_audio)
+    quality, snr_db = _capture_quality(frames_db, vad.ratio, vad.segments, audio.duration_ms)
 
     asr = transcribe(trimmed_audio, locale)
     ling = analyse_linguistics(asr.text)
@@ -138,6 +171,8 @@ def run_screening(
         riskBand=fusion.band,  # type: ignore[arg-type]
         fusionWeights=fusion.weights,
         insufficientStreams=fusion.insufficient_streams,
+        quality=quality,  # type: ignore[arg-type]
+        snrDb=None if snr_db is None else round(snr_db, 1),
         baseline=baseline,
         changepoints=baseline.changepoints,
         economics=economics,
@@ -163,6 +198,8 @@ def run_screening(
             "behavior": None if behavior is None else behavior.score,
             "insufficientStreams": fusion.insufficient_streams,
             "baselineSufficient": baseline.sufficient,
+            "quality": quality,
+            "snrDb": result.snrDb,
             # 模型来源指纹：换模型后历史分数仍可追溯是哪个文件打的
             "models": {
                 "acoustic": acoustic.model,
@@ -175,7 +212,9 @@ def run_screening(
     )
     result.audit = AuditRef(seq=ref["seq"], hash=ref["hash"])
 
-    store.record(device_id, "screening_metrics", {"at": result.at, "metrics": flat})
+    if quality != "reject":
+        # A rejected capture is reported but never poisons the personal baseline.
+        store.record(device_id, "screening_metrics", {"at": result.at, "metrics": flat})
     store.record(
         device_id,
         "screening_results",
@@ -186,6 +225,8 @@ def run_screening(
             # to show "not enough data" instead of a misleading low risk.
             "insufficientStreams": fusion.insufficient_streams,
             "baselineSufficient": baseline.sufficient,
+            "quality": quality, "snrDb": result.snrDb,
+            "usedInBaseline": quality != "reject",
         },
     )
     return result

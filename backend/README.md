@@ -53,9 +53,9 @@ python3 selfcheck.py                              # 可运行断言自检 → se
 
 > `/sos`、`/reminders/escalate`、`/reports/weekly/send` 统一走 `notify.dispatch`：先写家属 outbox，再打印「已通知家属 N 人」；配置 `AURA_NOTIFY_WEBHOOK` 时额外推一条粗粒度通知。demo 不声称“已送达”。
 
-> `/agent/turn` 配置模型后走 OpenAI-compatible tool calling（`AURA_LLM_TURN_TIMEOUT_S=6`）；未配置模型时回退固定 `create_task` 回显，B 仍可 `dryRun()` 联调。急救短路、未注册工具丢弃、参数校验、`confirm` 复述、3 次上限在两条路径上都生效；上游失败/额度用尽时返回零 call 的「再说一次」。
+> `/agent/turn` 配置模型后走 OpenAI-compatible tool calling（`AURA_LLM_TURN_TIMEOUT_S=6`）；未配置模型时回退固定 `create_task` 回显，B 仍可 `dryRun()` 联调。急救短路、未注册工具丢弃、参数校验、`confirm` 复述、3 次上限在两条路径上都生效；上游失败/超时返回 503，额度用尽返回 429，前端据此回退本地卡片。
 >
-> 三个 LLM 端点默认关闭（`AURA_LLM_ENABLED=false`）。未配置返回 501，上游失败/非法 JSON 返回 502，额度用尽返回 429；前端会回退本地卡片/提醒。天气由 Open-Meteo 提供，无需 Key。
+> 三个 LLM 端点默认关闭（`AURA_LLM_ENABLED=false`）。未配置返回 501，上游失败/非法 JSON/超时返回 503，额度用尽返回 429；单次调用预算 6s；前端会回退本地卡片/提醒。天气由 Open-Meteo 提供，无需 Key。
 
 **附加洞察端点**（非前端必需）
 
@@ -140,7 +140,7 @@ uvicorn auragba.main:app --env-file .env --reload --port 8000
 | `AURA_LLM_BASE_URL` | OpenAI-compatible 基址 | `https://api.deepseek.com/v1` |
 | `AURA_LLM_API_KEY` | 模型 API Key（本地 Ollama 可留空） | 空 |
 | `AURA_LLM_MODEL` | 模型名 | `deepseek-chat` |
-| `AURA_LLM_TIMEOUT_S` | 单次 LLM 超时（秒） | 15 |
+| `AURA_LLM_TIMEOUT_S` | 单次 LLM 超时（秒） | 6 |
 | `AURA_LLM_TURN_TIMEOUT_S` | `/agent/turn` 工具规划超时（秒） | 6 |
 | `AURA_LLM_MAX_TOKENS` | 单次最大输出 token | 400 |
 | `AURA_LLM_DAILY_QUOTA` | 每设备每日调用上限（0 = 不限） | 200 |

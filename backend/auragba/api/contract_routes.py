@@ -249,11 +249,21 @@ def post_task_event(event: TaskEvent, dev: str = Depends(device_id)) -> None:
 # --------------------------------------------------------------------------- #
 @router.post("/agent/turn")
 def agent_turn(req: AgentTurnRequest, dev: str = Depends(device_id)) -> AgentTurnResponse:
-    return llm_turn.plan_turn(req, dev)
+    """Tool planning. A model failure is a 503/429, never a silent empty plan.
+
+    The client treats any non-2xx as "no agent" and runs its local card, so the
+    senior still gets a reply even when the model is slow or unavailable.
+    """
+    try:
+        return llm_turn.plan_turn(req, dev)
+    except LLMQuotaExceeded as exc:
+        raise HTTPException(status_code=429, detail="LLM daily quota exceeded") from exc
+    except (LLMUpstreamError, LLMInvalidOutput) as exc:
+        raise HTTPException(status_code=503, detail="LLM temporarily unavailable") from exc
 
 
 # --------------------------------------------------------------------------- #
-# LLM-dependent routes — configurable; fall back to 501/429/502 so the frontend
+# LLM-dependent routes — configurable; fall back to 501/429/503 so the frontend
 # local card factory stays the safe path.
 # --------------------------------------------------------------------------- #
 def _llm_http_error(route: str, exc: Exception) -> HTTPException:
@@ -264,8 +274,8 @@ def _llm_http_error(route: str, exc: Exception) -> HTTPException:
     if isinstance(exc, LLMInvalidInput):
         return HTTPException(status_code=400, detail="Invalid LLM request payload")
     if isinstance(exc, (LLMUpstreamError, LLMInvalidOutput)):
-        return HTTPException(status_code=502, detail="LLM temporarily unavailable")
-    return HTTPException(status_code=502, detail="LLM error")
+        return HTTPException(status_code=503, detail="LLM temporarily unavailable")
+    return HTTPException(status_code=503, detail="LLM error")
 
 
 @router.post("/assistant/chat")

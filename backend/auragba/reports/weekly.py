@@ -116,10 +116,14 @@ _TEXTS: dict[str, dict[str, Any]] = {
             "gaitCv": "步态变异",
             "falls": "跌倒",
             "fallsValue": "{n} 次",
+            "outings": "外出次数",
+            "outingsValue": "{n} 次",
+            "awayMinutes": "外出时长",
+            "awayMinutesValue": "{minutes} 分钟",
             "proxy": "听力/视觉代理",
             "proxyValue": "听力 {hearing} / 视觉 {vision}",
             "proxyNote": "代理指标，非听力学/视力检查；不参与风险分。",
-            "note": "外出时长与接近跌倒要等原生定位接入后才有数据。",
+            "note": "外出记录来自手机的家庭围栏事件（离开/返回）；没有记录时不显示次数，不按 0 处理。",
         },
         "advice": {
             "title": "建议做什么",
@@ -239,10 +243,14 @@ _TEXTS: dict[str, dict[str, Any]] = {
             "gaitCv": "步態變異",
             "falls": "跌倒",
             "fallsValue": "{n} 次",
+            "outings": "外出次數",
+            "outingsValue": "{n} 次",
+            "awayMinutes": "外出時長",
+            "awayMinutesValue": "{minutes} 分鐘",
             "proxy": "聽力/視覺代理",
             "proxyValue": "聽力 {hearing} / 視覺 {vision}",
             "proxyNote": "代理指標，非聽力學/視力檢查；不參與風險分。",
-            "note": "外出時長與接近跌倒要等原生定位接入後才有數據。",
+            "note": "外出記錄來自手機的家庭圍欄事件（離開/返回）；沒有記錄時不顯示次數，不按 0 處理。",
         },
         "advice": {
             "title": "建議做什麼",
@@ -487,6 +495,7 @@ def _activity_section(
     gait: list[dict[str, Any]],
     falls: int,
     latest: dict[str, Any] | None,
+    geofence: list[dict[str, Any]],
     t: dict[str, Any],
 ) -> ReportSection:
     copy = t["activity"]
@@ -507,14 +516,32 @@ def _activity_section(
             )
         )
         proxy_note = copy["proxyNote"]
+    # Home-fence exits are real per-event records; `enter` events close them. A
+    # week with no exits is "not recorded", so the count line is omitted rather
+    # than printed as 0.
+    exits = [e for e in geofence if e.get("kind") == "exit"]
+    away_minutes = [float(e["minutesAway"]) for e in exits if e.get("minutesAway") is not None]
+    outing_counts = []
+    if exits:
+        outing_counts.append(
+            ReportCount(label=copy["outings"], value=copy["outingsValue"].format(n=len(exits)))
+        )
+    if away_minutes:
+        outing_counts.append(
+            ReportCount(
+                label=copy["awayMinutes"],
+                value=copy["awayMinutesValue"].format(minutes=round(sum(away_minutes))),
+            )
+        )
     if not gait:
+        counts = proxy_counts + outing_counts
         return ReportSection(
             key="activity",
             title=copy["title"],
             summary=copy["none"],
-            available=False,
-            counts=proxy_counts,
-            note=" ".join(part for part in (copy["noneNote"], proxy_note) if part),
+            available=bool(counts),
+            counts=counts,
+            note=" ".join(part for part in (copy["noneNote"], proxy_note, copy["note"]) if part),
         )
     by_day: dict[str, int] = {}
     cvs: list[float] = []
@@ -536,7 +563,7 @@ def _activity_section(
             ),
             ReportCount(label=copy["gaitCv"], value=f"{cv_mean:.2f}"),
             ReportCount(label=copy["falls"], value=copy["fallsValue"].format(n=falls)),
-        ] + proxy_counts,
+        ] + outing_counts + proxy_counts,
         note=" ".join(part for part in (copy["note"], proxy_note) if part),
     )
 
@@ -609,6 +636,7 @@ def build_weekly_report(
     escalations = _between(store.history(device_id, "reminder_escalations"), start, end)
     behaviour = _latest_behaviour(store, device_id, start, end)
     gait = _between(store.history(device_id, "gait"), start, end)
+    geofence = _between(store.history(device_id, "geofence_events"), start, end)
     fall_rows = _between(store.history(device_id, "gait_falls"), start, end)
     falls = len(fall_rows) or sum(1 for g in gait if g.get("fall"))
     results = _between(store.history(device_id, "screening_results"), start, end)
@@ -621,7 +649,7 @@ def build_weekly_report(
         _talk_section(turns, prev_turns, sessions, checkins, interviews, t),
         change,
         _tasks_section(escalations, behaviour, t),
-        _activity_section(gait, falls, behaviour, t),
+        _activity_section(gait, falls, behaviour, geofence, t),
         _advice_section(results, sustained, t),
         _privacy_section(len(conversation), len(sessions), len(gait), len(telemetry), t),
     ]

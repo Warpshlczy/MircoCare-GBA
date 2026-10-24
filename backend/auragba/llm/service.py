@@ -1,7 +1,7 @@
 """LLM orchestration: safety gate -> model -> schema validation.
 
 Every function either returns a validated result or raises a typed LLM error;
-the route maps that to 501/429/502 so the frontend always has a fallback.
+the route maps that to 501/429/503 so the frontend always has a fallback.
 """
 
 from __future__ import annotations
