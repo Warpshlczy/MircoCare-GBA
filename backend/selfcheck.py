@@ -41,7 +41,7 @@ from auragba.config import settings, validate_runtime  # noqa: E402
 from auragba.contract import (  # noqa: E402
     AgentCard, AgentIntentRequest, AgentTool, AgentTurnRequest, AssistantChatRequest,
     BehaviourDaily, BehaviourDailyEnvelope, GeofenceEvent, ScreeningSession, SosEvent,
-    StreamScore, TaskEvent, ToolCall,
+    StreamScore, TaskEvent, TelemetryEvent, ToolCall,
 )
 from auragba.crypto import decrypt_text, encrypt_text  # noqa: E402
 from auragba.economics import estimate as economics  # noqa: E402
@@ -356,6 +356,8 @@ for _bad in (
     {"id": "b", "day": "2026/10/24"},
     {"id": "b", "day": "2026-10-24", "taskTimeoutRate": 1.5},
     {"id": "b", "day": "2026-10-24", "fallEvents": -1},
+    {"id": "b", "day": "2026-10-24", "hearingProxy": 1.2},
+    {"id": "b", "day": "2026-10-24", "visionProxy": -0.1},
 ):
     try:
         BehaviourDaily(**_bad)
@@ -708,17 +710,24 @@ with tempfile.TemporaryDirectory() as tmp:
               {"id": "g1", "startedAt": now_ms - 86_400_000, "endedAt": now_ms - 86_400_000 + 5_000,
                "steps": 12, "cadence": 60, "cv": 0.08, "fall": False})
     st.record("dev-rep", "gait_falls", {"at": now_ms - 86_400_000, "reason": "impact"})
+    # B writes minutesAway on the closing `enter`, never on `exit`.
     st.record("dev-rep", "geofence_events",
-              {"id": "gf1", "at": now_ms - 4_000_000, "kind": "exit",
-               "distanceM": 120.0, "minutesAway": 45.0})
+              {"id": "gf1", "at": now_ms - 4_300_000, "kind": "exit", "distanceM": 620.0})
     st.record("dev-rep", "geofence_events",
-              {"id": "gf2", "at": now_ms - 3_900_000, "kind": "enter",
-               "distanceM": 12.0, "minutesAway": None})
+              {"id": "gf2", "at": now_ms - 4_200_000, "kind": "enter",
+               "distanceM": 12.0, "minutesAway": 45.0})
+    st.record("dev-rep", "geofence_events",
+              {"id": "gf3", "at": now_ms - 3_800_000, "kind": "exit", "distanceM": 40.0})
     st.record("dev-rep", "reminder_escalations",
               {"id": "r1", "at": now_ms - 7_200_000, "locale": "zh-CN", "kind": "med",
                "stage": "notify-caregiver"})
     st.record("dev-rep", "screening_results",
               {"at": now_ms - 86_400_000, "id": "s1", "riskIndex": 0.55, "riskBand": "elevated"})
+    # `/screening/analyze` keeps its quality flag on the result row; a reject
+    # result must be counted in the quality note but never drive the advice tier.
+    st.record("dev-rep", "screening_results",
+              {"at": now_ms - 2_300_000, "id": "scr-analyze-1", "riskIndex": 0.9,
+               "riskBand": "elevated", "quality": "reject"})
     st.record("dev-rep", "telemetry",
               {"id": "t1", "name": "daily_checkin", "at": now_ms - 3_600_000, "locale": "zh-CN"})
     st.record("dev-rep", "telemetry",
@@ -761,7 +770,7 @@ with tempfile.TemporaryDirectory() as tmp:
 
     assert report.claimLevel == "observation" and "辅助观察" in report.disclaimer
     change_section = next(s for s in report.sections if s.key == "change")
-    assert "1 条 fair" in change_section.note and "1 次采集质量不合格" in change_section.note
+    assert "1 条 fair" in change_section.note and "2 次采集质量不合格" in change_section.note
     talk_section = next(s for s in report.sections if s.key == "talk")
     assert any(
         c.label == "完成访谈" and c.value == "1 次" for c in talk_section.counts
@@ -773,8 +782,8 @@ with tempfile.TemporaryDirectory() as tmp:
         for c in activity_section.counts
     ), "report-only proxies appear once, with missing side as dash"
     _activity_counts = {c.label: c.value for c in activity_section.counts}
-    assert _activity_counts["外出次数"] == "1 次", "only exit events count as outings"
-    assert _activity_counts["外出时长"] == "45 分钟", "minutesAway must be summed per exit"
+    assert _activity_counts["外出次数"] == "2 次", "only exit events count as outings"
+    assert _activity_counts["外出时长"] == "45 分钟（1 次）", "minutesAway lives on enter, not exit"
 
     import auragba.reports.weekly as weekly_mod  # noqa: E402
 
@@ -796,6 +805,24 @@ with tempfile.TemporaryDirectory() as tmp:
         _hk_blob = _hk.model_dump_json() + render_html(_hk)
         for _word in DIAGNOSTIC_WORDS:
             assert _word not in _hk_blob, f"diagnostic word leaked into {_loc}: {_word}"
+
+# A reject result or a capture-only row must neither set nor mask the advice tier.
+with tempfile.TemporaryDirectory() as tmp:
+    st_adv = Store(Path(tmp))
+    _now_adv = int(time.time() * 1000)
+    st_adv.record("dev-adv", "screening_results",
+                  {"at": _now_adv - 2 * 86_400_000, "id": "ok",
+                   "riskIndex": 0.45, "riskBand": "watch"})
+    st_adv.record("dev-adv", "screening_results",
+                  {"at": _now_adv - 86_400_000, "id": "bad",
+                   "riskIndex": 0.9, "riskBand": "elevated", "quality": "reject"})
+    st_adv.record("dev-adv", "screening_results",
+                  {"at": _now_adv - 3_600_000, "id": "capture",
+                   "riskBand": "low", "insufficientStreams": True, "quality": "good"})
+    _adv = build_weekly_report("dev-adv", st_adv, now=_now_adv)
+    assert _adv.sections[4].counts[0].value == "本月内做一次认知评估", (
+        "reject/capture rows must not raise or mask the weekly advice tier"
+    )
 
 # --- k-anonymity gate (DPIA D.3) ---------------------------------------------
 _small = (
@@ -918,6 +945,11 @@ with tempfile.TemporaryDirectory() as tmp:
     rejected_row = st.history("dev-q", "screening_sessions")[-1]
     assert rejected_row["quality"] == "reject" and rejected_row["snrDb"] == 3.0
     assert rejected_row["usedInBaseline"] is False
+    rejected_result = st.history("dev-q", "screening_results")[-1]
+    assert rejected_result["insufficientStreams"] is True
+    assert rejected_result["riskBand"] == "low" and "riskIndex" not in rejected_result
+    assert rejected_result["quality"] == "reject" and rejected_result["usedInBaseline"] is False
+    assert rejected_result["baselineSufficient"] is False, "a 1-sample baseline is not sufficient"
 
     ingest_session(ScreeningSession(id="q-fair", startedAt=now_q + 1000, quality="fair", snrDb=12.0, **base),
                    "dev-q", store=st)
@@ -925,9 +957,39 @@ with tempfile.TemporaryDirectory() as tmp:
     fair_row = st.history("dev-q", "screening_sessions")[-1]
     assert fair_row["quality"] == "fair" and fair_row["snrDb"] == 12.0
     assert fair_row["usedInBaseline"] is True
+    fair_result = st.history("dev-q", "screening_results")[-1]
+    assert fair_result["id"] == "q-fair" and fair_result["source"] == "screening_session"
+    assert fair_result["insufficientStreams"] is True, "capture-only rows never claim a band"
+    assert "riskIndex" not in fair_result, "no stream -> no invented score"
+
+    # Outbox replay: the same session id must not add a second baseline sample.
+    ingest_session(ScreeningSession(id="q-fair", startedAt=now_q + 1000, quality="fair", snrDb=12.0, **base),
+                   "dev-q", store=st)
+    assert len(st.history("dev-q", "screening_metrics")) == 1, "replayed session must be idempotent"
+    assert len(st.history("dev-q", "screening_sessions")) == 2, "replayed session must not be re-recorded"
+    assert len(st.history("dev-q", "screening_results")) == 2, "replayed session must not add a result"
 
     ingest_session(ScreeningSession(id="q-legacy", startedAt=now_q + 2000, **base), "dev-q", store=st)
     assert len(st.history("dev-q", "screening_metrics")) == 2, "old clients without quality still count"
+    assert len(st.history("dev-q", "screening_results")) == 3
+
+# --- telemetry: an at-least-once upload must not double the counters ----------
+import auragba.api.contract_routes as contract_routes  # noqa: E402
+
+with tempfile.TemporaryDirectory() as tmp:
+    st = Store(Path(tmp))
+    _real_contract_store = contract_routes.store
+    contract_routes.store = st
+    try:
+        _event = TelemetryEvent(
+            id="t-dup", name="interview_end", at=int(time.time() * 1000),
+            locale="zh-CN", props={"answered": 3},
+        )
+        contract_routes.post_telemetry([_event], "dev-t")
+        contract_routes.post_telemetry([_event], "dev-t")
+    finally:
+        contract_routes.store = _real_contract_store
+    assert len(st.history("dev-t", "telemetry")) == 1, "replayed telemetry must be ingested once"
 
 # --- interaction trend: latest closed day vs the senior's own median ----------
 with tempfile.TemporaryDirectory() as tmp:

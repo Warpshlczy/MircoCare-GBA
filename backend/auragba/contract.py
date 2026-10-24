@@ -311,8 +311,8 @@ class BehaviourDaily(_Base):
     fallEvents: int | None = Field(default=None, ge=0)
     # Report-only proxies (A's interview/hearing-vision capture). They are shown
     # in the weekly "activity" section and never enter the behaviour score.
-    hearingProxy: float | None = Field(default=None, ge=0)
-    visionProxy: float | None = Field(default=None, ge=0)
+    hearingProxy: float | None = Field(default=None, ge=0, le=1)
+    visionProxy: float | None = Field(default=None, ge=0, le=1)
 
     @model_validator(mode="after")
     def _unmeasured_falls(self) -> "BehaviourDaily":

@@ -94,13 +94,16 @@ def overview(
         alerts.append(item)
     alerts.extend(store.history(device, "gait_falls")[-20:])
     trend = store.history(device, "screening_results")[-30:]
+    # Skip rejected captures: an unusable sample cannot speak for the baseline.
+    # Rows that predate the flag have no `quality`, so they still count.
+    usable = [row for row in trend if row.get("quality") != "reject"]
     return {
         "seniorDeviceId": device,
         "healthCard": card,
         "riskTrend": trend,
         # Top-level shortcut for clients that only render a single badge. Older
         # rows predate the flag, so `None` means "unknown", never "sufficient".
-        "sufficient": trend[-1].get("baselineSufficient") if trend else None,
+        "sufficient": usable[-1].get("baselineSufficient") if usable else None,
         "interactionTrend": interaction_trend(store, device),
         "screeningSessions": store.history(device, "screening_sessions")[-30:],
         "activityTrend": store.history(device, "gait")[-30:],

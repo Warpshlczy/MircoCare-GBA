@@ -158,13 +158,23 @@ def get_health_card(dev: str = Depends(device_id)) -> HealthCard:
 
 @router.post("/telemetry/events", status_code=204)
 def post_telemetry(events: list[TelemetryEvent], dev: str = Depends(device_id)) -> None:
-    """Batched COARSE events only — re-scrubbed server-side as defence in depth."""
+    """Batched COARSE events only — re-scrubbed server-side as defence in depth.
+
+    The client upload is at-least-once (`analytics.ts#flush` keeps its buffer if
+    the response is lost), so a replayed batch would double every counter — and
+    a duplicated `interview_end` becomes "2 次访谈". Marker documents keyed by
+    event id make ingestion idempotent, exactly like `/sos`.
+    """
     for e in events:
+        marker = f"telemetry_event:{e.id}"
+        if store.get_doc(dev, marker) is not None:
+            continue
         store.record(
             dev,
             "telemetry",
             {"id": e.id, "name": e.name, "at": e.at, "locale": e.locale, "props": scrub_props(e.props)},
         )
+        store.set_doc(dev, marker, {"at": e.at, "name": e.name})
 
 
 @router.post("/conversation/turns", status_code=204)

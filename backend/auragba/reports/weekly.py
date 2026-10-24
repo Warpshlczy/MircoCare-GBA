@@ -119,11 +119,11 @@ _TEXTS: dict[str, dict[str, Any]] = {
             "outings": "外出次数",
             "outingsValue": "{n} 次",
             "awayMinutes": "外出时长",
-            "awayMinutesValue": "{minutes} 分钟",
+            "awayMinutesValue": "{minutes} 分钟（{n} 次）",
             "proxy": "听力/视觉代理",
             "proxyValue": "听力 {hearing} / 视觉 {vision}",
             "proxyNote": "代理指标，非听力学/视力检查；不参与风险分。",
-            "note": "外出记录来自手机的家庭围栏事件（离开/返回）；没有记录时不显示次数，不按 0 处理。",
+            "note": "外出记录来自手机的家庭围栏事件；时长只写在返家（enter）事件里，没有记录时不显示，不按 0 处理。",
         },
         "advice": {
             "title": "建议做什么",
@@ -246,11 +246,11 @@ _TEXTS: dict[str, dict[str, Any]] = {
             "outings": "外出次數",
             "outingsValue": "{n} 次",
             "awayMinutes": "外出時長",
-            "awayMinutesValue": "{minutes} 分鐘",
+            "awayMinutesValue": "{minutes} 分鐘（{n} 次）",
             "proxy": "聽力/視覺代理",
             "proxyValue": "聽力 {hearing} / 視覺 {vision}",
             "proxyNote": "代理指標，非聽力學/視力檢查；不參與風險分。",
-            "note": "外出記錄來自手機的家庭圍欄事件（離開/返回）；沒有記錄時不顯示次數，不按 0 處理。",
+            "note": "外出記錄來自手機的家庭圍欄事件；時長只寫在返家（enter）事件裡，沒有記錄時不顯示，不按 0 處理。",
         },
         "advice": {
             "title": "建議做什麼",
@@ -362,8 +362,16 @@ def _change_section(
         s for s in store.history(device_id, "screening_sessions", since_ms=since)
         if _row_at(s) < end
     ]
-    fair = sum(1 for s in sessions if s.get("quality") == "fair")
-    rejected = sum(1 for s in sessions if s.get("quality") == "reject")
+    # `/screening/analyze` writes its quality flag on the result row instead of a
+    # session row; count both paths once, keyed by capture id.
+    results = [
+        r for r in store.history(device_id, "screening_results", since_ms=since)
+        if _row_at(r) < end and r.get("quality") in ("good", "fair", "reject")
+    ]
+    session_ids = {s.get("id") for s in sessions}
+    quality_rows = sessions + [r for r in results if r.get("id") not in session_ids]
+    fair = sum(1 for s in quality_rows if s.get("quality") == "fair")
+    rejected = sum(1 for s in quality_rows if s.get("quality") == "reject")
     quality_note = (
         copy["qualityNote"].format(fair=fair, reject=rejected) if fair or rejected else ""
     )
@@ -516,11 +524,16 @@ def _activity_section(
             )
         )
         proxy_note = copy["proxyNote"]
-    # Home-fence exits are real per-event records; `enter` events close them. A
-    # week with no exits is "not recorded", so the count line is omitted rather
-    # than printed as 0.
+    # Home-fence exits are real per-event records; B only writes `minutesAway`
+    # on the closing `enter` event (and only when that exit was alerted), so the
+    # duration covers a subset of outings. A week with no exits is "not
+    # recorded", so the line is omitted rather than printed as 0.
     exits = [e for e in geofence if e.get("kind") == "exit"]
-    away_minutes = [float(e["minutesAway"]) for e in exits if e.get("minutesAway") is not None]
+    away_minutes = [
+        float(e["minutesAway"])
+        for e in geofence
+        if e.get("kind") == "enter" and e.get("minutesAway") is not None
+    ]
     outing_counts = []
     if exits:
         outing_counts.append(
@@ -530,7 +543,9 @@ def _activity_section(
         outing_counts.append(
             ReportCount(
                 label=copy["awayMinutes"],
-                value=copy["awayMinutesValue"].format(minutes=round(sum(away_minutes))),
+                value=copy["awayMinutesValue"].format(
+                    minutes=round(sum(away_minutes)), n=len(away_minutes)
+                ),
             )
         )
     if not gait:
@@ -572,10 +587,19 @@ def _advice_section(
     results: list[dict[str, Any]], sustained: bool, t: dict[str, Any]
 ) -> ReportSection:
     copy = t["advice"]
-    band = str(results[-1].get("riskBand")) if results else "low"
-    if band == "elevated":
+    # A capture-only or rejected row must not become the week's advice — and a
+    # late low row must not hide an earlier elevated one. Aggregate the worst
+    # usable band across the period.
+    bands = {
+        r["riskBand"]
+        for r in results
+        if r.get("riskBand") in ("low", "watch", "elevated")
+        and r.get("quality") != "reject"
+        and r.get("insufficientStreams") is not True
+    }
+    if "elevated" in bands:
         tier, trigger = copy["tiers"]["elevated"], copy["triggers"]["elevated"]
-    elif band == "watch" or sustained:
+    elif "watch" in bands or sustained:
         tier, trigger = copy["tiers"]["watch"], copy["triggers"]["watch"]
     else:
         tier, trigger = copy["tiers"]["low"], copy["triggers"]["low"]

@@ -73,31 +73,19 @@ def _baseline_report(device_id: str, flat: dict[str, float], store: Store) -> Ba
 
 
 def _capture_quality(
-    frames_db: np.ndarray, vad_ratio: float, segments: list[tuple[int, int]], duration_ms: float
+    frames_db: np.ndarray, speech_ratio: float, duration_ms: float
 ) -> tuple[str, float | None]:
-    """Grade one capture exactly like A's on-device gate (`signal.ts#qualityOf`).
+    """Grade one capture with the same formula as A's `signal.ts#qualityOf`.
 
-    Both sides of the contract must agree on what "good" means, otherwise the
-    family report counts samples the phone would have discarded. SNR is the
-    speech-vs-silence median energy difference; returns ``None`` when the clip
-    has no silence to measure a floor from.
+    SNR is ``P90 - P10`` over the UNTRIMMED frame energies: trimming would delete
+    the noise floor the measure depends on. ``speech_ratio`` is the VAD ratio of
+    the TRIMMED clip, matching `vad.ts`; the two sides must agree or the weekly
+    fair/reject counts would describe different samples.
     """
-    speech = np.zeros(frames_db.size, dtype=bool)
-    for start, end in segments:
-        speech[start:end] = True
-    snr = (
-        float(np.median(frames_db[speech]) - np.median(frames_db[~speech]))
-        if speech.any() and (~speech).any()
-        else None
-    )
-    if (
-        vad_ratio < 0.25
-        or snr is None
-        or snr < 15.0
-        or duration_ms < 8_000
-    ):
+    snr = float(np.percentile(frames_db, 90) - np.percentile(frames_db, 10))
+    if speech_ratio < 0.25 or snr < 15.0 or duration_ms < 8_000:
         return "reject", snr
-    if vad_ratio >= 0.40 and snr >= 20.0:
+    if speech_ratio >= 0.40 and snr >= 20.0:
         return "good", snr
     return "fair", snr
 
@@ -129,7 +117,10 @@ def run_screening(
     trimmed_audio = AudioData(trimmed, audio.sample_rate, trimmed.size / audio.sample_rate, audio.source)
 
     features = extract_features(trimmed_audio)
-    quality, snr_db = _capture_quality(frames_db, vad.ratio, vad.segments, audio.duration_ms)
+    # Quality parity with the device: SNR from the untrimmed energy envelope,
+    # speech ratio from the trimmed clip (A's `vad.ts#qualityOf` uses the same pair).
+    trimmed_vad = energy_vad(frame_rms_db(trimmed_audio.samples, trimmed_audio.sample_rate))
+    quality, snr_db = _capture_quality(frames_db, trimmed_vad.ratio, audio.duration_ms)
 
     asr = transcribe(trimmed_audio, locale)
     ling = analyse_linguistics(asr.text)
@@ -144,7 +135,11 @@ def run_screening(
 
     flat = _flat_metrics(features.summary, ling.metrics, coh)
     baseline = _baseline_report(device_id, flat, store)
-    economics = estimate_economics(fusion.risk_index, fusion.band) if fusion.band != "low" else None
+    economics = (
+        estimate_economics(fusion.risk_index, fusion.band)
+        if fusion.band != "low" and quality != "reject"
+        else None
+    )
     audio_discarded = purge(buffer)
 
     result = ScreeningResult(
@@ -154,7 +149,7 @@ def run_screening(
         privacyMode=settings.privacy_mode,
         audioDiscarded=audio_discarded,
         durationMs=audio.duration_ms,
-        speechRatio=float(vad.ratio),
+        speechRatio=float(trimmed_vad.ratio),
         acousticFeatures=features.vector,
         acousticSummary=features.summary,
         asr={
@@ -239,8 +234,16 @@ def ingest_session(session: ScreeningSession, device_id: str, store: Store | Non
     same personal-baseline store.
     """
     store = store or default_store
+    marker = f"screening_session:{session.id}"
+    if store.get_doc(device_id, marker) is not None:
+        # Outbox is at-least-once: a replayed session must not add a second
+        # baseline sample (or a second report row).
+        return
     flat = {k: float(v) for k, v in session.features.items()}
     flat["speech_ratio"] = float(session.speechRatio)
+    # Sufficiency is decided by the PRIOR samples, so compute before storing this
+    # one (same order as `run_screening`).
+    baseline = _baseline_report(device_id, flat, store)
     if session.quality != "reject":
         # Only reject samples are excluded from the personal baseline; `fair` is
         # kept because a quiet senior at home rarely reaches "good".
@@ -255,4 +258,26 @@ def ingest_session(session: ScreeningSession, device_id: str, store: Store | Non
             "quality": session.quality, "snrDb": session.snrDb,
             "usedInBaseline": session.quality != "reject",
         },
+    )
+    # A's path carries no biomarkers/transcript, so no risk score can be computed.
+    # Write a capture-only result row instead: the family dashboard gets a real
+    # timeline and `sufficient` flag, and the badge stays "样本不足" because
+    # `insufficientStreams` is true. `riskBand="low"` is the documented
+    # single/missing-stream degradation, not an estimate; no `riskIndex` is made up.
+    store.record(
+        device_id,
+        "screening_results",
+        {
+            "at": session.startedAt, "id": session.id, "source": "screening_session",
+            "riskBand": "low", "insufficientStreams": True,
+            "quality": session.quality, "snrDb": session.snrDb,
+            "usedInBaseline": session.quality != "reject",
+            "baselineSufficient": baseline.sufficient,
+            "notForDiagnosis": True,
+        },
+    )
+    store.set_doc(
+        device_id,
+        marker,
+        {"at": session.startedAt, "quality": session.quality, "usedInBaseline": session.quality != "reject"},
     )
