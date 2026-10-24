@@ -10,9 +10,9 @@
 | 数据 | 产生位置 | 是否离开设备 | 保存位置 | 保留期 |
 |---|---|---|---|---|
 | 原始音频波形 | 手机麦克风 | **否** | 内存，特征提取后立即归零（`extract-and-burn`） | 秒级 |
-| 声学特征（eGeMAPS 88 维） | 端侧 / 后端分析 | 是（仅特征） | `backend/.data/memomate.db`（SQLite） | 90 天（待 C5 落地） |
+| 声学特征（eGeMAPS 88 维） | 端侧 / 后端分析 | 是（仅特征） | `backend/.data/memomate.db`（SQLite） | 按 90 天 TTL 清理（当前 `purge.py` 只覆盖会话） |
 | 转写文本 | Whisper（端侧或后端） | 仅派生指标入库，**原文不入库** | 仅长度/词汇指标 | 90 天 |
-| 对话文字 | 长者端语音转写 | 是（假名） | `records.payload` | 90 天（待 C5 加密/TTL） |
+| 对话文字 | 长者端语音转写 | 是（假名 + AES-GCM 密文） | `records.payload`（`v1:` 密文） | 90 天（`scripts/purge.py`）+ 可单条撤回 |
 | 步态窗口 / 跌倒 | `DeviceMotionEvent` | 是（摘要） | `records` | 90 天 |
 | 行为日汇总 | 端侧任务/屏幕/充电事件 | 是（计数） | `docs['behaviour:<day>']` | 90 天 |
 | 越界事件 | 前台定位 | 是（距离/时长，无坐标） | `docs['geofence_event:<id>']` + 家属 outbox | 90 天 |
@@ -35,8 +35,8 @@
 | 合法性基础 | DPP1：目的合法、方式公平 | 第 6 条：法定/同意/正当利益 | 首次启动有同意页 | 增加分层同意（§3） |
 | 数据最小化 | DPP1(2) | 第 5 条：适度原则 | 原始音频不上传；仅派生特征 | 保持；新增字段需 review |
 | 准确性 | DPP2 | 第 7 条 | 基线用 median/MAD；CUSUM 标持续偏移 | 家属端提供「数据纠错」入口 |
-| 保留期限 | DPP2(2) | 第 5(3) 条 | `store.py` 目前**无 TTL**（D7 已修存储，TTL 未做） | **C5**：90 天 TTL + `DELETE /conversation/turns/{id}` |
-| 安全 | DPP4 | 第 15 条 | 假名化 SHA256+盐；SQLite WAL；**会话明文** | **C5**：AES-GCM 静态加密，缺失密钥拒绝启动 |
+| 保留期限 | DPP2(2) | 第 5(3) 条 | 会话记忆 90 天 TTL；`scripts/purge.py` 每日清理 | 扩展 TTL 到步态/行为记录（后续） |
+| 安全 | DPP4 | 第 15 条 | 假名化 SHA256+盐；会话文字 AES-GCM（AAD 绑定 device+turn）；缺密钥拒绝启动 | 密钥托管与轮换（部署项） |
 | 查阅/更正 | DPP6 | 第 10、11 条 | 无导出功能 | 家属端「导出我的数据」（A/M3） |
 | 跨境传输 | s.33 未生效；PCPD 建议合约条文 | 第 20 条：接收地须有「适当保护程度」 | 港/澳双部署，数据各自本地保存 | 见 §4 |
 | 自动化决策 | 无专门条文（受 DPP1 约束） | 第 13 条：须告知逻辑 | 周报有「查看依据」（feature/z/样本/窗口） | 保持；报告固定附「如何得出此结论」 |
@@ -89,8 +89,8 @@
 - [x] 审计链：每次筛查写 hash 链（`audit.py`，`integrityOk` 可现场校验）
 - [x] 家属通知只写 outbox，不声称「已送达」（`notify.dispatch` 返回 `delivered: false`）
 - [x] 桌面组件待办文本纯端侧（`SharedPreferences`，见 §1）
-- [ ] TTL 与删除接口（C5）
-- [ ] 会话记忆 AES-GCM 加密（C5）
+- [x] TTL 与删除接口（C5：`scripts/purge.py` + `DELETE /conversation/turns/{id}`）
+- [x] 会话记忆 AES-GCM 加密（C5；缺 `AURA_ENCRYPTION_KEY` 拒绝启动）
 - [ ] k≥20 聚合门槛（C7/M3）
 - [ ] 家属端导出与撤销（A/M3）
 
@@ -101,7 +101,7 @@
 1. **通知未真正送达**：demo 走 webhook + 日志 + 家属 outbox；生产需接 FCM/APNs/Twilio，并补送达回执。
 2. **提醒只在 App 前台准时**：网页关闭不弹窗；锁屏到点依赖 Android `AlarmManager`（B 的 M2 交付）。
 3. **风险分层不是诊断**：单一 322 人中文数据集、回顾性分析，AUC 0.717，未做前瞻性验证。
-4. **会话记忆尚未加密**：C5 落地前，任何真实长者数据都不应进入 demo 库。
+4. **会话记忆已加密，但密钥托管仍是部署项**：`AURA_ENCRYPTION_KEY` 目前从环境变量读取，生产需 KMS + 轮换；C5 之前写入的明文行会在 TTL 到期前仍在库中。
 5. **跨境聚合统计**：k≥20 尚未实现，当前不做跨区导出。
 
 ---

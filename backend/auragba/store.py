@@ -115,5 +115,37 @@ class Store:
                 (device_id, key, json.dumps(value, ensure_ascii=False)),
             )
 
+    # --- retention / revocation helpers (C5) ------------------------------- #
+    def delete_before(self, kind: str, before_ms: int, device_id: str | None = None) -> int:
+        """Drop rows of `kind` older than the cutoff; returns the row count."""
+        query = "DELETE FROM records WHERE kind = ? AND at < ?"
+        params: list[Any] = [kind, int(before_ms)]
+        if device_id is not None:
+            query += " AND device_id = ?"
+            params.append(device_id)
+        with self._lock, self._connect() as db:
+            return int(db.execute(query, params).rowcount)
+
+    def count_before(self, kind: str, before_ms: int) -> int:
+        with self._lock, self._connect() as db:
+            row = db.execute(
+                "SELECT COUNT(*) AS n FROM records WHERE kind = ? AND at < ?",
+                (kind, int(before_ms)),
+            ).fetchone()
+        return int(row["n"])
+
+    def delete_by_id(self, device_id: str, kind: str, payload_id: str) -> bool:
+        """Delete one record whose JSON payload carries `id == payload_id`."""
+        with self._lock, self._connect() as db:
+            rows = db.execute(
+                "SELECT id, payload FROM records WHERE device_id = ? AND kind = ?",
+                (device_id, kind),
+            ).fetchall()
+            for row in rows:
+                if json.loads(row["payload"]).get("id") == payload_id:
+                    db.execute("DELETE FROM records WHERE id = ?", (row["id"],))
+                    return True
+        return False
+
 
 store = Store()

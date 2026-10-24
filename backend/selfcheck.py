@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import math
+import os
 import sys
 import tempfile
 import threading
@@ -21,6 +22,10 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# The self-check must not depend on the developer's shell. Uvicorn still refuses
+# to boot without a real AURA_ENCRYPTION_KEY (validated in config.validate_runtime).
+os.environ.setdefault("AURA_ENCRYPTION_KEY", "selfcheck-encryption-key-" + "0" * 16)
 
 from auragba import baseline as bl  # noqa: E402
 from auragba.audio import (  # noqa: E402
@@ -34,6 +39,7 @@ from auragba.contract import (  # noqa: E402
     AgentCard, AgentIntentRequest, AgentTool, AgentTurnRequest, BehaviourDaily,
     BehaviourDailyEnvelope, GeofenceEvent, SosEvent, TaskEvent, ToolCall,
 )
+from auragba.crypto import decrypt_text, encrypt_text  # noqa: E402
 from auragba.economics import estimate as economics  # noqa: E402
 from auragba.llm.turn import needs_confirm, plan_turn, sanitize_calls  # noqa: E402
 from auragba.model import (  # noqa: E402
@@ -94,6 +100,12 @@ except RuntimeError:
     pass
 else:
     raise AssertionError("a short AURA_AUTH_SECRET must be rejected at serve time")
+try:
+    validate_runtime(replace(settings, auth_secret="x" * 32, encryption_key=""))
+except RuntimeError:
+    pass
+else:
+    raise AssertionError("a missing AURA_ENCRYPTION_KEY must be rejected at serve time")
 validate_runtime(replace(settings, auth_secret="x" * 32, environment="development"))
 
 # --- intent whitelist parity with web/src/lib/types.ts (Issue #2 P0) ----------
@@ -555,6 +567,31 @@ assert "phone" not in scrubbed and "note" not in scrubbed, "PII / free text must
 assert "a@b.com" not in str(scrubbed)
 buf = bytearray(b"secret-audio")
 assert purge(buf) and set(buf) == {0}, "extract-and-burn must zero the buffer"
+
+# --- conversation encryption + retention primitives (DEV.md C5) ---------------
+_cipher = encrypt_text("dev-x", "turn-1", "我今日唔舒服，想睇医生")
+assert _cipher.startswith("v1:") and "唔舒服" not in _cipher, "ciphertext must not leak text"
+assert decrypt_text("dev-x", "turn-1", _cipher) == "我今日唔舒服，想睇医生"
+assert decrypt_text("dev-x", "turn-1", "legacy plaintext") == "legacy plaintext", "pre-C5 rows"
+try:
+    decrypt_text("dev-x", "turn-2", _cipher)
+except Exception:
+    pass
+else:
+    raise AssertionError("AAD must bind ciphertext to its turn id")
+
+with tempfile.TemporaryDirectory() as tmp:
+    st = Store(Path(tmp))
+    st.record("dev-r", "conversation", {"id": "c1", "at": 1_000, "text": "a"})
+    st.record("dev-r", "conversation", {"id": "c2", "at": 9_000, "text": "b"})
+    st.record("dev-other", "conversation", {"id": "o1", "at": 1_000, "text": "c"})
+    assert st.count_before("conversation", 5_000) == 2
+    assert st.delete_by_id("dev-r", "conversation", "c1") is True
+    assert st.delete_by_id("dev-r", "conversation", "c1") is False, "second delete must be a no-op"
+    assert [r["id"] for r in st.history("dev-r", "conversation")] == ["c2"]
+    assert st.delete_before("conversation", 10_000, "dev-r") == 1
+    assert st.history("dev-r", "conversation") == []
+    assert len(st.history("dev-other", "conversation")) == 1, "purge must be device-scoped here"
 
 # --- audit chain (tamper-evident) --------------------------------------------
 with tempfile.TemporaryDirectory() as tmp:

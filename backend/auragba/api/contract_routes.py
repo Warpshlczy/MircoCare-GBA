@@ -43,7 +43,10 @@ from ..llm.errors import (
     LLMQuotaExceeded,
     LLMUpstreamError,
 )
-from ..privacy import device_id, scrub_props, scrub_text
+from ..audit import audit_log
+from ..config import ENGINE_VERSION, FEATURE_SET_VERSION, FUSION_VERSION
+from ..crypto import encrypt_text
+from ..privacy import device_id, input_digest, scrub_props
 from ..screening import ingest_session
 from ..store import store
 from ..notify import dispatch as notify_dispatch
@@ -94,6 +97,16 @@ def post_sos(e: SosEvent, dev: str = Depends(device_id)) -> dict:
     store.record(dev, "sos", e.model_dump())
     store.set_doc(dev, "sos_last", {"at": e.at, "status": "pending", "reason": e.reason})
     notified = notify_dispatch(dev, "sos", e.model_dump())
+    # Tamper-evident ledger entry: who was queued, not what was said.
+    audit_log.append(
+        kind="sos",
+        device_id=dev,
+        engine_version=ENGINE_VERSION,
+        feature_set_version=FEATURE_SET_VERSION,
+        fusion_version=FUSION_VERSION,
+        input_digest=input_digest(dev, e.id, e.reason),
+        output={"notified": len(notified), "reason": e.reason, "source": e.source},
+    )
     return {"id": e.id, "notified": notified, "channel": "outbox", "delivered": False}
 
 
@@ -141,14 +154,44 @@ def post_telemetry(events: list[TelemetryEvent], dev: str = Depends(device_id)) 
 
 @router.post("/conversation/turns", status_code=204)
 def post_conversation_memory(turn: ConversationTurn, dev: str = Depends(device_id)) -> None:
-    """Persist one conversation turn (text only; the app keeps it locally first).
+    """Persist one conversation turn as AES-GCM ciphertext (C5).
 
-    ponytail: transcripts are retained to learn the senior's habits per DEV.md
-    §8.6 — that is personal data under PDPO/PDPA. Retention, encryption-at-rest
-    and a revocation path are REQUIRED before production. Upgrade: encrypt at
-    rest + TTL + explicit consent record.
+    The transcript is personal data under PDPO/PDPA. It is encrypted at rest with
+    AAD bound to (device, turn id), kept for `AURA_CONVERSATION_TTL_DAYS`, and can
+    be withdrawn through `DELETE /conversation/turns/{id}`.
     """
-    store.record(dev, "conversation", {**turn.model_dump(), "text": scrub_text(turn.text, keep=True)})
+    store.record(
+        dev,
+        "conversation",
+        {**turn.model_dump(), "text": encrypt_text(dev, turn.id, turn.text), "enc": "aes-gcm-v1"},
+    )
+
+
+@router.delete("/conversation/turns/{turn_id}", status_code=204)
+def delete_conversation_turn(turn_id: str, dev: str = Depends(device_id)) -> None:
+    """Withdraw one turn (PDPO/PDPA erasure request).
+
+    The ciphertext row is removed and a tamper-evident audit entry proves the
+    revocation. The personal baseline is recomputed on demand from screening
+    metrics (which never contain transcripts), so only a marker is written here.
+    """
+    if not store.delete_by_id(dev, "conversation", turn_id):
+        raise HTTPException(status_code=404, detail="conversation turn not found")
+    now = int(time.time() * 1000)
+    store.set_doc(
+        dev,
+        "conversation_revocation",
+        {"turnId": turn_id, "at": now, "baselineRecomputedAt": now},
+    )
+    audit_log.append(
+        kind="conversation_revoke",
+        device_id=dev,
+        engine_version=ENGINE_VERSION,
+        feature_set_version=FEATURE_SET_VERSION,
+        fusion_version=FUSION_VERSION,
+        input_digest=input_digest(dev, turn_id),
+        output={"deleted": True},
+    )
 
 
 @router.post("/behaviour/daily", status_code=204)

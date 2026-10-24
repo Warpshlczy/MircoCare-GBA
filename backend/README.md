@@ -18,7 +18,7 @@ python3 selfcheck.py                              # 可运行断言自检 → se
 
 - 交互式文档：`http://localhost:8000/docs`
 - 元信息根路由：`GET /`
-- `uvicorn` 要求环境里有 `AURA_AUTH_SECRET`（≥32 字节）；`.env.example` 已带本地开发值，生产必须更换。`selfcheck.py` 是纯引擎自检，**不需要**该变量（未设置也能裸跑）。
+- `uvicorn` 要求环境里有 `AURA_AUTH_SECRET` 与 `AURA_ENCRYPTION_KEY`（各 ≥32 字节）；`.env.example` 已带本地开发值，生产必须更换。`selfcheck.py` 是纯引擎自检，会自带一个本地测试密钥，**不需要**这两个变量。
 - 本机 Python 3.13；核心依赖为 `fastapi / uvicorn / pydantic / numpy / python-multipart`；
   启用真实模型另需 `opensmile / faster-whisper / jieba / lightgbm / scikit-learn / joblib`。
 
@@ -31,7 +31,7 @@ python3 selfcheck.py                              # 可运行断言自检 → se
 
 前端 `web/src/lib/api.ts` 通过 `NEXT_PUBLIC_API_BASE` 指向本服务（默认 `http://localhost:8000`）。首次加载会 `POST /auth/register` 建立 HttpOnly `aura_session` Cookie（原生/CLI 可用 `Authorization: Bearer`）；之后请求携带该会话与假名 `X-Device-Id` 头。**身份校验通过后**才会把请求映射到授权设备。CORS 由 `AURA_CORS_ORIGINS` 控制，必须是明确来源（`*` 会被拒绝启动）。
 
-**14 个前端契约端点**
+**15 个前端契约端点**
 
 | # | 端点 | 说明 | 状态 |
 |---|---|---|---|
@@ -43,12 +43,13 @@ python3 selfcheck.py                              # 可运行断言自检 → se
 | 6 | `POST /agent/cards` | Agent 卡片规划 | ⚙️ 已实现；未配置 501 |
 | 7 | `POST /agent/turn` | Agent 工具编排 | 🧪 mock planner；护栏已生效 |
 | 8 | `POST /telemetry/events` | 批量埋点（服务端二次脱敏） | 204 |
-| 9 | `POST /conversation/turns` | 会话记忆归档（按假名设备） | 204 |
+| 9 | `POST /conversation/turns` | 会话记忆归档（AES-GCM 加密；90 天 TTL） | 204 |
 | 10 | `POST /medication/plan` | 用药计划生成 | ⚙️ 已实现；未配置 501 |
 | 11 | `POST /reminders/escalate` | 提醒超时事件 + 家属 outbox | 204 |
 | 12 | `POST /behaviour/daily` | 行为流日汇总（`null` 不补 0；按 day 幂等） | 204 |
 | 13 | `POST /task/events` | 任务状态事件（created/completed/deferred/timeout） | 204 |
 | 14 | `POST /geofence/events` | 离家/返家越界事件（与 SOS 分开，按 id 幂等） | 204 |
+| 15 | `DELETE /conversation/turns/{id}` | 撤回单条会话 + 审计记录 + 基线重算标记 | 204 / 404 |
 
 > `/sos`、`/reminders/escalate`、`/reports/weekly/send` 统一走 `notify.dispatch`：先写家属 outbox，再打印「已通知家属 N 人」；配置 `AURA_NOTIFY_WEBHOOK` 时额外推一条粗粒度通知。demo 不声称“已送达”。
 
@@ -119,6 +120,8 @@ uvicorn auragba.main:app --env-file .env --reload --port 8000
 | 变量 | 说明 | 默认值 |
 |---|---|---|
 | `AURA_AUTH_SECRET` | HMAC 会话签名密钥，**必填**（≥32 字节） | 无（缺失即拒绝启动） |
+| `AURA_ENCRYPTION_KEY` | 会话文字 AES-GCM 密钥，**必填**（≥32 字节） | 无（缺失即拒绝启动） |
+| `AURA_CONVERSATION_TTL_DAYS` | 会话记忆保留天数（`scripts/purge.py`） | 90 |
 | `AURA_COOKIE_SECURE` | 生产 HTTPS 会话 Cookie；`AURA_ENV=production` 时强制为 `true` | `false` |
 | `AURA_ACOUSTIC_MODEL` | 声学流模型路径（`./models/acoustic_lgbm.txt`） | 空 → 手工权重兜底 |
 | `AURA_SEMANTIC_MODEL` | 语义流模型路径（`./models/semantic_lr.joblib`） | 空 → 手工权重兜底 |
@@ -154,6 +157,7 @@ backend/
 │   ├── train_acoustic_model.py    # eGeMAPS 特征 -> LightGBM
 │   ├── train_semantic_model.py    # 语言学特征 -> LogisticRegression
 │   ├── eval_fusion.py             # 端到端融合评估 + 阈值校准
+│   ├── purge.py                   # 会话记忆 TTL 清理（cron / Task Scheduler 每日跑）
 │   └── doctor.py                  # 环境/产物体检（协作排障第一步）
 ├── models/                  # 训练产物（.env 指向它们；*_report.json 为评估指标）
 │   ├── acoustic_lgbm.txt          semantic_lr.joblib
@@ -168,6 +172,7 @@ backend/
     ├── auth_store.py        # SQLite：账号、配对码、失败锁定、家属关系
     ├── notifications.py     # 家属 notification_outbox（推送 provider 的接缝）
     ├── notify.py            # 通知分发：outbox + 「已通知家属 N 人」日志 + 可选 webhook
+    ├── crypto.py            # AES-GCM：会话文字静态加密（AAD 绑定 device+turn）
     ├── store.py             # SQLite（WAL）：派生特征/事件按设备+类型+时间索引
     ├── audit.py             # SaMD 审计：append-only JSONL hash 链 + verify()
     ├── baseline.py          # 个人 14 天基线 Z-score（normal/watch/elevated）

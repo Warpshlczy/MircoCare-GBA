@@ -100,6 +100,12 @@ class Settings:
     # --- Notification provider seam (demo: webhook + log) -------------------
     notify_webhook: str = os.getenv("AURA_NOTIFY_WEBHOOK", "")
 
+    # --- Conversation memory at rest (C5) -----------------------------------
+    # AES-GCM key material; the server refuses to start without ≥32 characters.
+    # Production should supply a KMS-managed secret, not a passphrase.
+    encryption_key: str = os.getenv("AURA_ENCRYPTION_KEY", "")
+    conversation_ttl_days: int = _env_int("AURA_CONVERSATION_TTL_DAYS", 90)
+
     @property
     def llm_available(self) -> bool:
         return bool(self.llm_enabled and self.llm_base_url and self.llm_model)
@@ -130,6 +136,8 @@ def validate_runtime(s: Settings = settings) -> None:
     """
     if not s.auth_secret or len(s.auth_secret.encode("utf-8")) < 32:
         raise RuntimeError("AURA_AUTH_SECRET must be set to at least 32 bytes before starting the backend")
+    if not s.encryption_key or len(s.encryption_key.encode("utf-8")) < 32:
+        raise RuntimeError("AURA_ENCRYPTION_KEY must be set to at least 32 bytes before starting the backend")
     if s.environment == "production" and not s.cookie_secure:
         raise RuntimeError("AURA_COOKIE_SECURE=true is required in production")
     if "*" in s.cors_origins:

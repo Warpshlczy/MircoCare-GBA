@@ -73,6 +73,7 @@ def root() -> dict:
             "POST /assistant/chat (configurable)", "POST /agent/cards (configurable)",
             "POST /agent/turn (mock planner)",
             "POST /telemetry/events", "POST /conversation/turns",
+            "DELETE /conversation/turns/{id}",
             "POST /behaviour/daily", "POST /task/events", "POST /geofence/events",
             "POST /medication/plan (configurable)", "POST /reminders/escalate",
         ],
