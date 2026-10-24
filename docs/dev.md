@@ -2,7 +2,7 @@
 
 > 面向「挑战 1 · Agetech：跨境 GBA 部署」的黑客松参赛交付物。
 > 本文是**唯一开发文档**：定义新项目名称、系统边界、三名开发者的严格分工、文件级改动点、接口契约、里程碑门禁、验收标准与自检方式。
-> 约束来源：[ponytail.md](https://github.com/Warpshlczy/MircoCare-GBA/blob/main/.trae/ponytail.md)（先理解问题再写最少可工作的代码；能复用就复用；删优于加；非平凡逻辑留可运行断言；刻意简化用 `ponytail:` 标明天花板）。
+> 约束来源：[ponytail](https://github.com/DietrichGebert/ponytail)（先理解问题再写最少可工作的代码；能复用就复用；删优于加；非平凡逻辑留可运行断言；刻意简化用 `ponytail:` 标明天花板）。
 
 ---
 

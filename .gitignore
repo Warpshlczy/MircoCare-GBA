@@ -85,10 +85,7 @@ backend/auragba/Alzheimer-s-disease-datasets-master/
 .research/
 
 # IDE / editor local config
-# 用 .trae/* 而非 .trae/ ：目录本身不被排除，下一条例外才生效
-.trae/*
-# 例外：ponytail.md 是团队共同遵守的编码约束，docs/dev.md 引用它，必须可被远程读者打开
-!.trae/ponytail.md
+.trae/
 .vscode/
 .idea/
 
