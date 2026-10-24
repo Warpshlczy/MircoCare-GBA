@@ -78,6 +78,15 @@
         </receiver>
     </application>
 
+    <!-- Android 11+ package visibility: without this the TTS engine is invisible
+         and AuraNativePlugin.speak() would always resolve ok=false despite one
+         being installed. No permission is implied by this query. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
+    </queries>
+
     <!-- Permissions -->
 
     <uses-permission android:name="android.permission.INTERNET" />

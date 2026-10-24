@@ -6,7 +6,14 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.location.Location;
 import android.location.LocationManager;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.Settings;
+import android.speech.tts.TextToSpeech;
+import android.speech.tts.UtteranceProgressListener;
+
+import java.util.Locale;
+import java.util.UUID;
 
 import androidx.core.content.ContextCompat;
 
@@ -31,6 +38,11 @@ import com.getcapacitor.annotation.PermissionCallback;
  *   OS timer           scheduleDaily / cancelDaily              -> AlarmScheduler
  *   coarse position    getLocation                              -> LocationManager
  *   permissions        openAccessibilitySettings                -> Settings
+ *   voice out          speak / stopSpeak                        -> TextToSpeech
+ *
+ * `speak` is owned by workflow A (audio.ts#speak asks it first, Web Speech is the
+ * fallback); the rest are B's. Keeping both in one plugin is what lets a single
+ * WebView seam cover the whole shell.
  *
  * Plus `consumePendingReason()`, which is not a capability but a delivery
  * patch: `onCreate` can run before the WebView has a listener, so the launch
@@ -57,6 +69,18 @@ public class AuraNativePlugin extends Plugin {
 
     private static final String MIC = "mic";
     private static final String LOCATION = "location";
+    private static final String TTS_UTTERANCE_PREFIX = "aura-tts-";
+
+    // --- native TTS (the boy-ish preset arrives from audio.ts#BOY_VOICE) -----
+    private TextToSpeech tts;
+    private boolean ttsReady;
+    private PluginCall pendingSpeak;
+    private String pendingUtteranceId;
+    private String queuedText;
+    private String queuedLocale;
+    private float queuedPitch = 1.35f;
+    private float queuedRate = 0.9f;
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
 
     // --- wake word while backgrounded/locked ---------------------------------
 
@@ -238,6 +262,175 @@ public class AuraNativePlugin extends Plugin {
         ret.put("nightWakeCount", snap.nightWakeCount);
         ret.put("chargingHours", snap.chargingHours);
         call.resolve(ret);
+    }
+
+    // --- native TTS (boy timbre; no cloud, no text leaves the phone) --------
+
+    /**
+     * Speaks one line with Android's own TextToSpeech engine. The call resolves
+     * when the utterance finishes, so the WebView's lip-sync promise and the
+     * "speaking" state end together. A barge-in resolves `stopped`, NOT a
+     * failure — JS must not retry it through Web Speech.
+     *
+     * `pitch` / `rate` come from audio.ts#BOY_VOICE so the native and browser
+     * paths sound like the same character. There is no real child voice in
+     * Android TTS; pitch is the honest approximation.
+     */
+    @PluginMethod
+    public void speak(PluginCall call) {
+        String text = call.getString("text", "");
+        if (text == null || text.trim().isEmpty()) {
+            resolveSpeak(call, false, false);
+            return;
+        }
+        queuedText = text;
+        queuedLocale = call.getString("locale", "zh-HK");
+        Double pitch = call.getDouble("pitch", 1.35);
+        Double rate = call.getDouble("rate", 0.9);
+        queuedPitch = clamp(pitch == null ? 1.35f : pitch.floatValue(), 0.5f, 2.0f);
+        queuedRate = clamp(rate == null ? 0.9f : rate.floatValue(), 0.5f, 2.0f);
+
+        // New speech wins: tell the previous JS caller it was interrupted.
+        if (pendingSpeak != null) {
+            resolveSpeak(pendingSpeak, false, true);
+            pendingSpeak = null;
+        }
+        if (tts == null) {
+            pendingSpeak = call;
+            tts = new TextToSpeech(getContext(), this::onTtsInit);
+            return;
+        }
+        if (!ttsReady) {
+            pendingSpeak = call;
+            return;
+        }
+        speakQueued(call);
+    }
+
+    @PluginMethod
+    public void stopSpeak(PluginCall call) {
+        if (tts != null) tts.stop();
+        PluginCall pending = pendingSpeak;
+        pendingSpeak = null;
+        pendingUtteranceId = null;
+        if (pending != null) resolveSpeak(pending, false, true);
+        call.resolve();
+    }
+
+    private void onTtsInit(int status) {
+        if (status != TextToSpeech.SUCCESS) {
+            if (pendingSpeak != null) {
+                resolveSpeak(pendingSpeak, false, false);
+                pendingSpeak = null;
+            }
+            if (tts != null) {
+                tts.shutdown();
+                tts = null;
+            }
+            ttsReady = false;
+            return;
+        }
+        ttsReady = true;
+        tts.setOnUtteranceProgressListener(new UtteranceProgressListener() {
+            @Override
+            public void onStart(String utteranceId) {
+                // Mouth timing is driven by the WebView (viseme.ts); nothing to do.
+            }
+
+            @Override
+            public void onDone(String utteranceId) {
+                completeUtterance(utteranceId, true);
+            }
+
+            @Override
+            public void onError(String utteranceId) {
+                completeUtterance(utteranceId, false);
+            }
+
+            @Override
+            public void onError(String utteranceId, int errorCode) {
+                completeUtterance(utteranceId, false);
+            }
+        });
+        if (pendingSpeak != null) {
+            PluginCall call = pendingSpeak;
+            pendingSpeak = null;
+            if (queuedText != null) speakQueued(call);
+            else resolveSpeak(call, false, false);
+        }
+    }
+
+    private void speakQueued(PluginCall call) {
+        if (queuedText == null) {
+            resolveSpeak(call, false, false);
+            return;
+        }
+        Locale locale = Locale.forLanguageTag(
+                (queuedLocale == null ? "zh-HK" : queuedLocale).replace('_', '-'));
+        int availability = tts.setLanguage(locale);
+        if (availability == TextToSpeech.LANG_MISSING_DATA
+                || availability == TextToSpeech.LANG_NOT_SUPPORTED) {
+            // Cantonese is not universal on Android. Prefer the other Chinese
+            // variant to silence, but the returned timbre is still pitch-shifted.
+            Locale chinese = isCantonese(queuedLocale)
+                    ? Locale.TRADITIONAL_CHINESE : Locale.SIMPLIFIED_CHINESE;
+            availability = tts.setLanguage(chinese);
+        }
+        if (availability == TextToSpeech.LANG_MISSING_DATA
+                || availability == TextToSpeech.LANG_NOT_SUPPORTED) {
+            resolveSpeak(call, false, false);
+            return;
+        }
+        tts.setPitch(queuedPitch);
+        tts.setSpeechRate(queuedRate);
+
+        String utteranceId = TTS_UTTERANCE_PREFIX + UUID.randomUUID();
+        pendingSpeak = call;
+        pendingUtteranceId = utteranceId;
+        int status = tts.speak(queuedText, TextToSpeech.QUEUE_FLUSH, null, utteranceId);
+        if (status == TextToSpeech.ERROR) {
+            pendingSpeak = null;
+            pendingUtteranceId = null;
+            resolveSpeak(call, false, false);
+        }
+    }
+
+    private void completeUtterance(String utteranceId, boolean ok) {
+        mainHandler.post(() -> {
+            if (utteranceId == null || !utteranceId.equals(pendingUtteranceId)) return;
+            pendingUtteranceId = null;
+            PluginCall call = pendingSpeak;
+            pendingSpeak = null;
+            if (call != null) resolveSpeak(call, ok, false);
+        });
+    }
+
+    private void resolveSpeak(PluginCall call, boolean ok, boolean stopped) {
+        JSObject ret = new JSObject();
+        ret.put("ok", ok);
+        if (stopped) ret.put("stopped", true);
+        call.resolve(ret);
+    }
+
+    private static boolean isCantonese(String locale) {
+        if (locale == null) return false;
+        String l = locale.toLowerCase(Locale.ROOT);
+        return l.contains("hk") || l.contains("mo") || l.contains("yue");
+    }
+
+    private static float clamp(float value, float min, float max) {
+        return Math.max(min, Math.min(max, value));
+    }
+
+    @Override
+    protected void handleOnDestroy() {
+        if (tts != null) {
+            tts.stop();
+            tts.shutdown();
+            tts = null;
+        }
+        ttsReady = false;
+        super.handleOnDestroy();
     }
 
     // --- coarse position (foreground only) -----------------------------------

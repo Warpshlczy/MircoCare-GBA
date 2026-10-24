@@ -146,7 +146,7 @@ grep -rl "auragba" backend --include=*.py --include=*.txt --include=*.md | \
 | 能力 | 位置 | 现状 |
 |---|---|---|
 | 数字人 Canvas-2D + 口型 | [Avatar.tsx](https://github.com/Warpshlczy/MircoCare-GBA/blob/main/web/src/components/Avatar.tsx) | 眨眼/呼吸/嘴高 = `level`；props 仅 `state`/`level`/`size` |
-| 语音 TTS/STT/振幅表 | [audio.ts](https://github.com/Warpshlczy/MircoCare-GBA/blob/main/web/src/lib/audio.ts) | `rate 0.85`；`zh-CN` 用普通话，其余 `zh-HK` |
+| 语音 TTS/STT/振幅表 | [audio.ts](https://github.com/Warpshlczy/MircoCare-GBA/blob/main/web/src/lib/audio.ts) | 原生 `AuraNative.speak` 优先、Web Speech 回退；小男孩音色 `BOY_VOICE = { pitch 1.35, rate 0.9 }`；`zh-CN` 用普通话，其余 `zh-HK` |
 | 前台唤醒词 | [useWakeWord.ts](https://github.com/Warpshlczy/MircoCare-GBA/blob/main/web/src/hooks/useWakeWord.ts) | 命中即停识别并回调 |
 | 后台上锁唤醒 | [WakeListenService.java](https://github.com/Warpshlczy/MircoCare-GBA/blob/main/web/android/app/src/main/java/com/auragba/app/WakeListenService.java) | 前台服务 + `SpeechRecognizer` 循环 |
 | 四条主动开口 | [page.tsx](https://github.com/Warpshlczy/MircoCare-GBA/blob/main/web/src/app/page.tsx) | 唤醒回调 / boot 每日签到 / 回前台 20s 冷却 / 提醒到期 |
@@ -435,9 +435,14 @@ mv public/live2d/model.manifest.json /tmp/ && npm run build; mv /tmp/model.manif
 
 1. `lib/live2d.ts`：`fetch("/live2d/model.manifest.json")` → `parseManifest()` → `model` 为空直接返回 `null` → 否则按 `runtime` 顺序注入 `<script>` → `PIXI.live2d.Live2DModel.from(modelPath)` → 整体 3s 超时，任何异常返回 `null`。
 2. L1 下 `level` 在 `beforeModelUpdate` 里写入 `params.mouthOpen`；聆听时 `model.focus()` 朝屏幕中心；单击播 `motionGroups.tap`。
-3. 口型：`visemeFromText` 每字 4 帧 × 65ms（0.85 语速下粤语约 260ms/字），帧形为「开-全开-半开-收」，标点为闭口停顿；`speak()` 用 `setInterval(65)` 推进，`SpeechSynthesisUtterance.onboundary` 到来时**按 `charIndex×4` 跳帧校准**（平台事件，零依赖）；不支持 boundary 的设备退化为纯时间推进（`ponytail:` 注明天花板）。
-4. L2 Canvas 修复：`reduced-motion` 只关掉位移（呼吸、前倾），**眨眼与嘴照常**（修 §2.0 缺陷①）；聆听时轻微前倾 + 瞳孔朝中心。
-5. 单击数字人 = 重说上一句（适老化高频需求）；长按 1s = 取消播报并进入聆听，播报「你想講咩？」；长按期间不触发任何播报（issue #1 第 2 问）。
+3. 口型：`visemeFromText` 每字 4 帧 × 65ms（0.85 语速下粤语约 260ms/字），帧形为「开-全开-半开-收」，标点为闭口停顿；`speak()` 用 `setInterval(65)` 推进，Web Speech 的 `SpeechSynthesisUtterance.onboundary` 到来时**按 `charIndex×4` 跳帧校准**（平台事件，零依赖）；原生 TTS（Android `TextToSpeech` / `UtteranceProgressListener`）**不回调 boundary 也不输出 PCM**，因此原生路径只做纯时间推进；`frameMs` 按 `0.85 / rate` 拉伸，保证语速变了嘴形不脱节。不支持 boundary 的设备同样退化为纯时间推进（`ponytail:` 注明天花板）。
+4. **TTS 双路径（A3 新增）**：`audio.ts#speak` 先问 `bridge()`：
+   - **原生优先**：`AuraNative.speak(text, locale, BOY_VOICE)` → Android `TextToSpeech`，`setPitch(1.35)` / `setSpeechRate(0.9)`；Promise 一直持有到 `UtteranceProgressListener.onDone/onError`，所以嘴型时间线与真实播报同起同止。
+   - **Web Speech 回退**：无原生桥、`ok:false`（无引擎/无该语言）、抛异常时走 `SpeechSynthesisUtterance`，`rate/pitch` 用同一份 `BOY_VOICE`，音色在候选里优先挑 `child/kid/girl/female/…` 的年轻嗓音。
+   - **打断**：`cancelSpeech()` 同时 `speechSynthesis.cancel()` 与 `stopSpeak()`；原生返回 `{ok:false, stopped:true}` 表示「是我们主动打断」，JS **不得**回退去重说（`ponytail:` 已在 `native.ts` 注释）。
+   - **隐私**：TTS 文本全程留在端上，不接任何云端童声 API。
+5. L2 Canvas 修复：`reduced-motion` 只关掉位移（呼吸、前倾），**眨眼与嘴照常**（修 §2.0 缺陷①）；聆听时轻微前倾 + 瞳孔朝中心。
+6. 单击数字人 = 重说上一句（适老化高频需求）；长按 1s = 取消播报并进入聆听，播报「你想講咩？」；长按期间不触发任何播报（issue #1 第 2 问）。
 
 **验收**：默认（`model:null`）无 4xx、无脚本下载，直接 L2；§2.3.1 ⑥ 四条断言全过；`reduced-motion` 下无位移但眼睛会眨；口型与语音同步误差 < 150ms（支持 boundary 的设备录屏抽查 3 段）。
 
@@ -515,8 +520,9 @@ export function recordSpoke(r: ProactiveRecord, now: number): ProactiveRecord;  
 // lib/viseme.ts
 export const VISEME_FRAME_MS = 65, FRAMES_PER_CHAR = 4;
 export function visemeFromText(text: string): number[]; // 0..1，长度 = 字数 × 4
-// 第一版的 visemeFromAnalyser 删除：Web Speech TTS 不暴露音频流，没有可接的 AnalyserNode；
-// 麦克风侧的 RMS 已由 audio.ts#createAmplitudeMeter 提供。原生 TTS 上线时再按需加。
+// 第一版的 visemeFromAnalyser 删除：Web Speech 与 Android TextToSpeech 都不暴露音频流/
+// PCM，没有可接的 AnalyserNode；麦克风侧的 RMS 已由 audio.ts#createAmplitudeMeter 提供。
+// 口型由 visemeFromText 的时间线驱动，仅 Web Speech 的 onboundary 会做逐字校准。
 ```
 
 ```ts
@@ -596,16 +602,17 @@ test -z "$(find public/live2d \( -name '*.moc3' -o -name '*.model3.json' -o -nam
 |---|---|---|---|
 | D-1 | `vad.ts` 换 Silero（`@ricky0123/vad-web`） | **不引入**；新增 `snrDb()` + `qualityOf()` | 质量门控要拦的是「电视/风扇这类持续声」，Silero 只回答「是不是人声」——**电视里也是人声**，拦不住。而电视节目经过响度压缩、风扇空调是稳态噪声，二者的帧能量动态范围都窄，SNR（P90−P10）正好区分。省掉一个依赖 + ~2MB ONNX/wasm。天花板（离麦克风很近、动态大的电视对白仍可能过门）用 `ponytail:` 标在 `signal.ts`，升级路径：Silero 判人声 × SNR 判清晰度，二者相乘 |
 | D-2 | npm 引入 `pixi.js` + `pixi-live2d-display`，动态 import | **运行时脚本注入**，清单 `runtime` 字段 | Cubism Core 本就只能脚本加载；统一后零依赖、零首屏体积，许可证边界集中在 `public/live2d/vendor/` |
-| D-3 | `visemeFromAnalyser(a)` | 删除 | Web Speech TTS 无音频流，没有调用方；改用 `onboundary` 逐字校准 |
+| D-3 | `visemeFromAnalyser(a)` | 删除 | Web Speech 与 Android `TextToSpeech` 都不给音频流（后者连 `onboundary` 也没有），没有可接的 AnalyserNode；Web 路径改用 `onboundary` 逐字校准，原生路径按时间线推进 |
 | D-4 | `?demo=1` 预置脚本替换 STT | 删除 | 工具面板已有文字输入，走同一条 `runIntent`；嘈杂展台直接打字，不需要第二套构型 |
 | D-5 | 「常用四件事」：吃药 / 打电话 / 今日安排 / 找家人 | 「常用三件事」：食药 / 今日安排 / 打畀屋企人 | 「打电话」和「找家人」对长者是同一个动作；`tel:` 链接是平台原生拨号，无需 B 的 `CALL_PHONE` 权限 |
 | D-6 | 数字人 `role="img"` 且可点击 | 外层 `<button>` | 可点击的 `img` 违反本节自己的「禁止非交互元素挂点击」，读屏也不会告诉长者「可以点」 |
-| D-7 | 「音量 ≤30% → 自动调高 TTS 一级」 | 推迟 M4，需 B 提供 `getMediaVolume()` | Web 读不到系统音量，`SpeechSynthesisUtterance.volume` 默认已是最大值 1.0，「调高一级」在 Web 上不存在 |
+| D-7 | 「音量 ≤30% → 自动调高 TTS 一级」 | 推迟 M4，需 B 提供 `getMediaVolume()` | Web 读不到系统音量，`SpeechSynthesisUtterance.volume` 默认已是最大值 1.0；Android `TextToSpeech` 也没有音量 API（走 STREAM_MUSIC），「调高一级」两端都不存在，仍需 B 的原生 `AudioManager` 读数 |
 | D-8 | 访谈「连续 2 次拒答才停」 | 拒答一次即停 | 与同节验收矛盾；尊严优先 |
 | D-9 | 调度优先级 访谈 > 沉默关怀 | 沉默关怀 > 访谈 | 原顺序下沉默关怀永不触发（见 A2） |
 | D-10 | `StaticPortrait.tsx`、`components/avatar/MountLive2D.ts` 两个新文件 | 并入 `Avatar.tsx` / `lib/live2d.ts` | 最少文件；L3 只是几行 JSX |
 | D-11 | `checkin.ts` 每日签到 | 删除，并入调度器 | 两套「今天是否第一次」判定会互相打架 |
 | D-12 | 清单 `model:null` 时「连网络请求都不发」 | 只发一次清单请求 | 不读清单无法知道它是 null；要零请求只能构建期内联，而那会破坏「拔掉清单仍能构建」 |
+| D-13 | 接云端童声 TTS 插件（如 Azure/火山 neural child voice） | **不接**；原生 `TextToSpeech` + `pitch 1.35` / `rate 0.9`，Web Speech 同参数回退 | 童声只在云端有真模型，一次合成就要把长者对话文本（含姓名、用药、情绪）送出端，直接违反 PDPO 数据最小化；而系统 TTS 零延迟、离线可用、免费。代价是「像小孩」只是音高近似而非真童声——不宣称是真人童声，只在文档与答辩里明说。若未来拿到**端侧**童声模型（ONNX/TFLite）再替换，接口仍是 `AuraNative.speak` |
 
 ---
 
@@ -652,13 +659,13 @@ test -z "$(find public/live2d \( -name '*.moc3' -o -name '*.model3.json' -o -nam
 | `web/src/lib/outbox.ts` | 新增 | 指数退避重放：`enqueue` / `drain`（上限 500 条、7 天过期） |
 | [intent.ts](https://github.com/Warpshlczy/MircoCare-GBA/blob/main/web/src/lib/intent.ts) | 扩充 | 保留关键词兜底；新增 `navigate / call / alarm / message / repeat / cancel` |
 | [cards.ts](https://github.com/Warpshlczy/MircoCare-GBA/blob/main/web/src/lib/cards.ts) | 扩充 | `taskCard()`、`placeCard()`、`alarmCard()`、`agentPlanCard()`（展示「我准备做这 3 件事」） |
-| [native.ts](https://github.com/Warpshlczy/MircoCare-GBA/blob/main/web/src/lib/native.ts) | 扩充 | 新增 8 个方法（见 §3.5） |
+| [native.ts](https://github.com/Warpshlczy/MircoCare-GBA/blob/main/web/src/lib/native.ts) | 扩充 | 新增 8 个方法（见 §3.5）；另有 A 侧已落地的 `speak` / `stopSpeak`（原生 TTS，见 §2.3 A3） |
 | [api.ts](https://github.com/Warpshlczy/MircoCare-GBA/blob/main/web/src/lib/api.ts) | 接线 | `getAgentCards` / `assistantChat` / `getMedicationPlan` 接真后端；新增 `postAgentTurn`、`postTaskEvent`、`postBehaviorDaily` |
-| `AuraNativePlugin.java` | 重命名 + 补实现 | → `MemoNativePlugin.java`；`updateHomeWidget`、`bringToForeground`、`scheduleDaily`、`getLocation`、`openAccessibilitySettings` |
+| `AuraNativePlugin.java` | 重命名 + 补实现 | → `MemoNativePlugin.java`；`updateHomeWidget`、`bringToForeground`、`scheduleDaily`、`getLocation`、`openAccessibilitySettings`；保留 A 的 `speak` / `stopSpeak`（`TextToSpeech`，`UtteranceProgressListener` 持有 `PluginCall`） |
 | `HomeWidgetProvider.java` | 新增 | `AppWidgetProvider`：读 `SharedPreferences` → 渲染提醒清单 |
 | `res/layout/widget_home.xml`、`res/xml/widget_info.xml` | 新增 | 2×2 小组件：数字人头像 + 今日待办 3 条 |
 | `AutoPilotService.java` | 新增 | `AccessibilityService`：接收指令 → 找节点 → 执行 → 回传 |
-| `AndroidManifest.xml` | 修改 | 注册 service、widget receiver、`accessibility_service_config.xml` |
+| `AndroidManifest.xml` | 修改 | 注册 service、widget receiver、`accessibility_service_config.xml`；`<queries>` 声明 `TTS_SERVICE`（Android 11+ 包可见性，否则 TTS 引擎不可见） |
 
 ### 3.4 任务分解（可直接认领的步骤）
 
