@@ -18,7 +18,7 @@ ENGINE_VERSION = "aura-engine-0.2.0"
 # v2: 装了 openSMILE 后走真 eGeMAPS（v1 是 numpy 近似），summary 键在两个后端下已统一
 FEATURE_SET_VERSION = "egemaps88-v2"
 NLP_SET_VERSION = "nlp-metrics-v1"
-FUSION_VERSION = "latefusion-v3"  # v3: three streams (behaviour added); two-stream path unchanged
+FUSION_VERSION = "latefusion-v4"  # v4: three-stream thresholds transferred from the two-stream calibration
 
 
 def _env_float(name: str, default: float) -> float:

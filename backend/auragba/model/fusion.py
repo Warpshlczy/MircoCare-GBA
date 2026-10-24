@@ -23,6 +23,7 @@ from dataclasses import dataclass
 
 from ..config import settings
 from ..contract import StreamScore
+from .behavior import neutral_score
 
 
 @dataclass
@@ -72,10 +73,35 @@ def late_fusion(
     insufficient = len(available) < 2
     return FusionResult(
         risk_index=risk,
-        band="low" if insufficient else settings.risk_band(risk),
+        band="low" if insufficient else _band(risk, weights.get("behavior"), behavior is not None),
         weights=weights,
         acoustic=acoustic,
         semantic=semantic,
         behavior=behavior,
         insufficient_streams=insufficient,
     )
+
+
+def _band(risk: float, behavior_weight: float | None, has_behavior: bool) -> str:
+    """Two-stream thresholds, transferred onto the three-stream scale.
+
+    With behaviour present the calibrated cut-offs no longer sit at the same
+    place: a senior whose behaviour is *typical* (every feature at its prior
+    median) should still fall on the same band boundary as before. So we shift
+    each cut-off by the behaviour stream's neutral score:
+
+        t3 = (1 - w_b) * t2 + w_b * neutral
+
+    This is a calibration transfer, not a re-validation — documented as such in
+    `docs/evidence/fusion-sweep.md`.
+    """
+    if not has_behavior or behavior_weight is None:
+        return settings.risk_band(risk)
+    neutral = neutral_score()
+    watch = (1.0 - behavior_weight) * settings.risk_watch + behavior_weight * neutral
+    elevated = (1.0 - behavior_weight) * settings.risk_elevated + behavior_weight * neutral
+    if risk >= elevated:
+        return "elevated"
+    if risk >= watch:
+        return "watch"
+    return "low"

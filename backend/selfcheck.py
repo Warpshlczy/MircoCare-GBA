@@ -34,13 +34,14 @@ from auragba.audio import (  # noqa: E402
     FUNCTIONAL_DIM, FUNCTIONAL_NAMES, AudioData, energy_vad, extract_features,
     frame_rms_db, load_audio,
 )
+from auragba.api.caregiver_routes import interaction_trend  # noqa: E402
 from auragba.audit import AuditLog  # noqa: E402
 from auragba.changepoint import detect  # noqa: E402
 from auragba.config import settings, validate_runtime  # noqa: E402
 from auragba.contract import (  # noqa: E402
     AgentCard, AgentIntentRequest, AgentTool, AgentTurnRequest, AssistantChatRequest,
     BehaviourDaily, BehaviourDailyEnvelope, GeofenceEvent, ScreeningSession, SosEvent,
-    TaskEvent, ToolCall,
+    StreamScore, TaskEvent, ToolCall,
 )
 from auragba.crypto import decrypt_text, encrypt_text  # noqa: E402
 from auragba.economics import estimate as economics  # noqa: E402
@@ -50,7 +51,7 @@ from auragba.llm.turn import (  # noqa: E402
 from auragba.llm.errors import LLMUpstreamError  # noqa: E402
 from auragba.llm.safety import filter_chat_reply, safe_chat_reply  # noqa: E402
 from auragba.model import (  # noqa: E402
-    late_fusion, load_stream, score_acoustic, score_behavior, score_semantic,
+    late_fusion, load_stream, neutral_score, score_acoustic, score_behavior, score_semantic,
 )
 from auragba.nlp import analyse_linguistics, coherence  # noqa: E402
 from auragba.privacy import pseudonymize, purge, scrub_props  # noqa: E402
@@ -506,6 +507,9 @@ assert "task_confirm_delay_min" in _names and "night_wake_count" not in _names, 
 
 _proxy_day = BehaviourDaily(id="b-proxy", day="2026-01-01", hearingProxy=0.7)
 assert _proxy_day.visionProxy is None and _proxy_day.hearingProxy == 0.7
+assert BehaviourDaily(id="b-nogait", day="2026-01-02", gaitCv=None, fallEvents=0).fallEvents is None
+assert BehaviourDaily(id="b-gait", day="2026-01-02", gaitCv=0.1, fallEvents=0).fallEvents == 0
+assert BehaviourDaily(id="b-fall", day="2026-01-02", gaitCv=0.1, fallEvents=2).fallEvents == 2
 _beh_proxy = score_behavior(
     {**_EMPTY_DAY, "task_confirm_delay_min": 10.0, "fall_events": 1,
      "interaction_count": 2, "task_completion_rate": 0.5,
@@ -514,6 +518,8 @@ _beh_proxy = score_behavior(
     [],
 )
 assert _beh_proxy is not None and _beh_proxy.score == beh.score, "proxies must not move the score"
+_missing_falls = score_behavior({**_EMPTY_DAY, "interaction_count": 0, "fall_events": None}, [])
+assert _missing_falls is not None and all(c.name != "fall_events" for c in _missing_falls.contributions)
 
 personal = score_behavior(
     {"task_confirm_delay_min": 20.0},
@@ -529,6 +535,31 @@ assert abs(three.weights["acoustic"] - 0.15) < 1e-9
 assert abs(three.weights["semantic"] - 0.65) < 1e-9
 assert abs(three.weights["behavior"] - 0.20) < 1e-9
 assert three.insufficient_streams is False
+
+# Three-stream thresholds are transferred from the two-stream calibration so a
+# senior with typical behaviour keeps the same band boundary (DEV.md C1).
+def _equal_streams(value: float) -> tuple[StreamScore, StreamScore, StreamScore]:
+    return (
+        StreamScore(stream="acoustic", score=value, model="test"),
+        StreamScore(stream="semantic", score=value, model="test"),
+        StreamScore(stream="behavior", score=value, model="test"),
+    )
+
+
+_neutral = neutral_score()
+_watch3 = 0.8 * settings.risk_watch + 0.2 * _neutral
+_elev3 = 0.8 * settings.risk_elevated + 0.2 * _neutral
+assert late_fusion(*_equal_streams(_watch3 + 0.001)).band == "watch"
+assert late_fusion(*_equal_streams(_watch3 - 0.001)).band == "low"
+assert late_fusion(*_equal_streams(_elev3 + 0.001)).band == "elevated"
+assert late_fusion(*_equal_streams(_elev3 - 0.001)).band == "watch"
+
+_two_watch = StreamScore(stream="acoustic", score=0.409, model="test")
+_two_watch_sem = StreamScore(stream="semantic", score=0.409, model="test")
+_two_low = StreamScore(stream="acoustic", score=0.408, model="test")
+_two_low_sem = StreamScore(stream="semantic", score=0.408, model="test")
+assert late_fusion(_two_watch, _two_watch_sem).band == "watch"
+assert late_fusion(_two_low, _two_low_sem).band == "low", "two-stream thresholds stay calibrated"
 
 partial = late_fusion(ac, None, beh)
 assert set(partial.weights) == {"acoustic", "behavior"}
@@ -878,5 +909,25 @@ with tempfile.TemporaryDirectory() as tmp:
 
     ingest_session(ScreeningSession(id="q-legacy", startedAt=now_q + 2000, **base), "dev-q", store=st)
     assert len(st.history("dev-q", "screening_metrics")) == 2, "old clients without quality still count"
+
+# --- interaction trend: latest closed day vs the senior's own median ----------
+with tempfile.TemporaryDirectory() as tmp:
+    st = Store(Path(tmp))
+    now_i = int(time.time() * 1000)
+
+    def _behaviour_doc(device: str, offset: int, value: int) -> None:
+        day = time.strftime("%Y-%m-%d", time.localtime((now_i - offset * 86_400_000) / 1000))
+        st.set_doc(device, f"behaviour:{day}", {"behaviour": {"interactionCount": value}})
+
+    for _offset, _value in ((4, 6), (3, 6), (2, 6), (1, 2)):
+        _behaviour_doc("dev-i", _offset, _value)
+    trend = interaction_trend(st, "dev-i", now_ms=now_i)
+    assert trend == {
+        "today": 2, "baselineMedian": 6.0, "deltaPct": -0.667,
+        "decreased": True, "samples": 3,
+    }, "latest closed day is compared with the three prior median"
+    _behaviour_doc("dev-j", 2, 6)
+    _behaviour_doc("dev-j", 1, 6)
+    assert interaction_trend(st, "dev-j", now_ms=now_i) is None, "fewer than 3 baseline days -> null"
 
 print("selfcheck: OK")

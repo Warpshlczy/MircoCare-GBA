@@ -2,11 +2,60 @@
 
 from __future__ import annotations
 
+import time
+
 from fastapi import APIRouter, Depends, HTTPException
 
 from ..auth import Principal, current_principal, family_relations, require_role
 from ..notifications import notify_families
 from ..store import store
+
+DAY_MS = 86_400_000
+
+
+def _day(ms: int) -> str:
+    return time.strftime("%Y-%m-%d", time.localtime(ms / 1000))
+
+
+def interaction_trend(store: object, device_id: str, now_ms: int | None = None) -> dict | None:
+    """Today's interaction count vs the senior's own recent median.
+
+    B uploads only CLOSED days, so `today` below means "the latest closed day",
+    not necessarily the calendar date. Returns None until there are at least
+    three baseline days — no startup-day alarm.
+    """
+    now_ms = int(time.time() * 1000) if now_ms is None else now_ms
+    latest: float | None = None
+    history: list[float] = []
+    for offset in range(8):
+        document = store.get_doc(device_id, f"behaviour:{_day(now_ms - offset * DAY_MS)}")
+        if not document:
+            continue
+        value = (document.get("behaviour") or {}).get("interactionCount")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        if latest is None:
+            latest = float(value)
+        else:
+            history.append(float(value))
+    if latest is None or len(history) < 3:
+        return None
+
+    ordered = sorted(history)
+    mid = len(ordered) // 2
+    median = (
+        ordered[mid]
+        if len(ordered) % 2
+        else (ordered[mid - 1] + ordered[mid]) / 2
+    )
+    delta = round((latest - median) / median, 3) if median > 0 else None
+    return {
+        "today": int(latest),
+        "baselineMedian": median,
+        "deltaPct": delta,
+        "decreased": bool(median > 0 and latest <= median * 0.5),
+        "samples": len(history),
+    }
 
 router = APIRouter(prefix="/caregiver", tags=["caregiver"])
 
@@ -52,6 +101,7 @@ def overview(
         # Top-level shortcut for clients that only render a single badge. Older
         # rows predate the flag, so `None` means "unknown", never "sufficient".
         "sufficient": trend[-1].get("baselineSufficient") if trend else None,
+        "interactionTrend": interaction_trend(store, device),
         "screeningSessions": store.history(device, "screening_sessions")[-30:],
         "activityTrend": store.history(device, "gait")[-30:],
         "alerts": alerts[-30:],

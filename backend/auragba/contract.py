@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 Locale = Literal["zh-HK", "zh-MO", "zh-CN"]
 # Mirrors `Intent` in web/src/lib/types.ts. The six agent-layer intents
@@ -306,11 +306,20 @@ class BehaviourDaily(_Base):
     deferCount: int = Field(default=0, ge=0)
     interactionCount: int = Field(default=0, ge=0)
     gaitCv: float | None = Field(default=None, ge=0)
-    fallEvents: int = Field(default=0, ge=0)
+    # null = gait was not measured that day. Old uploaders send 0 even when
+    # `gaitCv` is null, so the validator below normalises that ambiguity.
+    fallEvents: int | None = Field(default=None, ge=0)
     # Report-only proxies (A's interview/hearing-vision capture). They are shown
     # in the weekly "activity" section and never enter the behaviour score.
     hearingProxy: float | None = Field(default=None, ge=0)
     visionProxy: float | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def _unmeasured_falls(self) -> "BehaviourDaily":
+        # No gait window => "0 falls" is not a reading, it is a missing value.
+        if self.gaitCv is None and self.fallEvents == 0:
+            self.fallEvents = None
+        return self
 
 
 class CircadianDaily(_Base):

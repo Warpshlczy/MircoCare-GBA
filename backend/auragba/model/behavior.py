@@ -59,6 +59,15 @@ def _day(ms: int) -> str:
     return time.strftime("%Y-%m-%d", time.localtime(ms / 1000))
 
 
+def neutral_score() -> float:
+    """Score when every feature sits at its illustrative prior median.
+
+    Used by the fusion layer to transfer the calibrated two-stream thresholds
+    onto the three-stream scale without labelled behaviour data.
+    """
+    return 1.0 / (1.0 + math.exp(-_BIAS))
+
+
 def flatten(envelope: dict[str, Any]) -> dict[str, float | None]:
     """One stored envelope -> the flat feature bag the scorer accepts."""
     behaviour = envelope.get("behaviour") or {}
