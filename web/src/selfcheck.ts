@@ -59,6 +59,17 @@ import { runTurn } from "./lib/agent.ts";
 import type { AgentDeps } from "./lib/agent.ts";
 import { createToolRunner, emergencyNumber } from "./lib/toolExec.ts";
 import {
+  careSignals,
+  careLine,
+  caregiverLine,
+  carePrompt,
+  mentionsDiagnosis,
+  CARE,
+  DIAGNOSIS_WORDS,
+} from "./lib/care.ts";
+import type { CareSignal } from "./lib/care.ts";
+import { planForeground, shouldRaiseSos, SOS_EVENT, SOS_DEBOUNCE_MS } from "./lib/foreground.ts";
+import {
   TOOLS,
   confirmToolNames,
   openAiTools,
@@ -1049,6 +1060,127 @@ assert.equal(magnitude(3, 4, 0), 5);
   assert.equal(spoke.executed.length, 1);
   assert.equal(spoke.reply, made.message?.replace("買降壓藥", "買藥"), "one sentence, not two");
   assert.equal(spoke.reply.includes("幫你記住咗"), false, "the planner's filler is dropped");
+}
+
+// --- care signals: observations, never an emotion label (B / elderly UX) -----
+{
+  // THE rule this module exists for: a quiet day with no personal baseline is
+  // NOT a signal. "We did not observe" and "he withdrew" are different facts.
+  assert.deepEqual(careSignals({ today: { interactions: 0 } }), [], "silence alone is not a signal");
+  assert.deepEqual(careSignals({ today: { interactions: 0 }, baseline: { interactions: 4 } }), [],
+    "a baseline below the floor is not a baseline");
+  assert.deepEqual(careSignals({ today: {} }), [], "no measurement, no finding");
+
+  // A genuine drop against a real personal baseline IS worth asking about.
+  assert.deepEqual(careSignals({ today: { interactions: 2 }, baseline: { interactions: 10 } }), [
+    "fewer_interactions",
+  ]);
+  assert.deepEqual(careSignals({ today: { interactions: 6 }, baseline: { interactions: 10 } }), [],
+    "a normal day is normal");
+
+  // Thresholds are inclusive at the boundary and ordered strongest-first.
+  assert.deepEqual(careSignals({ today: { fallEvents: 1, interactions: 2 }, baseline: { interactions: 10 } }),
+    ["falls_or_sos", "fewer_interactions"]);
+  assert.deepEqual(careSignals({ today: { painMentions: CARE.painAtLeast } }), ["pain_mentions"]);
+  assert.deepEqual(careSignals({ today: { painMentions: CARE.painAtLeast - 1 } }), []);
+  assert.deepEqual(careSignals({ today: { unheard: 3 } }), ["repeated_unheard"]);
+  assert.deepEqual(careSignals({ today: { nightWakeCount: 3 } }), ["night_activity"]);
+  assert.deepEqual(careSignals({ today: { repeats: 3 } }), ["repeated_question"]);
+  assert.deepEqual(careSignals({ today: { sodEvents: 1 } as never }), [], "an unknown counter is ignored");
+
+  // The senior hears ONE open question, the strongest one.
+  const hot = careSignals({ today: { fallEvents: 1, interactions: 1, painMentions: 5 }, baseline: { interactions: 10 } });
+  assert.equal(careLine(hot, "zh-HK"), careLine(["falls_or_sos"], "zh-HK"));
+  assert.equal(carePrompt({ today: {} }, "zh-HK"), null, "nothing to say means saying nothing");
+
+  // Every line, every locale: an observation + a question, never a diagnosis.
+  const allSignals: CareSignal[] = [
+    "fewer_interactions",
+    "repeated_unheard",
+    "repeated_question",
+    "pain_mentions",
+    "night_activity",
+    "falls_or_sos",
+  ];
+  for (const locale of ["zh-HK", "zh-MO", "zh-CN"] as const) {
+    for (const s of allSignals) {
+      const ask = careLine([s], locale) ?? "";
+      const fam = caregiverLine([s], locale) ?? "";
+      assert.ok(ask.length > 0, `missing senior copy for ${s}/${locale}`);
+      assert.ok(fam.length > 0, `missing caregiver copy for ${s}/${locale}`);
+      assert.equal(mentionsDiagnosis(ask), false, `${s}/${locale} senior copy must not diagnose: ${ask}`);
+      assert.equal(mentionsDiagnosis(fam), false, `${s}/${locale} caregiver copy must not diagnose: ${fam}`);
+    }
+  }
+  // The scanner itself has to work, or the loop above proves nothing.
+  assert.equal(mentionsDiagnosis("長者可能抑鬱"), true);
+  assert.equal(mentionsDiagnosis("detected low mood"), false, "the word list is Chinese + a few English stems");
+  assert.ok(DIAGNOSIS_WORDS.length > 5);
+}
+
+// --- foreground decision table (B / W3 consumption side) --------------------
+{
+  for (const reason of FOREGROUND_REASONS) {
+    const plan = planForeground(reason, "zh-HK");
+    assert.ok(["silent", "listen", "speak", "refresh"].includes(plan.kind), `no plan for ${reason}`);
+    if (plan.kind === "silent") assert.equal(reason, "boot", "only boot may stay silent");
+    if (plan.kind === "listen" || plan.kind === "speak") {
+      assert.ok(plan.say.length > 0);
+      assert.equal(mentionsDiagnosis(plan.say), false);
+    }
+  }
+
+  // A reboot re-arms alarms; it must never start talking in an empty room.
+  assert.equal(planForeground("boot", "zh-HK").kind, "silent");
+  // Reaching for the widget means "listen to me", not "lecture me".
+  const widget = planForeground("widget", "zh-HK");
+  assert.equal(widget.kind, "listen");
+  assert.equal(planForeground("alarm", "zh-HK").kind, "speak");
+  // A reminder's own prompt is already on screen; two voices would collide.
+  assert.equal(planForeground("reminder", "zh-HK").kind, "refresh");
+  assert.equal(planForeground("notification", "zh-HK").kind, "refresh");
+  assert.equal(planForeground("widget", "zh-CN").kind, "listen");
+
+  // The lock-screen SOS hot zone is pressable from a pocket.
+  const now = 1_000_000;
+  assert.equal(shouldRaiseSos(null, now), true);
+  assert.equal(shouldRaiseSos(now - SOS_DEBOUNCE_MS + 1, now), false, "a double tap must not page twice");
+  assert.equal(shouldRaiseSos(now - SOS_DEBOUNCE_MS, now), true);
+  assert.equal(SOS_EVENT, "memomate:sos");
+}
+
+// --- elderly regression: unlettered, mixed-language, unhandled --------------
+{
+  const NOW = new Date(2026, 9, 24, 11, 0, 0).getTime();
+  const quiet: AgentDeps = { locale: "zh-HK", now: NOW, reminders: [], tasks: [] };
+
+  // Nothing wired and nothing understood -> NOT ours. A's own path still runs.
+  assert.equal((await runTurn("我唔識點做", quiet)).handled, false);
+  assert.equal((await runTurn("喂？有人嗎？", quiet)).handled, false);
+
+  // Cantonese + English in one breath must not be mangled into a chore.
+  const mixed = await runTurn("幫我 remember 買牛奶", {
+    ...quiet,
+    requestTurn: async (req) => ({
+      reply: "",
+      calls: [{ name: "create_task", args: { text: req.utterance } }],
+      cards: [],
+    }),
+  });
+  assert.equal(mixed.executed.length > 0 || mixed.skipped.length > 0, true);
+
+  // A refusal is spoken, never silently swallowed, and never reaches the model.
+  let reached = false;
+  const refused = await runTurn("幫我轉賬畀阿明", {
+    ...quiet,
+    requestTurn: async () => {
+      reached = true;
+      return { reply: "", calls: [], cards: [] };
+    },
+  });
+  assert.equal(refused.refused, true);
+  assert.equal(reached, false);
+  assert.ok(refused.reply.includes("做唔到"), `reply=${refused.reply}`);
 }
 
 console.log("selfcheck: OK");
