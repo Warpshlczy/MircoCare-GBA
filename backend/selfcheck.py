@@ -31,12 +31,14 @@ from auragba.audit import AuditLog  # noqa: E402
 from auragba.changepoint import detect  # noqa: E402
 from auragba.config import settings, validate_runtime  # noqa: E402
 from auragba.contract import (  # noqa: E402
-    AgentIntentRequest, AgentTool, AgentTurnRequest, BehaviourDaily,
-    BehaviourDailyEnvelope, TaskEvent, ToolCall,
+    AgentCard, AgentIntentRequest, AgentTool, AgentTurnRequest, BehaviourDaily,
+    BehaviourDailyEnvelope, GeofenceEvent, SosEvent, TaskEvent, ToolCall,
 )
 from auragba.economics import estimate as economics  # noqa: E402
 from auragba.llm.turn import needs_confirm, plan_turn, sanitize_calls  # noqa: E402
-from auragba.model import late_fusion, score_acoustic, score_semantic  # noqa: E402
+from auragba.model import (  # noqa: E402
+    late_fusion, load_stream, score_acoustic, score_behavior, score_semantic,
+)
 from auragba.nlp import analyse_linguistics, coherence  # noqa: E402
 from auragba.privacy import pseudonymize, purge, scrub_props  # noqa: E402
 from auragba.reports.weekly import DIAGNOSTIC_WORDS, build_weekly_report, render_html  # noqa: E402
@@ -74,6 +76,9 @@ assert settings.fusion_w_semantic == 0.8, f"semantic weight default drifted: {se
 assert settings.risk_watch == 0.409, f"watch threshold drifted: {settings.risk_watch}"
 assert settings.risk_elevated == 0.521, f"elevated threshold drifted: {settings.risk_elevated}"
 assert abs(settings.fusion_w_acoustic + settings.fusion_w_semantic - 1.0) < 1e-9
+assert settings.fusion3_w_acoustic == 0.15 and settings.fusion3_w_semantic == 0.65
+assert settings.fusion3_w_behavior == 0.20
+assert abs(settings.fusion3_w_acoustic + settings.fusion3_w_semantic + settings.fusion3_w_behavior - 1.0) < 1e-9
 
 # band boundaries are inclusive on the lower edge
 assert settings.risk_band(0.408) == "low"
@@ -144,6 +149,8 @@ assert [c.name for c in emergency.calls] == ["sos"] and "求助" in emergency.re
 
 forbidden = plan_turn(_turn("帮我转账畀阿明"))
 assert forbidden.calls == [] and forbidden.reply, "money requests must never become tool calls"
+for _phrase in ("畀钱阿明", "买股票", "transfer money", "password"):
+    assert plan_turn(_turn(_phrase)).calls == [], f"backend refusal set must cover {_phrase}"
 
 no_registry = plan_turn(_turn("帮我记住", tools=[_TURN_TOOLS[0]]))
 assert no_registry.calls == [] and no_registry.reply, "no create_task in registry -> no call"
@@ -230,6 +237,32 @@ for _bad in (
     else:
         raise AssertionError(f"invalid TaskEvent accepted: {_bad}")
 
+# --- CardKind / SosEvent.source / geofence (B ↔ C follow-ups) ------------------
+for _kind in ("task", "med", "weather", "camera", "info", "place", "alarm", "agentPlan"):
+    AgentCard(id="card-x", kind=_kind, title="t", createdAt=0)
+try:
+    AgentCard(id="card-x", kind="video", title="t", createdAt=0)
+except Exception:
+    pass
+else:
+    raise AssertionError("unknown CardKind must be rejected")
+
+_sos = {"id": "s1", "at": 1, "locale": "zh-CN", "reason": "button",
+        "confirmed": True, "status": "pending"}
+assert SosEvent(**_sos).source == "app", "existing clients default to app"
+assert SosEvent(**_sos, source="widget").source == "widget"
+
+_ge = GeofenceEvent(id="ge1", at=1, kind="exit", distanceM=1240.0)
+assert _ge.minutesAway is None
+assert GeofenceEvent(id="ge2", at=2, kind="enter", distanceM=15.0, minutesAway=62.0).minutesAway == 62.0
+for _bad in ({"kind": "left", "distanceM": 10}, {"kind": "exit", "distanceM": -1}):
+    try:
+        GeofenceEvent(id="g", at=1, **_bad)
+    except Exception:
+        pass
+    else:
+        raise AssertionError(f"invalid GeofenceEvent accepted: {_bad}")
+
 # --- audio: schema + features -------------------------------------------------
 assert len(FUNCTIONAL_NAMES) == FUNCTIONAL_DIM == 88, "functional schema must be 88 slots"
 assert len(set(FUNCTIONAL_NAMES)) == 88, "functional names must be unique"
@@ -297,8 +330,73 @@ assert score_semantic({"tokens": 0.0}, 0.0) is None, "no transcript -> no semant
 fused = late_fusion(ac, sem)
 assert abs(sum(fused.weights.values()) - 1.0) < 1e-9, "fusion weights must normalise"
 assert 0.0 <= fused.risk_index <= 1.0 and fused.band in ("low", "watch", "elevated")
+
+# Two-stream regression: without behaviour the calibrated 0.2/0.8 result must be
+# reproduced exactly (DEV.md C1 acceptance).
+legacy = late_fusion(ac, sem)
+assert abs(legacy.weights["acoustic"] - 0.2) < 1e-9 and abs(legacy.weights["semantic"] - 0.8) < 1e-9
+assert abs(legacy.risk_index - (0.2 * ac.score + 0.8 * sem.score)) < 1e-9
+
+# A single stream can never produce watch/elevated.
 solo = late_fusion(ac, None)
-assert solo.weights == {"acoustic": 1.0, "semantic": 0.0} and abs(solo.risk_index - ac.score) < 1e-9
+assert solo.weights == {"acoustic": 1.0} and abs(solo.risk_index - ac.score) < 1e-9
+assert solo.insufficient_streams is True and solo.band == "low", "one stream must be pinned to low"
+
+# --- behaviour stream (DEV.md C1) ---------------------------------------------
+_EMPTY_DAY = {
+    "task_confirm_delay_min": None, "task_timeout_rate": None,
+    "task_completion_rate": None, "defer_count": None, "interaction_count": None,
+    "gait_cv": None, "fall_events": None, "night_wake_count": None,
+    "app_switch_count": None, "op_fail_rate": None,
+}
+assert score_behavior(_EMPTY_DAY, []) is None, "all-null rollup -> no behaviour stream"
+
+beh = score_behavior(
+    {**_EMPTY_DAY, "task_confirm_delay_min": 10.0, "fall_events": 1,
+     "interaction_count": 2, "task_completion_rate": 0.5,
+     "task_timeout_rate": 0.3, "defer_count": 2, "gait_cv": 0.1},
+    [],
+)
+assert beh is not None and beh.stream == "behavior" and 0.0 <= beh.score <= 1.0
+assert beh.model == "rules-illustrative", "no history -> illustrative prior label"
+_names = {c.name for c in beh.contributions}
+assert "task_confirm_delay_min" in _names and "night_wake_count" not in _names, "nulls are skipped"
+
+personal = score_behavior(
+    {"task_confirm_delay_min": 20.0},
+    [{"task_confirm_delay_min": 2.0} for _ in range(5)],
+)
+assert personal is not None and personal.model == "rules-personal"
+_contrib = next(c for c in personal.contributions if c.name == "task_confirm_delay_min")
+assert _contrib.contribution > 2.0 and _contrib.direction == "risk"
+
+three = late_fusion(ac, sem, beh)
+assert abs(sum(three.weights.values()) - 1.0) < 1e-9
+assert abs(three.weights["acoustic"] - 0.15) < 1e-9
+assert abs(three.weights["semantic"] - 0.65) < 1e-9
+assert abs(three.weights["behavior"] - 0.20) < 1e-9
+assert three.insufficient_streams is False
+
+partial = late_fusion(ac, None, beh)
+assert set(partial.weights) == {"acoustic", "behavior"}
+assert abs(sum(partial.weights.values()) - 1.0) < 1e-9
+assert partial.insufficient_streams is False
+
+# load_stream: read stored daily docs, newest becomes "today".
+with tempfile.TemporaryDirectory() as tmp:
+    st = Store(Path(tmp))
+    _now = int(time.time() * 1000)
+    for _offset in (2, 1, 0):
+        _day_key = time.strftime("%Y-%m-%d", time.localtime((_now - _offset * 86_400_000) / 1000))
+        st.set_doc("dev-beh", f"behaviour:{_day_key}", {
+            "behaviour": {"id": f"b{_offset}", "day": _day_key, "taskConfirmDelayMin": 2.0 + _offset,
+                          "taskTimeoutRate": 0.1, "taskCompletionRate": 0.9, "deferCount": 0,
+                          "interactionCount": 5, "gaitCv": 0.05, "fallEvents": 0},
+            "circadian": None, "digitalSkill": None,
+        })
+    stream = load_stream(st, "dev-beh", now_ms=_now, days=14)
+    assert stream is not None and stream.stream == "behavior"
+    assert load_stream(st, "dev-none", now_ms=_now, days=14) is None
 
 # --- personal baseline: robust Z, trend, sufficiency (DEV.md C2) --------------
 WEEK_MS = 7 * 86_400_000
@@ -413,6 +511,13 @@ with tempfile.TemporaryDirectory() as tmp:
               {"at": now_ms - 86_400_000, "id": "s1", "riskIndex": 0.55, "riskBand": "elevated"})
     st.record("dev-rep", "telemetry",
               {"id": "t1", "name": "daily_checkin", "at": now_ms - 3_600_000, "locale": "zh-CN"})
+    _today_key = time.strftime("%Y-%m-%d", time.localtime(now_ms / 1000))
+    st.set_doc("dev-rep", f"behaviour:{_today_key}", {
+        "behaviour": {"id": "b1", "day": _today_key, "taskConfirmDelayMin": 8.0,
+                      "taskTimeoutRate": 0.1, "taskCompletionRate": 0.8, "deferCount": 1,
+                      "interactionCount": 5, "gaitCv": 0.06, "fallEvents": 0},
+        "circadian": None, "digitalSkill": None,
+    })
 
     report = build_weekly_report("dev-rep", st, now=now_ms)
     assert [s.key for s in report.sections] == [
@@ -425,6 +530,10 @@ with tempfile.TemporaryDirectory() as tmp:
     assert ev.feature and ev.samples >= 10 and ev.windowDays == settings.baseline_days
     assert ev.z > 0 and ev.direction == "high"
     assert report.sections[4].counts[0].value == "尽快就医"
+    _task_counts = {c.label: c.value for c in report.sections[2].counts}
+    assert _task_counts["任务完成率"] == "80%", "behaviour stream must feed section 3"
+    assert _task_counts["平均确认延迟"] == "8 分钟"
+    assert "行为流已接入" in report.sections[2].summary
     assert next(c.value for c in report.sections[5].counts if c.label == "上传原始音频") == "0"
 
     html_doc = render_html(report)
@@ -472,10 +581,15 @@ with tempfile.TemporaryDirectory() as tmp:
     assert result.changepoints == [], "a fresh device has no change points yet"
     assert result.baseline is not None and not result.baseline.sufficient
     assert result.baseline.samples < 10 and result.baseline.note
+    assert result.behaviorStream is None, "no daily rollup -> no behaviour stream"
+    assert result.insufficientStreams is (
+        result.semanticStream is None and result.behaviorStream is None
+    ), "single-stream guard"
     assert lg.verify() is True
     dumped = result.model_dump()
-    for key in ("riskIndex", "riskBand", "acousticStream", "engineVersion", "featureSetVersion",
-                "baseline", "changepoints"):
+    for key in ("riskIndex", "riskBand", "acousticStream", "semanticStream",
+                "behaviorStream", "insufficientStreams", "engineVersion",
+                "featureSetVersion", "baseline", "changepoints"):
         assert key in dumped, f"wire payload missing {key}"
     payload = result.model_dump_json()
     assert '"semanticStream"' in payload

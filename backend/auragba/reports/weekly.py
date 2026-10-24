@@ -162,15 +162,51 @@ def _change_section(
     )
 
 
-def _tasks_section(escalations: list[dict[str, Any]]) -> ReportSection:
+def _pct(value: Any) -> str:
+    return "本期无到期任务" if value is None else f"{round(float(value) * 100)}%"
+
+
+def _minutes(value: Any) -> str:
+    return "本期无到期提醒" if value is None else f"{float(value):.0f} 分钟"
+
+
+def _count(value: Any) -> str:
+    return "—" if value is None else f"{int(value)} 次"
+
+
+def _latest_behaviour(store: Store, device_id: str, start: int, end: int) -> dict[str, Any] | None:
+    """Most recent stored rollup inside the report week (today first)."""
+    for offset in range(8):
+        stamp = end - offset * DAY_MS
+        if stamp < start:
+            break
+        document = store.get_doc(device_id, f"behaviour:{_day(stamp)}")
+        if document:
+            return document
+    return None
+
+
+def _tasks_section(
+    escalations: list[dict[str, Any]], latest: dict[str, Any] | None
+) -> ReportSection:
     count = len(escalations)
     summary = "本期没有提醒超时。" if count == 0 else f"本期有 {count} 次提醒超时，已进入家属通知队列。"
+    counts = [ReportCount(label="提醒超时", value=f"{count} 次")]
+    if latest:
+        behaviour = latest.get("behaviour") or {}
+        counts += [
+            ReportCount(label="任务完成率", value=_pct(behaviour.get("taskCompletionRate"))),
+            ReportCount(label="平均确认延迟", value=_minutes(behaviour.get("taskConfirmDelayMin"))),
+            ReportCount(label="任务超时率", value=_pct(behaviour.get("taskTimeoutRate"))),
+            ReportCount(label="延后次数", value=_count(behaviour.get("deferCount"))),
+        ]
+        summary += " 行为流已接入，本期依从性指标见下表。"
     return ReportSection(
         key="tasks",
         title="做事情况",
         summary=summary,
-        counts=[ReportCount(label="提醒超时", value=f"{count} 次")],
-        note="服药确认率与平均确认延迟要等行为流（postBehaviorDaily）接入后才有数据；本期不推测。",
+        counts=counts,
+        note="缺失的读数显示为「本期无到期任务 / 无到期提醒」，不按 0 处理。",
     )
 
 
@@ -266,6 +302,7 @@ def build_weekly_report(
     change, sustained = _change_section(device_id, store, end=end)
 
     escalations = _between(store.history(device_id, "reminder_escalations"), start, end)
+    behaviour = _latest_behaviour(store, device_id, start, end)
     gait = _between(store.history(device_id, "gait"), start, end)
     fall_rows = _between(store.history(device_id, "gait_falls"), start, end)
     falls = len(fall_rows) or sum(1 for g in gait if g.get("fall"))
@@ -275,7 +312,7 @@ def build_weekly_report(
     sections = [
         _talk_section(turns, prev_turns, sessions, checkins),
         change,
-        _tasks_section(escalations),
+        _tasks_section(escalations, behaviour),
         _activity_section(gait, falls),
         _advice_section(results, sustained),
         _privacy_section(len(conversation), len(sessions), len(gait), len(telemetry)),

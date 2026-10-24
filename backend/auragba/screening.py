@@ -22,6 +22,7 @@ from .config import ENGINE_VERSION, FEATURE_SET_VERSION, FUSION_VERSION, setting
 from .contract import AuditRef, BaselineReport, ChangePoint, MetricZScore, ScreeningResult, ScreeningSession
 from .economics import estimate as estimate_economics
 from .model import acoustic as model_acoustic
+from .model import behavior as model_behavior
 from .model import late_fusion, score_acoustic, score_semantic
 from .model import semantic as model_semantic
 from .nlp import analyse_linguistics, coherence, transcribe
@@ -103,7 +104,10 @@ def run_screening(
 
     acoustic = score_acoustic(features.summary, features.vector)
     semantic = score_semantic(ling.metrics, coh)
-    fusion = late_fusion(acoustic, semantic)
+    behavior = model_behavior.load_stream(
+        store, device_id, now_ms=int(started * 1000), days=settings.baseline_days
+    )
+    fusion = late_fusion(acoustic, semantic, behavior)
 
     flat = _flat_metrics(features.summary, ling.metrics, coh)
     baseline = _baseline_report(device_id, flat, store)
@@ -129,9 +133,11 @@ def run_screening(
         coherence=coh,
         acousticStream=acoustic,
         semanticStream=semantic,
+        behaviorStream=behavior,
         riskIndex=fusion.risk_index,
         riskBand=fusion.band,  # type: ignore[arg-type]
         fusionWeights=fusion.weights,
+        insufficientStreams=fusion.insufficient_streams,
         baseline=baseline,
         changepoints=baseline.changepoints,
         economics=economics,
@@ -154,11 +160,14 @@ def run_screening(
             "weights": fusion.weights,
             "acoustic": acoustic.score,
             "semantic": None if semantic is None else semantic.score,
+            "behavior": None if behavior is None else behavior.score,
+            "insufficientStreams": fusion.insufficient_streams,
             "baselineSufficient": baseline.sufficient,
             # 模型来源指纹：换模型后历史分数仍可追溯是哪个文件打的
             "models": {
                 "acoustic": acoustic.model,
                 "semantic": None if semantic is None else semantic.model,
+                "behavior": None if behavior is None else behavior.model,
                 "acousticFile": model_acoustic.model_fingerprint(),
                 "semanticFile": model_semantic.model_fingerprint(),
             },

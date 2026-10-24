@@ -31,7 +31,7 @@ python3 selfcheck.py                              # 可运行断言自检 → se
 
 前端 `web/src/lib/api.ts` 通过 `NEXT_PUBLIC_API_BASE` 指向本服务（默认 `http://localhost:8000`）。首次加载会 `POST /auth/register` 建立 HttpOnly `aura_session` Cookie（原生/CLI 可用 `Authorization: Bearer`）；之后请求携带该会话与假名 `X-Device-Id` 头。**身份校验通过后**才会把请求映射到授权设备。CORS 由 `AURA_CORS_ORIGINS` 控制，必须是明确来源（`*` 会被拒绝启动）。
 
-**13 个前端契约端点**
+**14 个前端契约端点**
 
 | # | 端点 | 说明 | 状态 |
 |---|---|---|---|
@@ -48,6 +48,7 @@ python3 selfcheck.py                              # 可运行断言自检 → se
 | 11 | `POST /reminders/escalate` | 提醒超时事件 + 家属 outbox | 204 |
 | 12 | `POST /behaviour/daily` | 行为流日汇总（`null` 不补 0；按 day 幂等） | 204 |
 | 13 | `POST /task/events` | 任务状态事件（created/completed/deferred/timeout） | 204 |
+| 14 | `POST /geofence/events` | 离家/返家越界事件（与 SOS 分开，按 id 幂等） | 204 |
 
 > `/sos`、`/reminders/escalate`、`/reports/weekly/send` 统一走 `notify.dispatch`：先写家属 outbox，再打印「已通知家属 N 人」；配置 `AURA_NOTIFY_WEBHOOK` 时额外推一条粗粒度通知。demo 不声称“已送达”。
 
@@ -126,7 +127,8 @@ uvicorn auragba.main:app --env-file .env --reload --port 8000
 | `AURA_BASELINE_DAYS` | 个人基线窗口（天，robust Z） | 14 |
 | `AURA_TREND_DAYS` | 趋势斜率与 CUSUM 的回看窗口（天） | 28 |
 | `AURA_NOTIFY_WEBHOOK` | demo 通知 webhook（留空 = 只写 outbox + 日志） | 空 |
-| `AURA_FUSION_W_ACOUSTIC` / `AURA_FUSION_W_SEMANTIC` | 双流融合权重（自动归一） | 0.2 / 0.8 |
+| `AURA_FUSION_W_ACOUSTIC` / `AURA_FUSION_W_SEMANTIC` | 两流融合权重（行为流缺失时使用，自动归一） | 0.2 / 0.8 |
+| `AURA_FUSION3_W_ACOUSTIC` / `_SEMANTIC` / `_BEHAVIOR` | 三流初始先验（行为流存在时使用，自动归一） | 0.15 / 0.65 / 0.20 |
 | `AURA_RISK_WATCH` / `AURA_RISK_ELEVATED` | 风险分档切点 | 0.409 / 0.521 |
 | `AURA_DATA_DIR` | 假名存储 / 审计日志目录 | `./.data` |
 | `AURA_CORS_ORIGINS` | 允许的 CORS 源（逗号分隔，禁止 `*`） | `http://localhost:3000,http://localhost:8000` |
@@ -174,7 +176,7 @@ backend/
     ├── main.py              # FastAPI 工厂 + CORS + 路由装配
     ├── audio/  io.py · vad.py · features.py      # WAV 解码 / 能量 VAD / eGeMAPS 88 维
     ├── nlp/    asr.py · metrics.py · coherence.py # ASR / TTR·名动比·句长方差 / 语义连贯度
-    ├── model/  acoustic.py · semantic.py · fusion.py # 双流分类（模型指纹 / SHAP 贡献）+ 晚期融合
+    ├── model/  acoustic.py · semantic.py · behavior.py · fusion.py # 三流分类（行为规则流 / 模型指纹 / SHAP）+ 晚期融合
     ├── llm/    client.py · prompts.py · safety.py · weather.py · usage.py · service.py
     ├── reports/ weekly.py                      # 家属周报（6 段 + HTML 渲染）
     └── api/    contract_routes.py · insight_routes.py · auth_routes.py · caregiver_routes.py · report_routes.py
@@ -199,6 +201,7 @@ backend/
 | 声学打分 | LightGBM booster + SHAP 逐项贡献 | 手工权重可解释 logistic |
 | ASR | 本地 Whisper（`models/whisper-small`） | 无转写 → 语义流缺席 |
 | 语义打分 | LogisticRegression（`semantic_lr.joblib`） | 手工权重可解释 logistic |
+| 行为打分 | B 的 `POST /behaviour/daily` 日汇总 + 规则权重（个人 median/MAD） | 无日汇总 → 行为流缺席，两流融合照常 |
 | 中文 NLP | jieba 分词 / 词性 | 正则分词 |
 | 语义连贯度 | sentence-transformers 句向量 | Jaccard 相似度 |
 

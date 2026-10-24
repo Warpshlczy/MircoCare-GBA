@@ -24,6 +24,7 @@ from ..contract import (
     BehaviourDailyEnvelope,
     ConversationTurn,
     GaitWindow,
+    GeofenceEvent,
     HealthCard,
     MedicationPlan,
     MedicationPlanRequest,
@@ -94,6 +95,27 @@ def post_sos(e: SosEvent, dev: str = Depends(device_id)) -> dict:
     store.set_doc(dev, "sos_last", {"at": e.at, "status": "pending", "reason": e.reason})
     notified = notify_dispatch(dev, "sos", e.model_dump())
     return {"id": e.id, "notified": notified, "channel": "outbox", "delivered": False}
+
+
+@router.post("/geofence/events", status_code=204)
+def post_geofence_event(event: GeofenceEvent, dev: str = Depends(device_id)) -> None:
+    """Home-fence crossing (exit / enter).
+
+    Kept separate from `/sos`: a walk out of the fence can happen several times a
+    day and must not flood the family's emergency queue. Stored per event id so
+    an outbox replay is idempotent; the family notice goes through the same
+    `notify.dispatch` seam with a different `kind`.
+    """
+    key = f"geofence_event:{event.id}"
+    if store.get_doc(dev, key) is None:
+        store.record(dev, "geofence_events", event.model_dump())
+        store.set_doc(dev, key, event.model_dump())
+        notify_dispatch(
+            dev,
+            "geofence",
+            {"id": event.id, "at": event.at, "kind": event.kind,
+             "distanceM": event.distanceM, "minutesAway": event.minutesAway},
+        )
 
 
 @router.get("/health-card/me")

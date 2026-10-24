@@ -21,7 +21,12 @@ Intent = Literal[
     "navigate", "call", "alarm", "message", "repeat", "cancel",
     "unknown",
 ]
-CardKind = Literal["task", "med", "weather", "camera", "info"]
+CardKind = Literal[
+    "task", "med", "weather", "camera", "info",
+    # B's agent layer renders these; CardRenderer dispatches on data/html, not
+    # kind. Missing values here would make FastAPI's response validation 500.
+    "place", "alarm", "agentPlan",
+]
 
 
 class _Base(BaseModel):
@@ -61,6 +66,20 @@ class SosEvent(_Base):
     reason: Literal["voice", "button", "fall"]
     confirmed: bool
     status: Literal["pending", "notified", "resolved"]
+    # Which surface triggered it. A lock-screen widget press usually means the
+    # senior could not unlock the phone, which is extra context for the family.
+    source: Literal["app", "widget", "watch"] = "app"
+
+
+class GeofenceEvent(_Base):
+    """Crossing the home fence. A safety event, not a daily rollup — the time
+    point matters, so it is stored per event id (outbox replay is idempotent)."""
+
+    id: str
+    at: int
+    kind: Literal["exit", "enter"]
+    distanceM: float = Field(ge=0)
+    minutesAway: float | None = Field(default=None, ge=0)
 
 
 class RegisterRequest(_Base):
@@ -403,7 +422,7 @@ class BiomarkerContribution(_Base):
 
 
 class StreamScore(_Base):
-    stream: Literal["acoustic", "semantic"]
+    stream: Literal["acoustic", "semantic", "behavior"]
     score: float  # 0..1, higher = more atypical
     model: str
     contributions: list[BiomarkerContribution] = Field(default_factory=list)
@@ -473,9 +492,11 @@ class ScreeningResult(_Base):
     coherence: float
     acousticStream: StreamScore
     semanticStream: StreamScore | None = None
+    behaviorStream: StreamScore | None = None
     riskIndex: float
     riskBand: Literal["low", "watch", "elevated"]
     fusionWeights: dict[str, float]
+    insufficientStreams: bool = False
     baseline: BaselineReport | None = None
     changepoints: list[ChangePoint] = Field(default_factory=list)
     economics: ValuationEffect | None = None

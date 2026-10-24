@@ -18,7 +18,7 @@ ENGINE_VERSION = "aura-engine-0.2.0"
 # v2: 装了 openSMILE 后走真 eGeMAPS（v1 是 numpy 近似），summary 键在两个后端下已统一
 FEATURE_SET_VERSION = "egemaps88-v2"
 NLP_SET_VERSION = "nlp-metrics-v1"
-FUSION_VERSION = "latefusion-v2"  # 权重与阈值已在 322 人上交叉拟合校准(0.2/0.8)
+FUSION_VERSION = "latefusion-v3"  # v3: three streams (behaviour added); two-stream path unchanged
 
 
 def _env_float(name: str, default: float) -> float:
@@ -57,6 +57,13 @@ class Settings:
     # server produce the same risk bands.
     fusion_w_acoustic: float = _env_float("AURA_FUSION_W_ACOUSTIC", 0.2)
     fusion_w_semantic: float = _env_float("AURA_FUSION_W_SEMANTIC", 0.8)
+    # Three-stream initial prior (DEV.md C1). Used only when the behaviour stream
+    # exists; weights are renormalised over whichever streams are available. When
+    # behaviour is absent the calibrated two-stream values above apply unchanged,
+    # so historical results stay reproducible.
+    fusion3_w_acoustic: float = _env_float("AURA_FUSION3_W_ACOUSTIC", 0.15)
+    fusion3_w_semantic: float = _env_float("AURA_FUSION3_W_SEMANTIC", 0.65)
+    fusion3_w_behavior: float = _env_float("AURA_FUSION3_W_BEHAVIOR", 0.20)
     risk_watch: float = _env_float("AURA_RISK_WATCH", 0.409)
     risk_elevated: float = _env_float("AURA_RISK_ELEVATED", 0.521)
     data_dir: Path = field(

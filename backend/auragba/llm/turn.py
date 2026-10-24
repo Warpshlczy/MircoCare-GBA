@@ -27,10 +27,13 @@ MAX_CALLS = 3
 # confirm-risk tool to "safe" by editing its declaration.
 CONFIRM_TOOLS = frozenset({"call_contact", "send_message", "open_app", "ui_tap_text"})
 
-# Utterance-level refusal (never a tool). Mirrors toolrun.ts#refuseReason.
+# Utterance-level refusal (never a tool). Mirrors toolrun.ts#refuseReason — keep
+# this a superset so a third-party client hitting the API directly is covered too.
 _FORBIDDEN = (
     "转账", "轉賬", "轉帳", "汇款", "匯款", "付款", "过数", "過數",
     "密码", "密碼", "验证码", "驗證碼", "otp",
+    "俾钱", "畀钱", "给钱", "給錢", "買股票", "买股票", "支付",
+    "transfer money", "password",
 )
 
 _REPLY = {
