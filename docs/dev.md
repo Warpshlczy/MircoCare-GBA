@@ -835,7 +835,7 @@ cd android && ./gradlew assembleDebug
 | `api/report_routes.py` | 新增 | `GET /reports/weekly/me`、`POST /reports/weekly/send` |
 | `notify.py` | 新增 | SMS/推送抽象（demo 用 webhook + 日志；生产接 Twilio/FCM） |
 | [contract_routes.py](https://github.com/Warpshlczy/MircoCare-GBA/blob/main/backend/auragba/api/contract_routes.py) | 修改 | `post_sos` 真发通知；`post_conversation_memory` 加 TTL/加密 |
-| [store.py](https://github.com/Warpshlczy/MircoCare-GBA/blob/main/backend/auragba/store.py) | 重写内部 | SQLite WAL；保持 `put/all/get/del` 四方法签名不变 |
+| [store.py](https://github.com/Warpshlczy/MircoCare-GBA/blob/main/backend/auragba/store.py) | 重写内部 | SQLite WAL；保持 `record/history/get_doc/set_doc` 四方法签名不变 |
 
 ### 4.4 任务分解
 

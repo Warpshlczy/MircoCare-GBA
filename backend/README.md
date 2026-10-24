@@ -157,7 +157,7 @@ backend/
     ├── auth.py              # HMAC 会话、角色校验、长者-家属配对
     ├── auth_store.py        # SQLite：账号、配对码、失败锁定、家属关系
     ├── notifications.py     # 家属 notification_outbox（推送 provider 的接缝）
-    ├── store.py             # 按假名 DeviceId 的每设备 JSON 存储
+    ├── store.py             # SQLite（WAL）：派生特征/事件按设备+类型+时间索引
     ├── audit.py             # SaMD 审计：append-only JSONL hash 链 + verify()
     ├── baseline.py          # 个人 14 天基线 Z-score（normal/watch/elevated）
     ├── economics.py         # STEMB：QALY / 每患者节约成本估算

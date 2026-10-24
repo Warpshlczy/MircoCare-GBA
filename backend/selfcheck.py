@@ -12,6 +12,7 @@ import io
 import math
 import sys
 import tempfile
+import threading
 import time
 import wave
 from dataclasses import replace
@@ -206,6 +207,41 @@ assert cp.at is not None
 assert detect([0.300 + 0.002 * (i % 2) for i in range(12)]) is None, "stable series must not alarm"
 assert detect([0.3] * 12) is None, "constant series must not alarm"
 assert detect([0.3] * 5) is None, "fewer than 6 points cannot be judged"
+
+# --- SQLite store: windows, docs, persistence, concurrency (DEV.md C6) --------
+with tempfile.TemporaryDirectory() as tmp:
+    st = Store(Path(tmp))
+    st.record("dev-sql", "metrics", {"at": 1_000, "v": 1})
+    st.record("dev-sql", "metrics", {"at": 2_000, "v": 2})
+    st.record("dev-sql", "gait", {"startedAt": 3_000, "steps": 4})
+    assert [r["v"] for r in st.history("dev-sql", "metrics")] == [1, 2], "insertion order"
+    assert [r["v"] for r in st.history("dev-sql", "metrics", since_ms=1_500)] == [2]
+    assert st.history("dev-sql", "gait", since_ms=2_500)[0]["steps"] == 4, "startedAt is the time column"
+
+    assert st.get_doc("dev-sql", "health_card") is None
+    st.set_doc("dev-sql", "health_card", {"name": "陳阿婆"})
+    st.set_doc("dev-sql", "health_card", {"name": "陳阿婆", "age": 78})
+    assert st.get_doc("dev-sql", "health_card") == {"name": "陳阿婆", "age": 78}, "upsert"
+
+    reopened = Store(Path(tmp))
+    assert reopened.get_doc("dev-sql", "health_card")["age"] == 78
+    assert len(reopened.history("dev-sql", "metrics")) == 2
+
+with tempfile.TemporaryDirectory() as tmp:
+    st = Store(Path(tmp))
+
+    def _writer(n: int) -> None:
+        for i in range(100):
+            st.record("dev-conc", "events", {"at": n * 1000 + i, "n": n, "i": i})
+
+    threads = [threading.Thread(target=_writer, args=(n,)) for n in range(20)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    rows = st.history("dev-conc", "events")
+    assert len(rows) == 2_000, f"concurrent writes lost {2_000 - len(rows)} rows"
+    assert len({(r["n"], r["i"]) for r in rows}) == 2_000, "duplicate rows under concurrency"
 
 # --- weekly family report: six sections, traceable evidence, no disease words --
 with tempfile.TemporaryDirectory() as tmp:

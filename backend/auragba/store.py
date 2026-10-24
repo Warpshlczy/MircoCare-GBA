@@ -1,68 +1,114 @@
-"""Pseudonymous persistence — one JSON file per (already-hashed) DeviceId.
+"""Pseudonymous persistence — one SQLite database for all devices.
 
-`ponytail:` a file-backed store, not a database: it keeps the demo dependency-free
-and readable. It is NOT concurrency-hardened beyond an in-process lock and will
-not scale past a handful of devices. Upgrade: SQLite (stdlib) or Postgres behind
-this same four-method interface — callers never see the storage choice.
+`ponytail:` a single SQLite file instead of a database server: the demo needs
+durable rows and time-window queries without another service to run. The four
+methods (``record`` / ``history`` / ``get_doc`` / ``set_doc``) keep their exact
+signatures, so callers never learn how storage works underneath.
+
+Why SQLite: the old JSON-per-device store rewrote the whole file on every append
+(concurrent writes could lose rows) and could not answer "rows in this window"
+without loading everything. WAL + an ``(device, kind, at)`` index fixes both.
+
+`ponytail:` no schema versioning or migration of the old JSON files — the demo
+directory is disposable. Upgrade: Postgres + Alembic when several services write.
 """
 
 from __future__ import annotations
 
 import json
-import threading
+import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from .config import settings
 
+_DB_NAME = "memomate.db"
+
 
 class Store:
-    def __init__(self, data_dir: Path | None = None) -> None:
+    def __init__(self, data_dir: Path | None = None, db_name: str = _DB_NAME) -> None:
         self._dir = Path(data_dir or settings.data_dir)
         self._dir.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.Lock()
+        self.path = self._dir / db_name
+        self._initialize()
 
-    def _path(self, device_id: str) -> Path:
-        # device_id is already pseudonymised upstream; strip any path separators.
-        safe = "".join(ch for ch in device_id if ch.isalnum() or ch in "-_") or "anon"
-        return self._dir / f"{safe}.json"
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        """Short-lived connection: no open handle lingers between calls.
 
-    def _load(self, device_id: str) -> dict[str, Any]:
-        p = self._path(device_id)
-        if not p.exists():
-            return {"kinds": {}, "docs": {}}
+        Keeping the handle open would also block temp-directory cleanup on
+        Windows. WAL is a persistent database property, so it is set once in
+        ``_initialize``; only the per-connection busy timeout is repeated here.
+        """
+        conn = sqlite3.connect(self.path, timeout=10, isolation_level=None)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=5000")
         try:
-            return json.loads(p.read_text("utf-8"))
-        except (json.JSONDecodeError, OSError):
-            return {"kinds": {}, "docs": {}}
+            yield conn
+        finally:
+            conn.close()
 
-    def _save(self, device_id: str, doc: dict[str, Any]) -> None:
-        self._path(device_id).write_text(json.dumps(doc, ensure_ascii=False), "utf-8")
+    def _initialize(self) -> None:
+        with self._connect() as db:
+            db.execute("PRAGMA journal_mode=WAL")
+            db.execute("PRAGMA synchronous=NORMAL")
+            db.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS records (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    device_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    at INTEGER NOT NULL,
+                    payload TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_records_device_kind_at
+                    ON records (device_id, kind, at);
+                CREATE TABLE IF NOT EXISTS docs (
+                    device_id TEXT NOT NULL,
+                    key TEXT NOT NULL,
+                    value TEXT NOT NULL,
+                    PRIMARY KEY (device_id, key)
+                );
+                """
+            )
 
     def record(self, device_id: str, kind: str, obj: dict[str, Any]) -> None:
         """Append a derived-feature / event record under a stream name."""
-        with self._lock:
-            doc = self._load(device_id)
-            doc["kinds"].setdefault(kind, []).append(obj)
-            self._save(device_id, doc)
+        at = int(obj.get("at") or obj.get("startedAt") or obj.get("endedAt") or 0)
+        with self._connect() as db:
+            db.execute(
+                "INSERT INTO records (device_id, kind, at, payload) VALUES (?, ?, ?, ?)",
+                (device_id, kind, at, json.dumps(obj, ensure_ascii=False)),
+            )
 
-    def history(self, device_id: str, kind: str, since_ms: int | None = None) -> list[dict[str, Any]]:
-        with self._lock:
-            rows = list(self._load(device_id)["kinds"].get(kind, []))
-        if since_ms is None:
-            return rows
-        key = "at" if rows and "at" in rows[0] else "startedAt"
-        return [r for r in rows if r.get(key, 0) >= since_ms]
+    def history(
+        self, device_id: str, kind: str, since_ms: int | None = None
+    ) -> list[dict[str, Any]]:
+        query = "SELECT payload FROM records WHERE device_id = ? AND kind = ?"
+        params: list[Any] = [device_id, kind]
+        if since_ms is not None:
+            query += " AND at >= ?"
+            params.append(int(since_ms))
+        query += " ORDER BY id ASC"
+        with self._connect() as db:
+            rows = db.execute(query, params).fetchall()
+        return [json.loads(row["payload"]) for row in rows]
 
     def get_doc(self, device_id: str, key: str) -> Any:
-        with self._lock:
-            return self._load(device_id)["docs"].get(key)
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT value FROM docs WHERE device_id = ? AND key = ?", (device_id, key)
+            ).fetchone()
+        return None if row is None else json.loads(row["value"])
 
     def set_doc(self, device_id: str, key: str, value: Any) -> None:
-        with self._lock:
-            doc = self._load(device_id)
-            doc["docs"][key] = value
-            self._save(device_id, doc)
+        with self._connect() as db:
+            db.execute(
+                "INSERT INTO docs (device_id, key, value) VALUES (?, ?, ?) "
+                "ON CONFLICT(device_id, key) DO UPDATE SET value = excluded.value",
+                (device_id, key, json.dumps(value, ensure_ascii=False)),
+            )
 
 
 store = Store()
