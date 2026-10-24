@@ -483,6 +483,10 @@ assert.equal(magnitude(3, 4, 0), 5);
   assert.ok(page.includes("planForeground("), "foreground reasons go through B's decision table");
   assert.ok(page.includes("shouldRaiseSos("), "lock-screen SOS is debounced");
   assert.ok(page.includes('openSos("button", "widget")'), "widget SOS is tagged as source=widget");
+  const gaitHook = readFileSync(new URL("./hooks/useGaitMonitor.ts", import.meta.url), "utf8");
+  assert.ok(gaitHook.includes("recordGaitForBehaviour("), "gait windows feed the behaviour accumulator");
+  assert.ok(page.includes("careForSenior(") && page.includes("saveCareCounters("), "silence care uses B's baseline wording");
+  assert.ok(page.includes("setHome("), "the fence has an explicit home confirmation");
 
   // Walk src/: no old brand left (native.ts's default title belongs to B0), and
   // nothing the assistant can say blames the senior.

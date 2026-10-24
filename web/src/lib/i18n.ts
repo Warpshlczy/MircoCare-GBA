@@ -102,6 +102,9 @@ export type MsgKey =
   | "quickToday"
   | "quickCallFamily"
   | "toolsClose"
+  | "setHome"
+  | "setHomeOk"
+  | "setHomeFail"
   | "displayMode"
   | "displayStandard"
   | "displayHc"
@@ -213,6 +216,9 @@ const zhHK: Dict = {
   quickToday: "今日安排",
   quickCallFamily: "打畀屋企人",
   toolsClose: "收埋",
+  setHome: "呢度係我屋企",
+  setHomeOk: "好，記低咗。屋企位置已經設定好。",
+  setHomeFail: "搵唔到位置，陣間再試。",
   displayMode: "顯示",
   displayStandard: "標準",
   displayHc: "高對比",
@@ -323,6 +329,9 @@ const zhCN: Dict = {
   quickToday: "今天安排",
   quickCallFamily: "打给家人",
   toolsClose: "收起",
+  setHome: "这里是我家",
+  setHomeOk: "好，记下了。家的位置已经设置好。",
+  setHomeFail: "找不到位置，请稍后再试。",
   displayMode: "显示",
   displayStandard: "标准",
   displayHc: "高对比",
