@@ -179,7 +179,7 @@ grep -rl "auragba" backend --include=*.py --include=*.txt --include=*.md | \
 |---|---|---|---|---|---|
 | **M0** | 改名 + 基线可跑 | i18n/Avatar/唤醒词改名 | 原生 NAMES、通知文案、`native.ts` title | `main.py` 改名；`memomate` 包名迁移 | `npm run typecheck` / `npm run selfcheck` / `node src/selfcheck.ts` / `python selfcheck.py` 全绿 |
 | **M1** | 采集闭环可用 | 每日访谈脚本、静音门控、镜头指示 | 卡片落库、outbox 重放、任务确认埋点 | 阈值校准落盘、`/screening/analyze` 真 WAV 跑通 | 端到端一条语音 → 后端一条 `screening_results` |
-| **M2** | 拟真与主动触达 | Live2D 挂载层 + viseme、主动调度器、唤起与无障碍 | 小组件 + 前置 + 定时唤醒、权限矩阵 | 行为流接入（服药/任务/步态） | 装机 demo：锁屏被唤醒 → 数字人主动说话 → 生成卡片；§2.3.1 ⑥ 四条断言全过（默认 `model: null` 走 Canvas-2D） |
+| **M2** | 拟真与主动触达 | Live2D 挂载层 + viseme、主动调度器、唤起与无障碍 | 小组件 + 前置 + 定时唤醒、权限矩阵 | 行为流接入（服药/任务/步态） | 装机 demo：锁屏被唤醒 → 数字人主动说话 → 生成卡片；§2.3.1 ⑥ 四条断言全过（默认 Kei 模型走 L1，拔掉清单回 L2） |
 | **M3** | Agent 真编排 | 对话状态机、打断/重问 | `/agent/turn` 工具调用、代操作护栏 | Agent 后端 + 周报生成 + SOS 通知 | 5 个工具调用场景脚本化全通过 |
 | **M4** | 证据与答辩材料 | 无障碍与伦理 UX 说明页 | 合规权限清单、无障碍声明 | PICO / FMEA / NPV / 监管 / TRL / IP / 审计 / 伦理 | 附录 A–E 全部数字可复现 + §1.8 矩阵每行有验收断言 |
 
@@ -285,48 +285,52 @@ grep -rl "auragba" backend --include=*.py --include=*.txt --include=*.md | \
 | `app/page.tsx` | 改造 | 接桥 / 前置原因 / SOS 事件 / 调度器 tick / 访谈循环 / 打断 / 字幕 / 三档显示 / 常用三件事 |
 | `app/layout.tsx`、`app/caregiver/page.tsx` | 改名 + 文案 | 标题改名；家属端风险分层显示中文三档，不显示英文枚举 |
 | `app/globals.css` | 增样式 | `.lg` 大字档、字幕条、录音指示环 |
-| `public/live2d/model.manifest.json`、`README.md` | 新增 | 留空占位 + 一页纸接入说明 |
+| `public/live2d/model.manifest.json`、`README.md`、`vendor/`、`kei/` | 新增 | 清单 + 接入说明；Kei 示例模型与三个运行时（约 2 MB） |
 
-### 2.3.1 数字人模型挂载契约（**先留空 · 默认替代**）
+### 2.3.1 数字人模型挂载契约（**已接入 Kei 示例模型**）
 
-> 目标：**仓库里今天不带任何模型二进制、也不带任何 Live2D 运行时**，代码照跑、答辩不白屏；后续把文件按下面格式丢进目录、改清单两行，**不改一行代码**。
+> 目标：**运行时与模型都在仓库里，代码照跑、答辩不白屏**；整目录约 2 MB。原始导入的 36 MB 素材（含 13 MB×2 的语音 wav 与第二个模型）**没有提交**——口型由 TTS 驱动，模型自带语音与字幕不同步，只会抢占喇叭。
 
 **① 为什么不 `npm install pixi.js pixi-live2d-display`**（相对第一版的关键调整）
 
-Cubism Core（`live2dcubismcore.min.js`）是 Live2D 专有许可，**不能进 npm 依赖树、只能以全局脚本加载**；既然必须走脚本注入，PIXI 与插件也一并走脚本注入：零新依赖、零首屏体积、默认零下载，许可证边界（附录 C.4）也随文件一起落在 `public/live2d/vendor/` 这一处。
+Cubism Core（`live2dcubismcore.min.js`）是 Live2D 专有许可，**不能进 npm 依赖树、只能以全局脚本加载**；既然必须走脚本注入，PIXI 与插件也一并走脚本注入：零新依赖、零首屏体积，许可证边界（附录 C.4）也随文件一起落在 `public/live2d/vendor/` 这一处。
 
-**② 目录契约**
+**② 目录契约（当前提交的真实内容）**
 
 ```
 web/public/live2d/
-├── README.md                      # 说明（提交）
-├── model.manifest.json            # 清单（提交，默认 "model": null）
-├── vendor/                        # 默认不存在；接入时放运行时
-│   ├── live2dcubismcore.min.js    # Cubism Core（专有许可，自行下载）
-│   ├── pixi.min.js                # pixi.js 6.x（与插件 0.4.x 配套）
-│   └── cubism4.min.js             # pixi-live2d-display 0.4.x 的 Cubism 3/4 包
-└── <模型目录>/                    # 默认不存在
-    ├── <name>.model3.json         # 必需
-    ├── <name>.moc3                # 必需
-    ├── textures/*.png             # 必需（≤2048px）
-    └── motions/*.motion3.json     # 必需（至少 Idle + TapBody）
+├── README.md                      # 说明 + 许可（提交）
+├── model.manifest.json            # 清单（提交，model = "kei"）
+├── vendor/                        # 运行时（提交，828 KB）
+│   ├── live2dcubismcore.min.js    # Cubism Core（专有许可，来自 Live2D 官方 CDN）
+│   ├── pixi.min.js                # pixi.js 6.5.10（与插件 0.4.x 配套）
+│   └── cubism4.min.js             # pixi-live2d-display 0.4.0 的 Cubism 3/4 包
+└── kei/                           # Kei 示例模型（提交，1.2 MB）
+    ├── kei_basic_free.model3.json # 入口；动作组已重写为 Idle / TapBody
+    ├── kei_basic_free.moc3
+    ├── kei_basic_free.physics3.json
+    ├── kei_basic_free.cdi3.json
+    ├── kei_basic_free.2048/texture_00.png
+    └── motions/*.motion3.json     # 01_kei_zh（Idle）/ 01_kei_en（TapBody）
 ```
 
-**③ 清单字段**
+> 未提交：`web/public/kei_zh-Hans/`（用户导入的原始包）。里面的 `sounds/` 每条 13 MB，且 `model3.json` 的 `Motions` 组名是空串，直接引用既超体积上限又没有 `Idle`/`TapBody` 组。`kei/` 是从中裁出的最小可跑集合，去掉 `Sound`/`MotionSync` 引用后动作组可正常播放。
+
+**③ 清单字段（当前值）**
 
 ```json
 {
-  "model": null,
-  "modelPath": "",
+  "model": "kei",
+  "modelPath": "/live2d/kei/kei_basic_free.model3.json",
   "runtime": ["/live2d/vendor/live2dcubismcore.min.js", "/live2d/vendor/pixi.min.js", "/live2d/vendor/cubism4.min.js"],
   "scale": 1.0,
-  "anchor": [0.5, 0.5],
+  "anchor": [0.5, 0.55],
   "params": { "mouthOpen": "ParamMouthOpenY", "angleX": "ParamAngleX" },
   "motionGroups": { "idle": "Idle", "tap": "TapBody" }
 }
 ```
 
-- `model: null` → **只请求这一份清单（同源 200，<1KB）**，不加载任何脚本或模型。第一版写的「连网络请求都不发」与「运行时读清单」自相矛盾，已更正。
+- `model: null` 仍是**合法的关闭开关**：只请求这一份清单（同源 200，<1KB），不加载任何脚本或模型。第一版写的「连网络请求都不发」与「运行时读清单」自相矛盾，已更正。
 - 清单 404 / 解析失败 / 字段类型不对 → 一律按 `model: null` 处理（`parseManifest` 自检覆盖）。
 - 删掉了第一版的 `cubismVersion`（运行时由 `runtime` 决定，重复字段只会不一致）、`eyeLeft/eyeRight/angleY/angleZ/bodyAngleZ`（眨眼与呼吸由模型自带的 `physics`/`Idle` 动作驱动，覆盖它们反而破坏动作）、`stateMotion`（五个状态里四个都映射到 `Idle`，只有「点击 → TapBody」有意义，直接写死）。
 
@@ -334,19 +338,19 @@ web/public/live2d/
 
 | 项 | 要求 |
 |---|---|
-| 版本 | Cubism **3 / 4**（`.moc3`）；Cubism 2（`.moc`）不支持 |
+| 版本 | Cubism **3 / 4 / 5**（`.moc3`）；Cubism 2（`.moc`）不支持。随仓库的 Kei 是 Cubism 5，已在浏览器实测加载 |
 | 入口 | `.model3.json`（相对路径引用 moc3 / 纹理 / 动作） |
-| 动作 | `Idle`（循环）+ `TapBody`（点击） |
+| 动作 | `Idle`（循环）+ `TapBody`（点击）。官方样例的动作组常为空串，需要改成这两个名字 |
 | 参数 | `ParamMouthOpenY`（口型）、`ParamAngleX`（聆听时朝向屏幕中心）；缺失**不报错**，只少动效 |
-| 体积 | 模型 + 运行时整目录 ≤ 8 MB |
-| 许可 | 官方 sample（Hiyori/Haru）**仅限非商用**；商用换自有/授权模型，并在 `README.md` 写来源 |
+| 体积 | 模型 + 运行时整目录 ≤ 8 MB（当前 2.0 MB） |
+| 许可 | Kei 为 Live2D 官方示例素材：个人与小规模企业可在同意授权协议后商用，中/大规模企业仅限非公开内部试用。来源与许可链接写在 `README.md` |
 
 **⑤ 三级降级（必须实现，答辩前逐级演练）**
 
 | 级 | 触发条件 | 表现 | 记录 |
 |---|---|---|---|
-| L1 模型 | 清单 `model` 非空 **且** 3s 内加载成功 | Live2D；`level` → `ParamMouthOpenY`；单击播 `TapBody` | `track("avatar_mode", {mode:"live2d"})` |
-| L2 Canvas-2D（**默认**） | `model` 为空 / 加载失败 / 超时 / WebGL 不可用 | 眨眼、呼吸、嘴高 = `level`；聆听时微微前倾、瞳孔朝中心；空闲约每 10 秒轻点一次头 | 不记（默认态，记了只是噪声） |
+| L1 模型（**默认**） | 清单 `model` 非空 **且** 3s 内加载成功 | Live2D；`level` → `ParamMouthOpenY`；单击播 `TapBody` | `track("avatar_mode", {mode:"live2d"})` |
+| L2 Canvas-2D | `model` 为空 / 加载失败 / 超时 / WebGL 不可用 | 眨眼、呼吸、嘴高 = `level`；聆听时微微前倾、瞳孔朝中心；空闲约每 10 秒轻点一次头 | `track("avatar_fallback", {mode:"canvas"})`（只在从 L1 掉下来时记） |
 | L3 静态头像 | `canvas.getContext("2d")` 返回 null | 内联字符头像 + 状态文字，主按钮与 SOS 照常 | `track("avatar_fallback", {mode:"static"})` |
 
 三级**都包在同一个 `<button>` 里**，所以单击重说 / 长按聆听在任何一级都成立。纯装饰场景（如 SOS 全屏里的小头像）不传 `onTap`/`onLongPress`，组件自动退化为 `role="img"`，不占焦点。
@@ -355,10 +359,12 @@ web/public/live2d/
 
 ```bash
 cd web
-# 1) 默认仓库无模型、无运行时
-test -z "$(find public/live2d \( -name '*.moc3' -o -name '*.model3.json' -o -name '*.min.js' \) 2>/dev/null)" && echo "PASS: 模型留空"
-# 2) 清单可解析且 model 为 null（node src/selfcheck.ts 内同时断言 parseManifest 的降级）
-node -e 'const m=require("./public/live2d/model.manifest.json");if(m.model!==null)throw 1;console.log("PASS: manifest 占位")'
+# 1) 运行时与模型都在
+for f in vendor/live2dcubismcore.min.js vendor/pixi.min.js vendor/cubism4.min.js kei/kei_basic_free.model3.json; do
+  test -f "public/live2d/$f" || { echo "MISSING $f"; exit 1; }
+done
+# 2) 清单可解析且指向 kei（node src/selfcheck.ts 同时断言 parseManifest 的降级）
+node -e 'const m=require("./public/live2d/model.manifest.json");if(m.model!=="kei")throw 1;console.log("PASS: manifest -> kei")'
 # 3) 拔掉清单仍能构建（运行时 404 → L2）
 mv public/live2d/model.manifest.json /tmp/ && npm run build; mv /tmp/model.manifest.json public/live2d/
 # 4) 不得出现任何 pixi / live2d 的 import（只能运行时脚本注入）
@@ -444,7 +450,7 @@ mv public/live2d/model.manifest.json /tmp/ && npm run build; mv /tmp/model.manif
 5. L2 Canvas 修复：`reduced-motion` 只关掉位移（呼吸、前倾），**眨眼与嘴照常**（修 §2.0 缺陷①）；聆听时轻微前倾 + 瞳孔朝中心。
 6. 单击数字人 = 重说上一句（适老化高频需求）；长按 1s = 取消播报并进入聆听，播报「你想講咩？」；长按期间不触发任何播报（issue #1 第 2 问）。
 
-**验收**：默认（`model:null`）无 4xx、无脚本下载，直接 L2；§2.3.1 ⑥ 四条断言全过；`reduced-motion` 下无位移但眼睛会眨；口型与语音同步误差 < 150ms（支持 boundary 的设备录屏抽查 3 段）。
+**验收**：默认（`model:"kei"`）四个 `/live2d/**` 请求均 200、L1 挂载成功；把清单改成 `model:null` 或删掉 vendor 后回落 L2 且无 4xx；§2.3.1 ⑥ 四条断言全过；`reduced-motion` 下无位移但眼睛会眨；口型与语音同步误差 < 150ms（支持 boundary 的设备录屏抽查 3 段）。
 
 #### A4 · 采集质量门控（0.5 天，M1）
 
@@ -557,9 +563,11 @@ export interface ScreeningSession { /* …既有字段… */ quality?: "good" | 
 cd web
 npm run typecheck
 node src/selfcheck.ts   # 新增：改名无残留 / 唤醒词 / 访谈题库与选题停止 / careCue / 打扰预算七条 /
-                        #       viseme 长度与闭口 / parseManifest 降级 / snrDb & qualityOf / 风险三档 / 无责备措辞
+                        #       viseme 长度与闭口 / parseManifest 降级 + kei 清单 / TTS 接线 / snrDb & qualityOf / 风险三档 / 无责备措辞
 grep -rn "灵犀\|靈犀\|lingxi" src/ | grep -v "lib/native.ts\|selfcheck.ts" || echo "PASS: 无旧名残留（native.ts 默认值属 B0）"
-test -z "$(find public/live2d \( -name '*.moc3' -o -name '*.model3.json' -o -name '*.min.js' \) 2>/dev/null)" && echo "PASS: 模型留空"
+for f in vendor/live2dcubismcore.min.js vendor/pixi.min.js vendor/cubism4.min.js kei/kei_basic_free.model3.json; do
+  test -f "public/live2d/$f" || { echo "MISSING $f"; exit 1; }
+done; echo "PASS: 运行时与模型齐备"
 ! grep -rnE "(div|span) onClick" src --include='*.tsx' && echo "PASS: 无非交互元素点击"
 ! grep -rnE "from ['\"](pixi|pixi-live2d-display)" src && echo "PASS: 无 Live2D 静态依赖"
 ```

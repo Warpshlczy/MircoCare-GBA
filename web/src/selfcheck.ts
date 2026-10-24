@@ -441,12 +441,18 @@ assert.equal(magnitude(3, 4, 0), 5);
 // --- Live2D manifest: any doubt -> no model -> Canvas-2D (docs/dev.md §2.3.1) -
 {
   const committed = JSON.parse(readFileSync(new URL("../public/live2d/model.manifest.json", import.meta.url), "utf8"));
-  assert.equal(committed.model, null, "repo ships with the model slot EMPTY");
-  assert.equal(parseManifest(committed), null, "null model -> L2");
+  // The shipped model is the Kei sample (public/live2d/kei). Everything below it
+  // stays degrade-only: a missing/garbled manifest must still land on Canvas-2D.
+  const live = parseManifest(committed);
+  assert.ok(live, "the shipped manifest names a model");
+  assert.equal(live.modelPath, "/live2d/kei/kei_basic_free.model3.json");
+  assert.ok(live.runtime.length === 3, "core → pixi → cubism4, all three runtimes");
+  assert.equal(live.params.mouthOpen, "ParamMouthOpenY", "the model's LipSync parameter");
   assert.equal(parseManifest(null), null, "missing manifest (404) -> L2");
   assert.equal(parseManifest("garbage"), null);
-  assert.equal(parseManifest({ ...committed, model: "hiyori", modelPath: "/live2d/hiyori/hiyori.moc3" }), null, "entry must be .model3.json");
-  assert.equal(parseManifest({ ...committed, model: "hiyori", modelPath: "/live2d/hiyori/h.model3.json", runtime: [] }), null, "no runtime -> L2");
+  assert.equal(parseManifest({ ...committed, model: null }), null, "model:null -> L2");
+  assert.equal(parseManifest({ ...committed, modelPath: "/live2d/hiyori/hiyori.moc3" }), null, "entry must be .model3.json");
+  assert.equal(parseManifest({ ...committed, runtime: [] }), null, "no runtime -> L2");
   const ok = parseManifest({ model: "hiyori", modelPath: "/live2d/hiyori/h.model3.json", runtime: ["/a.js"] });
   assert.ok(ok, "minimal valid manifest mounts");
   assert.equal(ok.params.mouthOpen, "ParamMouthOpenY", "defaults fill the gaps");

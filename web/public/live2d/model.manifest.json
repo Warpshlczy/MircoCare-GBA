@@ -1,9 +1,9 @@
 {
-  "model": null,
-  "modelPath": "",
+  "model": "kei",
+  "modelPath": "/live2d/kei/kei_basic_free.model3.json",
   "runtime": ["/live2d/vendor/live2dcubismcore.min.js", "/live2d/vendor/pixi.min.js", "/live2d/vendor/cubism4.min.js"],
   "scale": 1.0,
-  "anchor": [0.5, 0.5],
+  "anchor": [0.5, 0.55],
   "params": { "mouthOpen": "ParamMouthOpenY", "angleX": "ParamAngleX" },
   "motionGroups": { "idle": "Idle", "tap": "TapBody" }
 }
