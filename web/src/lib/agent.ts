@@ -7,8 +7,10 @@
 //
 // Order is deliberate and mirrors docs/dev.md §3.4 B1:
 //   refuse → local card → backend turn → plan calls → confirm → execute
-// A refusal or a local card never reaches the network; a backend failure
-// degrades to "I didn't catch that", never to a crash.
+// A refusal or a local card never reaches the network. A backend failure is
+// NOT "handled": we hand the turn back (`handled: false`) so the caller's
+// pre-agent path still runs — speaking a generic apology there would be a
+// regression against the behaviour the app already had.
 
 import { localCardsFor } from "./cards.ts";
 import { parseIntent } from "./intent.ts";
@@ -42,6 +44,12 @@ export interface AgentDeps {
   recentTurns?: { role: "user" | "assistant"; text: string }[];
   /** backend turn; resolve null when unavailable (501 / 503 / offline). */
   requestTurn?: (req: AgentTurnRequest) => Promise<AgentTurnResponse | null>;
+  /**
+   * Which tools this build can actually perform. Checked BEFORE the confirm
+   * question: asking "shall I call 阿明?" and then admitting we cannot dial is
+   * worse than never asking. Omit it only when `runTool` is absent entirely.
+   */
+  canRun?: (name: string) => boolean;
   /** tool executor; omit when the native shell is not wired yet. */
   runTool?: (step: PlannedStep) => Promise<ToolExecResult>;
   /** spoken yes/no; resolves false on decline or silence. */
@@ -147,7 +155,11 @@ export async function runTurn(utterance: string, deps: AgentDeps): Promise<TurnO
     res = null;
   }
   if (!res) {
-    return { ...emptyOutcome(), handled: true, reply: copy.nothing };
+    // Backend timeout / 501 / network down. `handled: false` returns the
+    // utterance to the caller's original `runIntent` path — the behaviour the
+    // app shipped with. Claiming `true` here would swallow that path and leave
+    // the senior hearing "I didn't catch that" instead of the old answer.
+    return emptyOutcome();
   }
 
   // 4. Validate the calls against OUR registry — never trust the model's names.
@@ -162,6 +174,12 @@ export async function runTurn(utterance: string, deps: AgentDeps): Promise<TurnO
   // 5. Confirm + execute, in the planner's order (sos first).
   const executed: ExecutedCall[] = [];
   for (const step of plan.steps) {
+    if (deps.canRun && !deps.canRun(step.name)) {
+      // Cannot be performed in this build — skip it silently rather than
+      // asking for permission we would then have to withdraw.
+      skipped.push({ name: step.name, reason: "no_executor" });
+      continue;
+    }
     if (step.risk === "confirm") {
       const yes = deps.confirm ? await deps.confirm(step.say) : false;
       if (!yes) {
@@ -181,11 +199,20 @@ export async function runTurn(utterance: string, deps: AgentDeps): Promise<TurnO
     }
   }
 
-  // 6. Assemble the spoken reply: the agent's line, then honest status.
+  // 6. Assemble the spoken reply.
+  // What actually happened beats what the planner said it would do. A senior
+  // should hear ONE sentence about the device's real action, not the model's
+  // prediction ("好，我帮你记住了") followed by the executor repeating it.
+  // The planner's line is only used when nothing ran at all.
   const parts: string[] = [];
-  if (res.reply) parts.push(res.reply);
+  const doneLines = executed.filter((e) => e.ok && e.message).map((e) => e.message as string);
+  const failLines = executed.filter((e) => !e.ok && e.message).map((e) => e.message as string);
+
+  if (executed.length === 0 && res.reply) parts.push(res.reply);
+  if (doneLines.length > 0) parts.push(...doneLines);
   if (skipped.some((s) => s.reason === "no_executor")) parts.push(copy.notWired);
-  if (executed.some((e) => !e.ok)) parts.push(copy.failed);
+  if (failLines.length > 0) parts.push(failLines[0]);
+  else if (executed.some((e) => !e.ok)) parts.push(copy.failed);
   const reply = parts.join(" ").trim() || (plan.steps.length > 0 ? "" : copy.nothing);
 
   return {

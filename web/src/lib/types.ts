@@ -1,4 +1,4 @@
-// Shared domain types for AuraGBA. No runtime logic lives here.
+// Shared domain types for MemoMate. No runtime logic lives here.
 
 export type Locale = "zh-HK" | "zh-MO" | "zh-CN";
 
@@ -75,6 +75,41 @@ export interface SosEvent {
   reason: "voice" | "button" | "fall";
   confirmed: boolean;
   status: "pending" | "notified" | "resolved";
+  /**
+   * Where the button was physically reached from. `widget` = the lock-screen
+   * home widget, which needs no unlock — the caregiver should read that as
+   * "he may not have been able to unlock". Optional: the backend model uses
+   * `extra="allow"`, so sending it before C adds the field is safe.
+   */
+  source?: "app" | "widget" | "watch";
+}
+
+/**
+ * 202 body of POST /sos (backend contract_routes.py:96). `notified` is empty
+ * when no family account is bound — the UI must then say "recorded", never
+ * "notified", because `delivered` is always false in the MVP.
+ */
+export interface SosAck {
+  id: string;
+  notified: string[];
+  channel: "outbox";
+  delivered: boolean;
+}
+
+/**
+ * One crossing of the home fence (mirrors `GeofenceEvent` in contract.py:74).
+ * Event-shaped, not a daily rollup: the time point IS the signal, so the backend
+ * stores one doc per id and a replay overwrites instead of counting twice.
+ * Deliberately carries no coordinate — distance from home is all the family
+ * needs to act, and a trail of positions is the highest-risk data we could keep.
+ */
+export interface GeofenceEvent {
+  id: string;
+  at: number;
+  kind: "exit" | "enter";
+  distanceM: number;
+  /** set on `enter` only: how long that outing lasted */
+  minutesAway?: number;
 }
 
 export interface HealthCard {
@@ -257,6 +292,23 @@ export interface Task {
   duplicateOf?: string;
 }
 
+/**
+ * One task state transition, uploaded to POST /task/events (mirrors
+ * `contract.py:319`). Deliberately minimal: ids and states only, NEVER the task
+ * text — the text may carry names or a medication, and this row is the one
+ * behavioural record that leaves the device per event rather than per day.
+ */
+export interface TaskEvent {
+  id: string;
+  taskId: string;
+  state: "created" | "completed" | "deferred" | "timeout";
+  at: number;
+  /** who caused the transition — `agent` is the only non-human one */
+  source: "voice" | "reminder" | "followup" | "agent";
+  dueAt?: number;
+  doneAt?: number;
+}
+
 export type OutboxKind =
   | "gait"
   | "screening"
@@ -265,7 +317,9 @@ export type OutboxKind =
   | "reminder"
   | "behaviour"
   | "taskEvent"
-  | "conversation";
+  | "conversation"
+  /** geofence exit/enter — no backend route yet (issue #2), enqueue only in W4 */
+  | "geofence";
 
 /**
  * One entry in the offline replay queue. Replay is at-least-once, so every

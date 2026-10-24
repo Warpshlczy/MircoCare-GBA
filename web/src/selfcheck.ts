@@ -46,9 +46,18 @@ import {
   dayKey,
   taskStatsForDay,
   isOverdue,
+  taskEventFor,
 } from "./lib/tasks.ts";
+import {
+  behaviourForDay,
+  behaviourEnvelope,
+  gaitCvForDay,
+  fallEventsForDay,
+  hasMeasuredSignal,
+} from "./lib/behaviour.ts";
 import { runTurn } from "./lib/agent.ts";
 import type { AgentDeps } from "./lib/agent.ts";
+import { createToolRunner, emergencyNumber } from "./lib/toolExec.ts";
 import {
   TOOLS,
   confirmToolNames,
@@ -56,7 +65,7 @@ import {
   requiredPermissions,
   toolByName,
 } from "./lib/tools.ts";
-import type { OutboxItem, ReminderItem, Task, ToolCall } from "./lib/types.ts";
+import type { GaitWindow, OutboxItem, ReminderItem, SosEvent, Task, TaskEvent, ToolCall } from "./lib/types.ts";
 
 // --- magnitude ---------------------------------------------------------------
 assert.equal(magnitude(3, 4, 0), 5);
@@ -621,10 +630,22 @@ assert.equal(magnitude(3, 4, 0), 5);
   // nothing wired and not a local intent -> not ours
   assert.equal((await runTurn("打开微信", baseDeps())).handled, false);
 
-  // backend unavailable still produces something hearable
+  // backend unavailable -> NOT ours: the caller's original path must still run
   const down = await runTurn("打开微信", baseDeps({ requestTurn: async () => null }));
-  assert.equal(down.handled, true);
-  assert.ok(down.reply.length > 0);
+  assert.equal(down.handled, false, "a dead backend must not swallow the caller's fallback");
+  assert.equal(down.reply, "", "no apology: the caller will speak its own answer");
+
+  // requestTurn THROWS (timeout / 501 / offline) -> same rule
+  const threw = await runTurn(
+    "打开微信",
+    baseDeps({
+      requestTurn: async () => {
+        throw new Error("502 Bad Gateway");
+      },
+    })
+  );
+  assert.equal(threw.handled, false);
+  assert.equal(threw.steps.length, 0);
 
   // backend plans a call but no executor is wired yet -> honest degradation
   const noExec = await runTurn(
@@ -737,6 +758,297 @@ assert.equal(magnitude(3, 4, 0), 5);
   const off = onForeground(() => {});
   assert.equal(typeof off, "function");
   off();
+}
+
+// --- task events + behaviour rollup (B, wired to C's /task/events) ------------
+{
+  const at = (h: number, m = 0) => new Date(2026, 9, 24, h, m, 0).getTime();
+  const day = dayKey(at(10));
+  assert.equal(day, "2026-10-24");
+
+  // A completed transition carries dueAt + doneAt, and its id is DETERMINISTIC:
+  // an outbox replay overwrites the same backend doc instead of double-counting.
+  const taken: Task = {
+    ...newTask({ text: "食降壓藥", now: at(7), dueAt: at(8), id: "task-a" }),
+    done: true,
+    doneAt: at(8, 20),
+  };
+  const doneEv = taskEventFor(taken, "completed", at(8, 20));
+  assert.equal(doneEv.id, `te-task-a-completed-${at(8, 20)}`);
+  assert.equal(doneEv.taskId, "task-a");
+  assert.equal(doneEv.dueAt, at(8));
+  assert.equal(doneEv.doneAt, at(8, 20));
+  assert.equal(doneEv.source, "voice");
+  assert.equal(taskEventFor(taken, "completed", at(8, 20)).id, doneEv.id, "same inputs -> same id");
+
+  // The task text NEVER enters the wire event (it may hold a drug or a name).
+  assert.equal(JSON.stringify(doneEv).includes("降壓"), false, "events carry ids only, never text");
+
+  // A deferral has no doneAt, and the cause can differ from how it was created.
+  const deferredEv = taskEventFor(taken, "deferred", at(9), "reminder");
+  assert.equal(deferredEv.doneAt, undefined);
+  assert.equal(deferredEv.source, "reminder");
+  assert.notEqual(deferredEv.id, doneEv.id, "state is part of the id");
+
+  // --- one day's rollup -----------------------------------------------------
+  const missed: Task = newTask({ text: "覆診", now: at(7), dueAt: at(9), id: "task-b" });
+  const gait: GaitWindow[] = [
+    { id: "g1", startedAt: at(8), endedAt: at(8) + 60_000, steps: 60, cadence: 1.8, cv: 0.2, fall: false },
+    { id: "g2", startedAt: at(9), endedAt: at(9) + 60_000, steps: 55, cadence: 1.7, cv: 0.4, fall: true },
+    // previous day — must not leak into today's rollup
+    { id: "g0", startedAt: at(10) - 86_400_000, endedAt: at(10) - 86_400_000 + 60_000, steps: 90, cadence: 2, cv: 0.9, fall: true },
+  ];
+
+  const b = behaviourForDay({ day, tasks: [taken, missed], gait, interactionCount: 7 });
+  assert.equal(b.id, "bd-2026-10-24");
+  assert.equal(b.taskCompletionRate, 0.5);
+  assert.equal(b.taskTimeoutRate, 0.5);
+  assert.equal(b.taskConfirmDelayMin, 20);
+  assert.equal(b.deferCount, 0);
+  assert.equal(b.gaitCv, 0.3, "mean of 0.2 and 0.4");
+  assert.equal(b.fallEvents, 1, "yesterday's fall is not today's");
+  assert.equal(b.interactionCount, 7);
+  assert.equal(gaitCvForDay(gait, "2026-10-23"), 0.9);
+  assert.equal(fallEventsForDay(gait, "2026-10-23"), 1);
+
+  // An unmeasured day is NULL, never 0 — "no reminder was due" is not "0% done".
+  const blank = behaviourForDay({ day: "2026-10-25", tasks: [], gait: [], interactionCount: 0 });
+  assert.equal(blank.taskCompletionRate, null);
+  assert.equal(blank.taskTimeoutRate, null);
+  assert.equal(blank.taskConfirmDelayMin, null);
+  assert.equal(blank.gaitCv, null, "no window is not cv=0");
+  assert.equal(blank.fallEvents, 0);
+  assert.equal(hasMeasuredSignal(blank), false);
+  assert.equal(hasMeasuredSignal(b), true);
+
+  // The envelope omits circadian/digitalSkill (W4) rather than nulling them.
+  assert.deepEqual(Object.keys(behaviourEnvelope(b)), ["behaviour"]);
+}
+
+// --- tool executors: create / complete / locate / sos (B, local only) --------
+{
+  const NOW = new Date(2026, 9, 24, 10, 0, 0).getTime();
+  const saved: Task[] = [];
+  const events: TaskEvent[] = [];
+  const deps = (extra: Record<string, unknown> = {}) => ({
+    locale: "zh-HK" as const,
+    now: NOW,
+    tasks: [] as Task[],
+    saveTask: async (t: Task) => {
+      saved.push(t);
+    },
+    recordEvent: async (e: TaskEvent) => {
+      events.push(e);
+    },
+    ...extra,
+  });
+  const step = (name: string, args: Record<string, unknown> = {}) => ({
+    name,
+    risk: "safe" as const,
+    args,
+    say: "",
+  });
+
+  // create_task: strips the command verb, saves once, emits one event.
+  const made = await createToolRunner(deps()).run(step("create_task", { text: "記住買降壓藥" }));
+  assert.equal(made.ok, true);
+  assert.equal(saved.length, 1);
+  assert.equal(saved[0].text, "買降壓藥", "the command verb is stripped before saving");
+  assert.equal(events.length, 1);
+  assert.equal(events[0].state, "created");
+  assert.ok(made.message?.includes("買降壓藥"), `message=${made.message}`);
+
+  // A deadline already in the past is DROPPED — saving it would fire "overdue"
+  // the instant the reminder is written (regression f87d930).
+  const past = await createToolRunner(deps()).run(
+    step("create_task", { text: "食藥", dueAt: NOW - 3_600_000 })
+  );
+  assert.equal(past.ok, true);
+  assert.equal(saved[1].dueAt, undefined, "a past deadline is never saved");
+  const future = await createToolRunner(deps()).run(
+    step("create_task", { text: "覆診", dueAt: NOW + 86_400_000 })
+  );
+  assert.equal(saved[2].dueAt, NOW + 86_400_000);
+  assert.ok(future.message?.includes("提你"), "a real deadline is acknowledged");
+
+  // Saying it twice is the senior repeating himself, not a second chore.
+  const openOne = newTask({ text: "買降壓藥", now: NOW - 60_000, id: "task-open" });
+  const beforeSaved = saved.length;
+  const beforeEvents = events.length;
+  const repeat = await createToolRunner(deps({ tasks: [openOne] })).run(
+    step("create_task", { text: "買降壓藥" })
+  );
+  assert.equal(repeat.ok, true);
+  assert.equal(saved.length, beforeSaved, "no duplicate task row");
+  assert.equal(events.length, beforeEvents, "no duplicate created event");
+  assert.ok(repeat.message?.includes("記過"), `message=${repeat.message}`);
+
+  // Empty words are never a task.
+  assert.equal((await createToolRunner(deps()).run(step("create_task", { text: "  " }))).ok, false);
+
+  // --- complete_task --------------------------------------------------------
+  const med = newTask({ text: "食降壓藥", now: NOW - 600_000, dueAt: NOW - 300_000, id: "task-med" });
+  const doneSaves: Task[] = [];
+  const doneEvents: TaskEvent[] = [];
+  const completeDeps = (tasks: Task[]) =>
+    deps({
+      tasks,
+      saveTask: async (t: Task) => {
+        doneSaves.push(t);
+      },
+      recordEvent: async (e: TaskEvent) => {
+        doneEvents.push(e);
+      },
+    });
+
+  // Spoken words with no textual overlap still resolve, because ONE task is open.
+  const first = await createToolRunner(completeDeps([med])).run(
+    step("complete_task", { query: "我食咗藥" })
+  );
+  assert.equal(first.ok, true);
+  assert.equal(doneSaves.length, 1);
+  assert.equal(doneSaves[0].done, true);
+  assert.equal(doneEvents.length, 1);
+  assert.equal(doneEvents[0].state, "completed");
+  assert.equal(doneEvents[0].taskId, "task-med");
+
+  // Saying it again within the duplicate window: no second event, and the reply
+  // says "you already confirmed" instead of "you have nothing to do".
+  const second = await createToolRunner(completeDeps([doneSaves[0]])).run(
+    step("complete_task", { query: "我食咗藥" })
+  );
+  assert.equal(second.ok, true);
+  assert.equal(doneSaves.length, 1, "a second confirmation never rewrites the task");
+  assert.equal(doneEvents.length, 1, "a second confirmation never double-counts");
+  assert.ok(second.message?.includes("已經確認過"), `message=${second.message}`);
+
+  // Two open tasks and words that match neither: refuse to guess.
+  const twoOpen = [
+    newTask({ text: "交電費", now: NOW - 7_200_000, id: "task-a" }),
+    newTask({ text: "覆診", now: NOW - 3_600_000, id: "task-b" }),
+  ];
+  const guessSaves: Task[] = [];
+  const ambiguous = await createToolRunner(
+    deps({ tasks: twoOpen, saveTask: async (t: Task) => { guessSaves.push(t); } })
+  ).run(step("complete_task", { query: "我食咗藥" }));
+  assert.equal(ambiguous.ok, false, "ticking the wrong chore is worse than asking");
+  assert.equal(guessSaves.length, 0);
+  assert.ok(ambiguous.message?.includes("邊件"), `message=${ambiguous.message}`);
+
+  // A hallucinated id must not tick some other task.
+  const ghost = await createToolRunner(deps({ tasks: [med] })).run(
+    step("complete_task", { taskId: "task-does-not-exist" })
+  );
+  assert.equal(ghost.ok, false);
+  assert.equal(guessSaves.length, 0);
+
+  // Nothing open at all.
+  const idle = await createToolRunner(deps()).run(step("complete_task", {}));
+  assert.equal(idle.ok, false);
+  assert.ok(idle.message?.includes("冇未做"), `message=${idle.message}`);
+
+  // --- locate: never read the numbers aloud --------------------------------
+  const here = await createToolRunner(
+    deps({ locate: async () => ({ lat: 22.3193, lng: 114.1694, accuracy: 40 }) })
+  ).run(step("locate"));
+  assert.equal(here.ok, true);
+  assert.equal(/22\.3|114\.1/.test(here.message ?? ""), false, "a senior cannot use a coordinate");
+
+  const denied = await createToolRunner(deps({ locate: async () => null })).run(step("locate"));
+  assert.equal(denied.ok, false);
+  assert.ok(denied.message?.includes("定位"), `message=${denied.message}`);
+
+  // --- sos ------------------------------------------------------------------
+  const raised: string[] = [];
+  const sent: string[] = [];
+  const sosRunner = createToolRunner(
+    deps({
+      raiseSos: (e: SosEvent) => {
+        raised.push(e.id);
+      },
+      sendSos: async (e: SosEvent) => {
+        sent.push(e.id);
+      },
+    })
+  );
+  const sosOut = await sosRunner.run(step("sos", { reason: "fell_down" }));
+  assert.equal(sosOut.ok, true);
+  assert.equal(raised.length, 1, "the overlay is raised before any IO");
+  assert.equal(sent[0], `sos-${NOW}`, "the id is deterministic so a replay pages the family once");
+  assert.equal(raised[0], sent[0]);
+
+  // A failed queue still raised the UI, and says so honestly.
+  const offline = await createToolRunner(
+    deps({
+      raiseSos: () => {},
+      sendSos: async () => {
+        throw new Error("offline");
+      },
+    })
+  ).run(step("sos", {}));
+  assert.equal(offline.ok, false);
+  assert.ok(offline.message?.includes("一有網"), `message=${offline.message}`);
+
+  // No delivery path at all -> tell him the number instead of pretending.
+  const localOnly = await createToolRunner(deps()).run(step("sos", {}));
+  assert.equal(localOnly.ok, true);
+  assert.ok(localOnly.message?.includes("999"), `message=${localOnly.message}`);
+  assert.equal(emergencyNumber("zh-CN"), "120");
+
+  // --- canRun: never ask a question we cannot follow through on ------------
+  const runner = createToolRunner(deps());
+  assert.equal(runner.canRun("create_task"), true);
+  assert.equal(runner.canRun("complete_task"), true);
+  assert.equal(runner.canRun("locate"), false, "no locate dependency -> not runnable");
+  assert.equal(runner.canRun("call_contact"), false);
+  assert.equal(runner.canRun("set_alarm"), false);
+  assert.equal(runner.canRun("ui_tap_text"), false);
+
+  let asked = false;
+  const noAsk = await runTurn(
+    "帮我打电话畀阿明",
+    {
+      locale: "zh-HK",
+      now: NOW,
+      reminders: [],
+      tasks: [],
+      canRun: runner.canRun,
+      runTool: runner.run,
+      confirm: async () => {
+        asked = true;
+        return true;
+      },
+      requestTurn: async () => ({
+        reply: "",
+        calls: [{ name: "call_contact", args: { name: "阿明" } }],
+        cards: [],
+      }),
+    }
+  );
+  assert.equal(asked, false, "must not ask 'shall I call 阿明?' when dialing is not wired");
+  assert.equal(noAsk.executed.length, 0);
+  assert.ok(noAsk.reply.includes("未接"), `reply=${noAsk.reply}`);
+
+  // The executor's own line is what gets spoken — not the planner's filler.
+  const spoke = await runTurn(
+    "帮我记住买药",
+    {
+      locale: "zh-HK",
+      now: NOW,
+      reminders: [],
+      tasks: [],
+      canRun: runner.canRun,
+      runTool: runner.run,
+      requestTurn: async () => ({
+        reply: "好，我幫你記住咗。",
+        calls: [{ name: "create_task", args: { text: "買藥" } }],
+        cards: [],
+      }),
+    }
+  );
+  assert.equal(spoke.executed.length, 1);
+  assert.equal(spoke.reply, made.message?.replace("買降壓藥", "買藥"), "one sentence, not two");
+  assert.equal(spoke.reply.includes("幫你記住咗"), false, "the planner's filler is dropped");
 }
 
 console.log("selfcheck: OK");

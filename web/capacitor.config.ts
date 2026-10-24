@@ -1,10 +1,10 @@
 import type { CapacitorConfig } from "@capacitor/cli";
 
-// Android shell for AuraGBA. `webDir` is the static Next export (`next build`
+// Android shell for MemoMate. `webDir` is the static Next export (`next build`
 // with output: 'export' → ./out). See DEV.md §"Android 原生版本" for the build.
 const config: CapacitorConfig = {
   appId: "com.auragba.app",
-  appName: "湾区灵犀",
+  appName: "忆伴",
   webDir: "out",
   android: {
     // All app traffic is same-origin local assets; no cleartext needed.

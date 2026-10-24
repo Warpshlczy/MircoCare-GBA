@@ -1,7 +1,7 @@
 <?xml version='1.0' encoding='utf-8'?>
 <resources>
-    <string name="app_name">湾区灵犀</string>
-    <string name="title_activity_main">湾区灵犀</string>
+    <string name="app_name">忆伴</string>
+    <string name="title_activity_main">忆伴</string>
     <string name="package_name">com.auragba.app</string>
     <string name="custom_url_scheme">com.auragba.app</string>
 
