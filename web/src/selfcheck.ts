@@ -1041,6 +1041,21 @@ assert.equal(magnitude(3, 4, 0), 5);
   assert.equal(hasMeasuredSignal(blank), false);
   assert.equal(hasMeasuredSignal(b), true);
 
+  // Report-only proxies (C's weekly "activity" section) pass through, default
+  // to null, and must NOT make an otherwise-empty day look measured.
+  const withProxy = behaviourForDay({
+    day,
+    tasks: [],
+    gait: [],
+    interactionCount: 0,
+    hearingProxy: 0.8,
+    visionProxy: 0.6,
+  });
+  assert.equal(withProxy.hearingProxy, 0.8);
+  assert.equal(withProxy.visionProxy, 0.6);
+  assert.equal(hasMeasuredSignal(withProxy), false, "a proxy is report-only, never a care signal");
+  assert.equal(blank.hearingProxy, null, "an absent proxy is null, not 0");
+
   // The envelope omits circadian/digitalSkill (W4) rather than nulling them.
   assert.deepEqual(Object.keys(behaviourEnvelope(b)), ["behaviour"]);
 }

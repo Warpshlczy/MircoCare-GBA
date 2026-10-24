@@ -35,6 +35,8 @@ import { dayKey } from "./tasks.ts";
 import type { BehaviourDaily, ConversationTurn, GaitWindow } from "./types";
 
 const ACC_PREFIX = "behaviour_acc.";
+const INTERACTION_PREFIX = "interaction_acc.";
+const PROXY_PREFIX = "interview_proxy.";
 const LAST_UPLOAD_KEY = "behaviour.lastUploadedDay";
 /** Keep a week of accumulators for late catch-up, then drop them. */
 const KEEP_ACC_DAYS = 8;
@@ -46,6 +48,19 @@ interface AccDoc extends GaitAccumulator {
 interface MarkerDoc {
   id: string;
   day: string;
+  at?: number;
+}
+
+interface InteractionDoc {
+  id: string;
+  day: string;
+  count: number;
+}
+
+interface ProxyDoc {
+  id: string;
+  hearing?: number | null;
+  vision?: number | null;
   at?: number;
 }
 
@@ -89,11 +104,49 @@ export function recordGaitForBehaviour(w: GaitWindow): Promise<void> {
   return next;
 }
 
+/**
+ * Counts one interaction, wherever it came from — voice, text, a tap, an
+ * interview answer.
+ *
+ * WHY THIS EXISTS: the `conversation` store only holds utterances, so a senior
+ * who mostly TAPS the three big buttons (the likeliest path for someone who
+ * cannot read) looked like he had gone quiet. `interactionCount` is a care
+ * signal, and getting it wrong in that direction is the worst kind of wrong.
+ *
+ * The UI calls this from its single `noteInteraction()` choke point, so all four
+ * sources are counted once. When this counter exists it WINS over the
+ * conversation store (not added to it — voice turns would be counted twice).
+ *
+ * Serialised: a burst of taps must not lose a read-modify-write race.
+ */
+let interactionQueue: Promise<unknown> = Promise.resolve();
+
+export function recordInteractionForBehaviour(at = Date.now()): Promise<void> {
+  const next = interactionQueue
+    .then(async () => {
+      const day = dayKey(at);
+      const id = `${INTERACTION_PREFIX}${day}`;
+      const doc = await get<InteractionDoc>("meta", id).catch(() => undefined);
+      const count = (Number.isFinite(doc?.count) ? Number(doc?.count) : 0) + 1;
+      await put<InteractionDoc>("meta", { id, day, count });
+    })
+    .catch(() => {
+      /* losing one tap is survivable; breaking the tap handler is not */
+    });
+  interactionQueue = next;
+  return next;
+}
+
+/** Null when nothing was counted that day — the caller must then fall back, not assume 0. */
+export async function readInteractionCount(day: string): Promise<number | null> {
+  const doc = await get<InteractionDoc>("meta", `${INTERACTION_PREFIX}${day}`).catch(() => undefined);
+  return doc && Number.isFinite(doc.count) ? doc.count : null;
+}
+
 async function readMarker(): Promise<string | null> {
   const doc = await get<MarkerDoc>("meta", LAST_UPLOAD_KEY).catch(() => undefined);
   return doc?.day ?? null;
 }
-
 /** Only ever moves forward — a late duplicate run cannot rewind the marker. */
 async function markUploaded(day: string, now: number): Promise<void> {
   const current = await readMarker();
@@ -103,12 +156,48 @@ async function markUploaded(day: string, now: number): Promise<void> {
 
 async function pruneAccumulators(now: number): Promise<void> {
   const oldest = addDays(dayKey(now), -KEEP_ACC_DAYS);
-  const rows = await all<AccDoc>("meta").catch(() => []);
+  const rows = await all<{ id?: string }>("meta").catch(() => []);
   for (const row of rows) {
-    if (!row?.id?.startsWith(ACC_PREFIX)) continue;
-    const day = row.id.slice(ACC_PREFIX.length);
-    if (day < oldest) await del("meta", row.id).catch(() => {});
+    const id = row?.id;
+    if (typeof id !== "string") continue;
+    const prefix = id.startsWith(ACC_PREFIX)
+      ? ACC_PREFIX
+      : id.startsWith(INTERACTION_PREFIX)
+        ? INTERACTION_PREFIX
+        : id.startsWith(PROXY_PREFIX)
+          ? PROXY_PREFIX
+          : null;
+    if (!prefix) continue;
+    if (id.slice(prefix.length) < oldest) await del("meta", id).catch(() => {});
   }
+}
+
+async function readProxy(day: string): Promise<ProxyDoc | null> {
+  const doc = await get<ProxyDoc>("meta", `${PROXY_PREFIX}${day}`).catch(() => undefined);
+  return doc ?? null;
+}
+
+/**
+ * Report-only hearing/vision proxies from the interview (C's
+ * `BehaviourDaily.hearingProxy/visionProxy`, contract.py:307).
+ *
+ * They never enter the behaviour score — C's own comment says so — but they DO
+ * reach the weekly report, and a field the client never sends is a number the
+ * family never sees. Values are 0..1 shares, not clinical measures.
+ */
+export async function recordInterviewProxy(
+  day: string,
+  proxy: { hearing?: number | null; vision?: number | null },
+  now = Date.now()
+): Promise<void> {
+  const clean = (v: unknown): number | null =>
+    typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 1 ? v : null;
+  await put<ProxyDoc>("meta", {
+    id: `${PROXY_PREFIX}${day}`,
+    hearing: clean(proxy.hearing),
+    vision: clean(proxy.vision),
+    at: now,
+  }).catch(() => {});
 }
 
 export interface DayRollup {
@@ -121,19 +210,34 @@ export interface DayRollup {
 
 /** Builds one day's rollup from local tasks + conversation memory + accumulator. */
 export async function buildDayRollup(day: string, now = Date.now()): Promise<DayRollup> {
-  const [tasks, turns, gait, acc] = await Promise.all([
+  const [tasks, turns, gait, acc, counted, proxy] = await Promise.all([
     listTasks().catch(() => []),
     all<ConversationTurn>("conversation").catch(() => []),
     // Windows that never reached the backend are still on the device; the
     // accumulator covers the ones that uploaded and were deleted.
     all<GaitWindow>("gait").catch(() => []),
     readAccumulator(day),
+    readInteractionCount(day),
+    readProxy(day),
   ]);
 
-  const interactions = countInteractions(turns, day);
+  // The tap counter WINS when it exists (it is the only source that sees button
+  // presses); otherwise fall back to utterances. Never sum the two.
+  const interactions = counted ?? countInteractions(turns, day);
+  // Either side of a conversation proves the app was open; so does a tap count.
+  const appUsed = appUsedOn(turns, day) || counted !== null;
+
   return {
-    behaviour: behaviourForDay({ day, tasks, gait, gaitAcc: acc, interactionCount: interactions }),
-    appUsed: appUsedOn(turns, day),
+    behaviour: behaviourForDay({
+      day,
+      tasks,
+      gait,
+      gaitAcc: acc,
+      interactionCount: interactions,
+      hearingProxy: proxy?.hearing ?? null,
+      visionProxy: proxy?.vision ?? null,
+    }),
+    appUsed,
     interactions,
   };
 }

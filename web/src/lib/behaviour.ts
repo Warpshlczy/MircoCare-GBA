@@ -45,6 +45,13 @@ export interface BehaviourInputs {
    * header. A caller that cannot count it yet should not upload a day at all.
    */
   interactionCount: number;
+  /**
+   * Report-only proxies from the interview (0..1). They never enter the
+   * behaviour score; C shows them in the weekly "activity" section and labels
+   * them as non-clinical. `null` = not measured that day.
+   */
+  hearingProxy?: number | null;
+  visionProxy?: number | null;
 }
 
 // --------------------------------------------------------------------------- //
@@ -212,6 +219,9 @@ export function behaviourForDay(input: BehaviourInputs): BehaviourDaily {
     interactionCount: Math.max(0, Math.round(input.interactionCount)),
     gaitCv: accCv(acc),
     fallEvents: acc.fallEvents,
+    // Sent as null when unmeasured — they are report-only, never scored.
+    hearingProxy: input.hearingProxy ?? null,
+    visionProxy: input.visionProxy ?? null,
   };
 }
 

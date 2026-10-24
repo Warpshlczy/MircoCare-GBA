@@ -363,6 +363,13 @@ export interface BehaviourDaily {
   /** coefficient of variation of inter-step intervals; null = no gait window */
   gaitCv: number | null;
   fallEvents: number;
+  /**
+   * Report-only proxies from the interview capture (contract.py:307). 0..1
+   * shares, NOT a hearing test or a sight test: C shows them in the weekly
+   * activity section with that caveat, and they never enter the risk score.
+   */
+  hearingProxy?: number | null;
+  visionProxy?: number | null;
 }
 
 /** Screen/unlock/charging broadcast rollup. No permission required. */
