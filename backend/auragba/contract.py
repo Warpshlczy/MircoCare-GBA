@@ -307,6 +307,10 @@ class BehaviourDaily(_Base):
     interactionCount: int = Field(default=0, ge=0)
     gaitCv: float | None = Field(default=None, ge=0)
     fallEvents: int = Field(default=0, ge=0)
+    # Report-only proxies (A's interview/hearing-vision capture). They are shown
+    # in the weekly "activity" section and never enter the behaviour score.
+    hearingProxy: float | None = Field(default=None, ge=0)
+    visionProxy: float | None = Field(default=None, ge=0)
 
 
 class CircadianDaily(_Base):

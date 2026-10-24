@@ -504,6 +504,17 @@ assert beh.model == "rules-illustrative", "no history -> illustrative prior labe
 _names = {c.name for c in beh.contributions}
 assert "task_confirm_delay_min" in _names and "night_wake_count" not in _names, "nulls are skipped"
 
+_proxy_day = BehaviourDaily(id="b-proxy", day="2026-01-01", hearingProxy=0.7)
+assert _proxy_day.visionProxy is None and _proxy_day.hearingProxy == 0.7
+_beh_proxy = score_behavior(
+    {**_EMPTY_DAY, "task_confirm_delay_min": 10.0, "fall_events": 1,
+     "interaction_count": 2, "task_completion_rate": 0.5,
+     "task_timeout_rate": 0.3, "defer_count": 2, "gait_cv": 0.1,
+     "hearing_proxy": 0.9, "vision_proxy": 0.1},
+    [],
+)
+assert _beh_proxy is not None and _beh_proxy.score == beh.score, "proxies must not move the score"
+
 personal = score_behavior(
     {"task_confirm_delay_min": 20.0},
     [{"task_confirm_delay_min": 2.0} for _ in range(5)],
@@ -678,7 +689,8 @@ with tempfile.TemporaryDirectory() as tmp:
     st.set_doc("dev-rep", f"behaviour:{_today_key}", {
         "behaviour": {"id": "b1", "day": _today_key, "taskConfirmDelayMin": 8.0,
                       "taskTimeoutRate": 0.1, "taskCompletionRate": 0.8, "deferCount": 1,
-                      "interactionCount": 5, "gaitCv": 0.06, "fallEvents": 0},
+                      "interactionCount": 5, "gaitCv": 0.06, "fallEvents": 0,
+                      "hearingProxy": 0.72, "visionProxy": None},
         "circadian": None, "digitalSkill": None,
     })
 
@@ -712,6 +724,12 @@ with tempfile.TemporaryDirectory() as tmp:
     assert any(
         c.label == "完成访谈" and c.value == "1 次" for c in talk_section.counts
     ), "interview_end counts once; interview_answer must not double-count"
+    activity_section = next(s for s in report.sections if s.key == "activity")
+    assert "代理指标" in activity_section.note
+    assert any(
+        c.label == "听力/视觉代理" and "0.72" in c.value and "—" in c.value
+        for c in activity_section.counts
+    ), "report-only proxies appear once, with missing side as dash"
 
     import auragba.reports.weekly as weekly_mod  # noqa: E402
 

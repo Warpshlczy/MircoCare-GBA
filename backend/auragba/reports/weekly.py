@@ -116,6 +116,9 @@ _TEXTS: dict[str, dict[str, Any]] = {
             "gaitCv": "步态变异",
             "falls": "跌倒",
             "fallsValue": "{n} 次",
+            "proxy": "听力/视觉代理",
+            "proxyValue": "听力 {hearing} / 视觉 {vision}",
+            "proxyNote": "代理指标，非听力学/视力检查；不参与风险分。",
             "note": "外出时长与接近跌倒要等原生定位接入后才有数据。",
         },
         "advice": {
@@ -236,6 +239,9 @@ _TEXTS: dict[str, dict[str, Any]] = {
             "gaitCv": "步態變異",
             "falls": "跌倒",
             "fallsValue": "{n} 次",
+            "proxy": "聽力/視覺代理",
+            "proxyValue": "聽力 {hearing} / 視覺 {vision}",
+            "proxyNote": "代理指標，非聽力學/視力檢查；不參與風險分。",
             "note": "外出時長與接近跌倒要等原生定位接入後才有數據。",
         },
         "advice": {
@@ -477,15 +483,38 @@ def _tasks_section(
     )
 
 
-def _activity_section(gait: list[dict[str, Any]], falls: int, t: dict[str, Any]) -> ReportSection:
+def _activity_section(
+    gait: list[dict[str, Any]],
+    falls: int,
+    latest: dict[str, Any] | None,
+    t: dict[str, Any],
+) -> ReportSection:
     copy = t["activity"]
+    behaviour = (latest or {}).get("behaviour") or {}
+    hearing = behaviour.get("hearingProxy")
+    vision = behaviour.get("visionProxy")
+    has_proxy = hearing is not None or vision is not None
+    proxy_counts = []
+    proxy_note = ""
+    if has_proxy:
+        proxy_counts.append(
+            ReportCount(
+                label=copy["proxy"],
+                value=copy["proxyValue"].format(
+                    hearing="—" if hearing is None else f"{float(hearing):.2f}",
+                    vision="—" if vision is None else f"{float(vision):.2f}",
+                ),
+            )
+        )
+        proxy_note = copy["proxyNote"]
     if not gait:
         return ReportSection(
             key="activity",
             title=copy["title"],
             summary=copy["none"],
             available=False,
-            note=copy["noneNote"],
+            counts=proxy_counts,
+            note=" ".join(part for part in (copy["noneNote"], proxy_note) if part),
         )
     by_day: dict[str, int] = {}
     cvs: list[float] = []
@@ -507,8 +536,8 @@ def _activity_section(gait: list[dict[str, Any]], falls: int, t: dict[str, Any])
             ),
             ReportCount(label=copy["gaitCv"], value=f"{cv_mean:.2f}"),
             ReportCount(label=copy["falls"], value=copy["fallsValue"].format(n=falls)),
-        ],
-        note=copy["note"],
+        ] + proxy_counts,
+        note=" ".join(part for part in (copy["note"], proxy_note) if part),
     )
 
 
@@ -592,7 +621,7 @@ def build_weekly_report(
         _talk_section(turns, prev_turns, sessions, checkins, interviews, t),
         change,
         _tasks_section(escalations, behaviour, t),
-        _activity_section(gait, falls, t),
+        _activity_section(gait, falls, behaviour, t),
         _advice_section(results, sustained, t),
         _privacy_section(len(conversation), len(sessions), len(gait), len(telemetry), t),
     ]
