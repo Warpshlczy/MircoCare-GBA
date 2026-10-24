@@ -46,13 +46,16 @@ public class WakeListenService extends Service {
     public static final String ACTION_STOP = "com.auragba.app.WAKE_STOP";
 
     private static final String TAG = "AuraWake";
-    private static final String CHANNEL_ID = "aura_wake";
+    private static final String CHANNEL_ID = "memomate_wake";
     private static final int NOTIF_ID = 4711;
     private static final long RESTART_MS = 400;
 
-    /** The assistant's name in the forms a senior might say it. */
+    /** The assistant's name in the forms a senior might say it.
+     *  MUST stay identical to `WAKE_NAMES` in web/src/hooks/useWakeWord.ts
+     *  (docs/dev.md §1.3 items 3 and 4) — a divergence means the foreground and
+     *  the background listener disagree about the senior's own assistant. */
     private static final List<String> NAMES =
-            Arrays.asList("灵犀", "靈犀", "小灵", "小靈", "灵西", "lingxi", "ling xi");
+            Arrays.asList("小忆", "小憶", "阿忆", "阿憶", "忆伴", "憶伴", "memomate", "memo mate");
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final Runnable restart = new Runnable() {
@@ -170,8 +173,8 @@ public class WakeListenService extends Service {
             }
         }
         Notification notif = new NotificationCompat.Builder(this, CHANNEL_ID)
-                .setContentTitle("灵犀在守护")
-                .setContentText("叫一声「灵犀」我就应你")
+                .setContentTitle("忆伴在守护")
+                .setContentText("叫一声「小忆」我就应你")
                 .setSmallIcon(android.R.drawable.ic_btn_speak_now)
                 .setOngoing(true)
                 .setPriority(NotificationCompat.PRIORITY_LOW)

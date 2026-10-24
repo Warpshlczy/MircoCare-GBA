@@ -240,7 +240,7 @@ export function homeWidgetPayload(
   cards: AgentCard[],
   reminders: ReminderItem[],
   now = Date.now(),
-  title = "湾区灵犀"
+  title = "忆伴"
 ): HomeWidgetPayload {
   const top = cards[0];
   return {
