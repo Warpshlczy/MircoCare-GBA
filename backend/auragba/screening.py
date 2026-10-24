@@ -19,7 +19,7 @@ from . import baseline as baseline_mod
 from .audio import AudioData, extract_features, frame_rms_db, energy_vad, load_audio
 from .audit import AuditLog, audit_log
 from .config import ENGINE_VERSION, FEATURE_SET_VERSION, FUSION_VERSION, settings
-from .contract import AuditRef, BaselineReport, MetricZScore, ScreeningResult, ScreeningSession
+from .contract import AuditRef, BaselineReport, ChangePoint, MetricZScore, ScreeningResult, ScreeningSession
 from .economics import estimate as estimate_economics
 from .model import acoustic as model_acoustic
 from .model import late_fusion, score_acoustic, score_semantic
@@ -39,22 +39,33 @@ def _flat_metrics(summary: dict[str, float], ling: dict[str, float], coh: float)
 
 
 def _baseline_report(device_id: str, flat: dict[str, float], store: Store) -> BaselineReport:
-    since = int((time.time() - settings.baseline_days * 86_400) * 1000)
+    # Z uses the narrow baseline window; trend/CUSUM look back further so a slow
+    # drift is visible even when no single day looks abnormal.
+    now_ms = int(time.time() * 1000)
+    since = now_ms - max(settings.baseline_days, settings.trend_days) * 86_400_000
     history = store.history(device_id, "screening_metrics", since_ms=since)
-    rows, sufficient, note = baseline_mod.compute_baseline([h.get("metrics", {}) for h in history], flat)
+    outcome = baseline_mod.compute_baseline(
+        [h.get("metrics", {}) for h in history],
+        flat,
+        at_ms=[int(h.get("at", 0)) for h in history],
+        z_window_days=settings.baseline_days,
+    )
     return BaselineReport(
         deviceId=device_id,
         windowDays=settings.baseline_days,
-        samples=len(history),
-        sufficient=sufficient,
+        samples=outcome.samples,
+        sufficient=outcome.sufficient,
         metrics=[
             MetricZScore(
                 name=r.name, value=r.value, baselineMean=r.mean, baselineStd=r.std,
+                baselineMedian=r.median, baselineScale=r.scale,
                 z=r.z, direction=r.direction, flag=r.flag,
+                trend=r.trend, changepointAt=r.changepoint_at, sustained=r.sustained,
             )
-            for r in rows
+            for r in outcome.rows
         ],
-        note=note,
+        changepoints=[ChangePoint(**p) for p in outcome.changepoints],
+        note=outcome.note,
     )
 
 
@@ -122,6 +133,7 @@ def run_screening(
         riskBand=fusion.band,  # type: ignore[arg-type]
         fusionWeights=fusion.weights,
         baseline=baseline,
+        changepoints=baseline.changepoints,
         economics=economics,
         engineVersion=ENGINE_VERSION,
         featureSetVersion=FEATURE_SET_VERSION,

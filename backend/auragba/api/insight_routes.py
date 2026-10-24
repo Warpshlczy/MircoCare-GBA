@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 
 from ..audit import audit_log
 from ..config import ENGINE_VERSION, FEATURE_SET_VERSION, settings
-from ..contract import BaselineReport, MetricZScore, ScreeningResult
+from ..contract import BaselineReport, ChangePoint, MetricZScore, ScreeningResult
 from ..privacy import device_id
 from ..store import store
 from ..screening import run_screening
@@ -54,30 +54,39 @@ async def analyze_screening(
 
 @router.get("/baseline/me", response_model=BaselineReport)
 def get_baseline(dev: str = Depends(device_id)) -> BaselineReport:
-    """Personal 14-day baseline report, computed against the latest sample."""
-    since = int((time.time() - settings.baseline_days * 86_400) * 1000)
+    """Personal baseline report: robust Z plus trend and change points."""
+    now_ms = int(time.time() * 1000)
+    since = now_ms - max(settings.baseline_days, settings.trend_days) * 86_400_000
     history = store.history(dev, "screening_metrics", since_ms=since)
     if not history:
         return BaselineReport(
             deviceId=dev, windowDays=settings.baseline_days, samples=0,
-            sufficient=False, metrics=[], note="no screening history yet",
+            sufficient=False, metrics=[], changepoints=[], note="no screening history yet",
         )
     today = history[-1].get("metrics", {})
-    prior = [h.get("metrics", {}) for h in history[:-1]]
-    rows, sufficient, note = baseline_mod.compute_baseline(prior, today)
+    prior = history[:-1]
+    outcome = baseline_mod.compute_baseline(
+        [h.get("metrics", {}) for h in prior],
+        today,
+        at_ms=[int(h.get("at", 0)) for h in prior],
+        z_window_days=settings.baseline_days,
+    )
     return BaselineReport(
         deviceId=dev,
         windowDays=settings.baseline_days,
-        samples=len(history),
-        sufficient=sufficient,
+        samples=outcome.samples,
+        sufficient=outcome.sufficient,
         metrics=[
             MetricZScore(
                 name=r.name, value=r.value, baselineMean=r.mean, baselineStd=r.std,
+                baselineMedian=r.median, baselineScale=r.scale,
                 z=r.z, direction=r.direction, flag=r.flag,
+                trend=r.trend, changepointAt=r.changepoint_at, sustained=r.sustained,
             )
-            for r in rows
+            for r in outcome.rows
         ],
-        note=note,
+        changepoints=[ChangePoint(**p) for p in outcome.changepoints],
+        note=outcome.note,
     )
 
 

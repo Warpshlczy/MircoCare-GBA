@@ -113,7 +113,8 @@ uvicorn auragba.main:app --env-file .env --reload --port 8000
 | `AURA_SEMANTIC_MODEL` | 语义流模型路径（`./models/semantic_lr.joblib`） | 空 → 手工权重兜底 |
 | `AURA_WHISPER_MODEL` | Whisper 模型名或本地目录（`./models/whisper-small`） | `tiny` |
 | `AURA_PRIVACY_MODE` | `extract-and-burn` / `vector-only` | `extract-and-burn` |
-| `AURA_BASELINE_DAYS` | 个人基线窗口（天） | 14 |
+| `AURA_BASELINE_DAYS` | 个人基线窗口（天，robust Z） | 14 |
+| `AURA_TREND_DAYS` | 趋势斜率与 CUSUM 的回看窗口（天） | 28 |
 | `AURA_FUSION_W_ACOUSTIC` / `AURA_FUSION_W_SEMANTIC` | 双流融合权重（自动归一） | 0.2 / 0.8 |
 | `AURA_RISK_WATCH` / `AURA_RISK_ELEVATED` | 风险分档切点 | 0.409 / 0.521 |
 | `AURA_DATA_DIR` | 假名存储 / 审计日志目录 | `./.data` |

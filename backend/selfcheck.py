@@ -9,6 +9,7 @@ breaks. Pure/engine-level only — it does not boot a server.
 from __future__ import annotations
 
 import io
+import math
 import sys
 import tempfile
 import wave
@@ -25,6 +26,7 @@ from auragba.audio import (  # noqa: E402
     frame_rms_db, load_audio,
 )
 from auragba.audit import AuditLog  # noqa: E402
+from auragba.changepoint import detect  # noqa: E402
 from auragba.config import settings, validate_runtime  # noqa: E402
 from auragba.economics import estimate as economics  # noqa: E402
 from auragba.model import late_fusion, score_acoustic, score_semantic  # noqa: E402
@@ -151,13 +153,57 @@ assert 0.0 <= fused.risk_index <= 1.0 and fused.band in ("low", "watch", "elevat
 solo = late_fusion(ac, None)
 assert solo.weights == {"acoustic": 1.0, "semantic": 0.0} and abs(solo.risk_index - ac.score) < 1e-9
 
-# --- personal baseline --------------------------------------------------------
-prior = [{"pause_ratio": 0.30 + 0.01 * i} for i in range(6)]
-rows, sufficient, _ = bl.compute_baseline(prior, {"pause_ratio": 0.60})
-assert sufficient and rows and rows[0].flag == "elevated", "a large deviation must flag elevated"
-assert rows[0].z > 2.0 and rows[0].direction == "high"
-_, ok, note = bl.compute_baseline(prior[:2], {"pause_ratio": 0.3})
-assert not ok and note, "too few samples -> insufficient baseline"
+# --- personal baseline: robust Z, trend, sufficiency (DEV.md C2) --------------
+WEEK_MS = 7 * 86_400_000
+BASE_MS = 1_700_000_000_000
+
+
+def _weekly(count: int) -> list[int]:
+    return [BASE_MS + i * WEEK_MS for i in range(count)]
+
+
+# One spike, not a trend: stable 0.300/0.302 history, today far outside.
+stable_hist = [{"pause_ratio": 0.300 + 0.002 * (i % 2)} for i in range(12)]
+out = bl.compute_baseline(
+    stable_hist, {"pause_ratio": 0.60}, at_ms=_weekly(12), z_window_days=120
+)
+assert out.sufficient and out.rows, "12 weekly samples must be sufficient"
+row0 = out.rows[0]
+assert row0.flag == "elevated" and row0.direction == "high", "a large deviation must flag elevated"
+assert abs(row0.z) > 2.0
+assert abs(row0.median - 0.301) < 1e-9, "Z must be centred on the median"
+assert row0.sustained is False, "a single spike must not be marked sustained"
+assert out.changepoints == [], "a stable history must not produce a change point"
+
+# Fewer than 10 reference samples -> no baseline claim (D6).
+out2 = bl.compute_baseline(stable_hist[:2], {"pause_ratio": 0.3})
+assert not out2.sufficient and out2.note and out2.samples == 2
+
+# The narrower Z window really is enforced: 12 weekly samples -> only ~2 in 14 days.
+out3 = bl.compute_baseline(stable_hist, {"pause_ratio": 0.3}, at_ms=_weekly(12), z_window_days=14)
+assert not out3.sufficient and out3.samples <= 3
+
+# Zero-MAD guard: constant history must not divide by zero.
+flat_hist = [{"pause_ratio": 0.30} for _ in range(10)]
+out4 = bl.compute_baseline(flat_hist, {"pause_ratio": 0.42}, at_ms=_weekly(10), z_window_days=120)
+assert out4.sufficient and math.isfinite(out4.rows[0].z) and out4.rows[0].z > 2.0
+
+# Trend is a per-week slope over timestamped history.
+rising = [{"pause_ratio": 0.30 + 0.01 * i} for i in range(12)]
+out5 = bl.compute_baseline(rising, {"pause_ratio": 0.42}, at_ms=_weekly(12), z_window_days=120)
+assert abs(out5.rows[0].trend - 0.01) < 1e-6, f"trend must be 0.01/week, got {out5.rows[0].trend}"
+
+# --- CUSUM change point: stable 8 weeks, then 4 weeks of worsening -------------
+cp = detect(
+    [0.300 + 0.002 * (i % 2) for i in range(8)] + [0.30 + 0.02 * k for k in range(1, 5)],
+    at=_weekly(12),
+)
+assert cp is not None and cp.direction == "high", "a sustained worsening must alarm"
+assert cp.index <= 10, f"CUSUM must alarm within 2 weeks of the turn, got index {cp.index}"
+assert cp.at is not None
+assert detect([0.300 + 0.002 * (i % 2) for i in range(12)]) is None, "stable series must not alarm"
+assert detect([0.3] * 12) is None, "constant series must not alarm"
+assert detect([0.3] * 5) is None, "fewer than 6 points cannot be judged"
 
 # --- health economics ---------------------------------------------------------
 lo = economics(0.2, "low")
@@ -195,9 +241,13 @@ with tempfile.TemporaryDirectory() as tmp:
     assert result.audioDiscarded is True, "extract-and-burn must discard the audio buffer"
     # openSMILE 后端会附带额外的 openSMILE 列（>=88），numpy 后端恰好 88
     assert len(result.acousticFeatures) >= 88 and result.audit.seq == 0
+    assert result.changepoints == [], "a fresh device has no change points yet"
+    assert result.baseline is not None and not result.baseline.sufficient
+    assert result.baseline.samples < 10 and result.baseline.note
     assert lg.verify() is True
     dumped = result.model_dump()
-    for key in ("riskIndex", "riskBand", "acousticStream", "engineVersion", "featureSetVersion"):
+    for key in ("riskIndex", "riskBand", "acousticStream", "engineVersion", "featureSetVersion",
+                "baseline", "changepoints"):
         assert key in dumped, f"wire payload missing {key}"
     payload = result.model_dump_json()
     assert '"semanticStream"' in payload

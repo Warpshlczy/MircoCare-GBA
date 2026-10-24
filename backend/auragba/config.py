@@ -48,6 +48,9 @@ class Settings:
 
     privacy_mode: str = os.getenv("AURA_PRIVACY_MODE", "extract-and-burn")
     baseline_days: int = _env_int("AURA_BASELINE_DAYS", 14)
+    # Trend slope and CUSUM need a longer window than the Z reference; the weekly
+    # report speaks about "the last 4 weeks", so that is the default.
+    trend_days: int = _env_int("AURA_TREND_DAYS", 28)
     # Calibrated on the 322-subject cohort (scripts/eval_fusion.py weight sweep):
     # 0.2/0.8 fusion AUC 0.717, thresholds 0.409/0.521. Defaults MUST match
     # `.env.example` so a bare `python selfcheck.py` and a `--env-file .env`

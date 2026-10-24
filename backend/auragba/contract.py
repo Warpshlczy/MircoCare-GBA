@@ -222,14 +222,29 @@ class StreamScore(_Base):
     contributions: list[BiomarkerContribution] = Field(default_factory=list)
 
 
+class ChangePoint(_Base):
+    """A sustained level shift found by CUSUM — not a one-off spike."""
+
+    feature: str
+    at: int | None = None
+    direction: Literal["high", "low"]
+
+
 class MetricZScore(_Base):
     name: str
     value: float
     baselineMean: float
     baselineStd: float
+    # Robust centre/scale are what the Z is actually computed against; the classic
+    # mean/std above are retained so reviewers can see both.
+    baselineMedian: float = 0.0
+    baselineScale: float = 0.0
     z: float
     direction: Literal["high", "low", "normal"]
     flag: Literal["normal", "watch", "elevated"]
+    trend: float = 0.0  # feature units per week over the trend window
+    changepointAt: int | None = None
+    sustained: bool = False  # >= 3 same-direction deviations
 
 
 class BaselineReport(_Base):
@@ -238,6 +253,7 @@ class BaselineReport(_Base):
     samples: int
     sufficient: bool
     metrics: list[MetricZScore] = Field(default_factory=list)
+    changepoints: list[ChangePoint] = Field(default_factory=list)
     note: str | None = None
 
 
@@ -274,6 +290,7 @@ class ScreeningResult(_Base):
     riskBand: Literal["low", "watch", "elevated"]
     fusionWeights: dict[str, float]
     baseline: BaselineReport | None = None
+    changepoints: list[ChangePoint] = Field(default_factory=list)
     economics: ValuationEffect | None = None
     engineVersion: str
     featureSetVersion: str
