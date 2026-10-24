@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { startGaitMonitor, requestMotionPermission } from "@/lib/motion";
 import { all, del, put } from "@/lib/db";
 import { postGaitWindow } from "@/lib/api";
+import { recordGaitForBehaviour } from "@/lib/behaviourStore";
 import type { GaitMonitorState, GaitWindow } from "@/lib/types";
 
 /** In-flight guard so a live window and the boot replay never upload twice. */
@@ -48,6 +49,9 @@ export function useGaitMonitor() {
     if (perm === "unsupported") return;
     stopRef.current = startGaitMonitor((w) => {
       setLastWindow(w);
+      // The per-day accumulator keeps falls after this window is uploaded and
+      // deleted; without it behaviour:<day> always claims "no fall today".
+      void recordGaitForBehaviour(w);
       // Offline-first: persist, then try to upload and delete on success.
       void put("gait", w).then(() => uploadWindow(w));
     });

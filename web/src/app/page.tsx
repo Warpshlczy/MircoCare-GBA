@@ -30,6 +30,11 @@ import { all, get, put } from "@/lib/db";
 import { flush, track } from "@/lib/analytics";
 import { bridge, homeWidgetPayload, nativeAvailable, onForeground } from "@/lib/native";
 import { planForeground, shouldRaiseSos, SOS_EVENT } from "@/lib/foreground";
+import { dayKey } from "@/lib/tasks";
+import { careForSenior, saveCareCounters } from "@/lib/careStore";
+import { setHome } from "@/lib/geofenceStore";
+import { recordInteractionForBehaviour } from "@/lib/behaviourStore";
+import type { CareCounters } from "@/lib/care";
 import {
   emptyProactiveRecord,
   planProactive,
@@ -111,6 +116,29 @@ const DISPLAY_NEXT: Record<DisplayMode, DisplayMode> = { standard: "hc", hc: "la
 const DISPLAY_LABEL: Record<DisplayMode, MsgKey> = { standard: "displayStandard", hc: "displayHc", large: "displayLarge" };
 const DISPLAY_KEY = "memomate.display";
 
+/**
+ * A's daily care counters (care.ts contract). Only counters A can actually
+ * observe are filled; `null`/absent stays "not measured", never 0.
+ * Persisted in `meta` so a reload does not restart today at zero.
+ */
+interface CareDayCounts {
+  id: "careDay";
+  day: string;
+  interactions: number;
+  unheard: number;
+  repeats: number;
+  sos: number;
+}
+
+const emptyCareDay = (): CareDayCounts => ({
+  id: "careDay",
+  day: dayKey(Date.now()),
+  interactions: 0,
+  unheard: 0,
+  repeats: 0,
+  sos: 0,
+});
+
 const MAX_CARDS = 6;
 const MEMORY_TURNS = 20;
 /** Speech must be at least this loud (0..1 meter) to count as a real utterance. */
@@ -187,6 +215,7 @@ export default function Page() {
   const proRef = useRef<ProactiveRecord>(emptyProactiveRecord());
   const proLoaded = useRef(false);
   const repeats = useRef(new Map<string, number>());
+  const careRef = useRef<CareDayCounts>(emptyCareDay());
   // Any overlay owns the screen and the speaker; proactive talk must wait.
   const blockedRef = useRef(false);
   blockedRef.current = sosOpen || cameraOpen || cardOpen || screeningOpen || followupOpen || !!reminder.due;
@@ -267,14 +296,45 @@ export default function Page() {
     void put("meta", r).catch(() => {});
   };
 
-  // Feeds `lastInteractionAt` (silence care) and C's interaction count (issue #3).
+  // --- A's care counters (care.ts contract, issue #1) ---------------------
+  // Only the counters A can actually observe are filled. `unheard` counts
+  // failed recognitions, `repeats` counts a question asked again, `sos`
+  // counts SOS screens opened. painMentions / nightWakeCount / fallEvents
+  // stay absent: A has no honest measurement for the first two, and
+  // careStore fills falls from B's gait accumulator.
+  const careCounters = (): Partial<CareCounters> => {
+    const c = careRef.current;
+    return {
+      interactions: c.interactions,
+      unheard: c.unheard,
+      repeats: c.repeats,
+      sosEvents: c.sos,
+    };
+  };
+
+  /** Bumps one counter, keeps today's row across reloads, feeds the baseline. */
+  const bumpCare = (key: "interactions" | "unheard" | "repeats" | "sos") => {
+    const today = dayKey(Date.now());
+    if (careRef.current.day !== today) careRef.current = emptyCareDay();
+    careRef.current[key] += 1;
+    void put("meta", careRef.current).catch(() => {});
+    // A day with at least one measured interaction becomes baseline material.
+    void saveCareCounters(careCounters(), Date.now());
+  };
+
+  // Feeds `lastInteractionAt` (silence care), A's current-day counters, and
+  // C's interaction telemetry (issue #3).
   const noteInteraction = (source: "voice" | "text" | "button" | "interview") => {
     saveProactive({ ...proRef.current, lastInteractionAt: Date.now() });
+    bumpCare("interactions");
+    // B's behaviour counter sees taps; conversation memory does not.
+    void recordInteractionForBehaviour(Date.now());
     track("interaction", locale, { source });
   };
 
   const openSos = (reason: SosEvent["reason"], source: SosEvent["source"] = "app") => {
     interrupt();
+    bumpCare("sos");
     setSosReason(reason);
     setSosSource(source);
     setSosOpen(true);
@@ -300,6 +360,33 @@ export default function Page() {
     void speakLine(t(locale, "voiceUnavailable"));
   };
 
+  /**
+   * Explicit "this is my home" confirmation (B's setHome). The fence never
+   * infers a home point: asking for location before the senior opts in is the
+   * fastest way to get the app uninstalled, and "first fix = home" breaks when
+   * that fix happens at a clinic.
+   */
+  const confirmHome = async () => {
+    const native = bridge();
+    let loc: { lat: number; lng: number } | null = native ? await native.getLocation().catch(() => null) : null;
+    if (!loc && typeof navigator !== "undefined" && navigator.geolocation) {
+      loc = await new Promise((resolve) => {
+        navigator.geolocation.getCurrentPosition(
+          (p) => resolve({ lat: p.coords.latitude, lng: p.coords.longitude }),
+          () => resolve(null),
+          { timeout: 8000, maximumAge: 0 }
+        );
+      });
+    }
+    if (!loc) {
+      await speakLine(t(locale, "setHomeFail"));
+      return;
+    }
+    await setHome({ lat: loc.lat, lng: loc.lng });
+    track("home_set", locale);
+    await speakLine(t(locale, "setHomeOk"));
+  };
+
   // ponytail: "the same question" = the same normalized text on the same day,
   // kept in memory only (resets on reload). Ceiling: paraphrases count as new.
   // Upgrade path: on-device sentence embedding. Never told to the senior.
@@ -308,6 +395,7 @@ export default function Page() {
     const key = `${new Date().toDateString()}|${said.replace(/[\s，。？?！!、]/g, "")}`;
     const n = (repeats.current.get(key) ?? 0) + 1;
     repeats.current.set(key, n);
+    if (n >= 2) bumpCare("repeats"); // asked again — the care signal, not the first ask
     if (n === 3) track("repeat_question", locale, { count: n });
   };
 
@@ -531,6 +619,7 @@ export default function Page() {
     // ignore noise/silence — real speech is long enough AND loud enough
     if (said.length < 2 || (metered && peak < VOICE_PEAK_MIN)) {
       sttFails.current++;
+      bumpCare("unheard");
       if (sttFails.current >= STT_FAILS_BEFORE_BUTTONS) failOpen();
       else void speakLine(t(locale, "noSpeech"));
       return;
@@ -661,7 +750,14 @@ export default function Page() {
       return;
     }
     saveProactive(spoke);
-    converse(t(locale, "silenceCare") + (act.silentDays >= WAKE_HINT_DAYS ? t(locale, "wakeHintSpoken") : ""));
+    // Timing stays here (budget, 90-min gap, quiet hours). The wording is B's
+    // care signal: it returns one line, or null when there is nothing worth
+    // interrupting him about — then the plain silence copy still runs.
+    const hint = act.silentDays >= WAKE_HINT_DAYS ? t(locale, "wakeHintSpoken") : "";
+    const fallback = t(locale, "silenceCare");
+    void careForSenior(careCounters(), locale)
+      .then((line) => converse((line ?? fallback) + hint))
+      .catch(() => converse(fallback + hint));
   };
 
   latest.current = { onTalk, proactive, openSos, say: (line) => void speakLine(line), refresh };
@@ -711,10 +807,22 @@ export default function Page() {
     void (async () => {
       const rows = await all<ConversationTurn>("conversation").catch(() => []);
       const rec = await get<ProactiveRecord>("meta", "proactive").catch(() => undefined);
+      const care = await get<CareDayCounts>("meta", "careDay").catch(() => undefined);
       if (!alive) return;
       historyRef.current = rows.sort((a, b) => a.at - b.at).slice(-MEMORY_TURNS);
       if (rec) proRef.current = { ...emptyProactiveRecord(), ...rec };
       proLoaded.current = true;
+      // Restore today's care counters; a row from another day is discarded.
+      if (care?.day === dayKey(Date.now())) {
+        careRef.current = {
+          id: "careDay",
+          day: care.day,
+          interactions: Math.max(care.interactions ?? 0, careRef.current.interactions),
+          unheard: Math.max(care.unheard ?? 0, careRef.current.unheard),
+          repeats: Math.max(care.repeats ?? 0, careRef.current.repeats),
+          sos: Math.max(care.sos ?? 0, careRef.current.sos),
+        };
+      }
       // Opening the app starts a voice conversation by default.
       window.setTimeout(() => latest.current.proactive("open"), 1500);
     })();
@@ -968,6 +1076,15 @@ export default function Page() {
             </a>
           </div>
           <div className="flex flex-wrap gap-4">
+            <button
+              onClick={() => {
+                noteInteraction("button");
+                void confirmHome();
+              }}
+              className={secondary}
+            >
+              {t(locale, "setHome")}
+            </button>
             <button onClick={() => setCardOpen(true)} className={secondary}>
               {t(locale, "healthCardTitle")}
             </button>
