@@ -30,6 +30,8 @@ import { appendTurn, isLlmReady, runTurn } from "@/lib/agent";
 import type { RecentTurn } from "@/lib/agent";
 import { getHealth, postAgentTurn } from "@/lib/api";
 import { flushClosedDay } from "@/lib/behaviourStore";
+import { pruneCareHistory } from "@/lib/careStore";
+import { startFenceWatch } from "@/lib/geofenceStore";
 import { bridge } from "@/lib/native";
 import { flushOutboxOnce, startOutboxAutoFlush } from "@/lib/outboxRunner";
 import { enqueue } from "@/lib/outboxStore";
@@ -127,7 +129,11 @@ export function useAgentBridge(deps: AgentBridgeDeps): AgentBridge {
   // rather than in page.tsx (A's file). Everything below fails closed and
   // silently: a missing backend must never stop the senior from talking.
   useEffect(() => {
-    const stop = startOutboxAutoFlush();
+    const stopQueue = startOutboxAutoFlush();
+    // Foreground fence sampling (A's call, issue #1). It samples nothing until
+    // a home point exists, and it never asks for location permission itself —
+    // see geofenceStore.ts for why that is a product decision, not a bug.
+    const stopFence = startFenceWatch();
 
     // One closed day at most per open. Runs after the first flush attempt so an
     // item left over from last night goes out before we enqueue a new one.
@@ -138,9 +144,14 @@ export function useAgentBridge(deps: AgentBridgeDeps): AgentBridge {
       } catch {
         /* offline / no DB — the next open tries again */
       }
+      // Care counters older than the median window cannot affect a result.
+      void pruneCareHistory().catch(() => {});
     })();
 
-    return stop;
+    return () => {
+      stopQueue();
+      stopFence();
+    };
   }, []);
 
   const handleUtterance = useCallback(async (text: string): Promise<boolean> => {

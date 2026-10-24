@@ -6,7 +6,10 @@
 //   (a) the new state to persist for `debounceMs` before we accept it, and
 //   (b) the senior to be outside for `awayAlertMs` before we alert at all.
 //
-// Tested in src/selfcheck.ts. Consumed by lib/tools.ts#locate (W2).
+// Tested in src/selfcheck.ts. Consumed by lib/tools.ts#locate (W2) and
+// lib/geofenceStore.ts (W4 foreground watcher).
+
+import type { GeofenceEvent } from "./types";
 
 export interface LatLng {
   lat: number;
@@ -121,4 +124,50 @@ export function formatDistance(distanceM: number): string {
   if (!Number.isFinite(distanceM) || distanceM < 0) return "—";
   if (distanceM < 1000) return `${Math.round(distanceM)} 米`;
   return `${(distanceM / 1000).toFixed(1)} 公里`;
+}
+
+export interface FenceStep {
+  presence: Presence;
+  /** the event to report for this sample, or null */
+  event: GeofenceEvent | null;
+}
+
+/**
+ * One sample -> updated presence + at most one event.
+ *
+ * Two deliberate rules:
+ *  - An `enter` event is emitted ONLY when the matching `exit` was actually
+ *    alerted (i.e. he was away long enough for the family to be paged). Paging
+ *    someone about a 10-minute trip to the shop is noise, and noise is what
+ *    makes families mute the app before the day it matters.
+ *  - `enter` is emitted on the transition itself, so ordinary samples while he
+ *    is at home produce nothing at all.
+ */
+export function stepFence(
+  prev: Presence | null,
+  sample: { at: number; distanceM: number },
+  policy: FencePolicy = FENCE_POLICY
+): FenceStep {
+  const presence = observe(prev, sample, policy);
+  const distanceM = Math.max(0, Math.round(sample.distanceM));
+
+  if (shouldAlert(presence, sample.at, policy)) {
+    return {
+      presence: markAlerted(presence, sample.at),
+      event: { id: `gf-exit-${sample.at}`, at: sample.at, kind: "exit", distanceM },
+    };
+  }
+
+  // Back home, and the family was told he had left: close the loop for them.
+  const wasOut = prev !== null && prev.inside === false;
+  const exitWasAlerted = wasOut && prev.lastAlertAt >= prev.since;
+  if (wasOut && exitWasAlerted && presence.inside) {
+    const minutesAway = Math.max(0, Math.round((sample.at - prev.since) / 60_000));
+    return {
+      presence,
+      event: { id: `gf-enter-${sample.at}`, at: sample.at, kind: "enter", distanceM, minutesAway },
+    };
+  }
+
+  return { presence, event: null };
 }

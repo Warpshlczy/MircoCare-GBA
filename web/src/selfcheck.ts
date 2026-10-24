@@ -38,7 +38,7 @@ import { visemeFromText, FRAMES_PER_CHAR, VISEME_FRAME_MS } from "./lib/viseme.t
 import { parseManifest } from "./lib/live2d.ts";
 import { nextDueAt } from "./lib/datetime.ts";
 import { homeWidgetPayload, onForeground, FOREGROUND_REASONS } from "./lib/native.ts";
-import { haversineM, inCircle, observe, shouldAlert, markAlerted, formatDistance } from "./lib/geofence.ts";
+import { haversineM, inCircle, observe, shouldAlert, markAlerted, formatDistance, stepFence, FENCE_POLICY } from "./lib/geofence.ts";
 import {
   backoffMs,
   nextAttemptAt,
@@ -89,7 +89,12 @@ import {
   caregiverLine,
   carePrompt,
   mentionsDiagnosis,
+  medianOrNull,
+  baselineFrom,
+  normalizeCounters,
   CARE,
+  CARE_KEYS,
+  BASELINE,
   DIAGNOSIS_WORDS,
 } from "./lib/care.ts";
 import type { CareSignal } from "./lib/care.ts";
@@ -1570,6 +1575,85 @@ assert.equal(magnitude(3, 4, 0), 5);
     send({ id: "q-x", kind: "nope" as OutboxItem["kind"], payload: {}, createdAt: NOW, attempts: 0, nextAttemptAt: NOW }),
     /no sender for kind "nope"/
   );
+}
+
+// --- care baseline: median, minimum days, and what "usual" means -------------
+{
+  // A baseline is a median over MEASURED days, and a short history is not one.
+  assert.equal(medianOrNull([1, 2, 3]), null, "3 days is not a baseline");
+  assert.equal(medianOrNull([1, 2, 3, 4, 5]), 3);
+  assert.equal(medianOrNull([4, 6, 8, 10, 12]), 8);
+  assert.equal(medianOrNull([0, 0, 0, 0, 100]), 0, "one big day must not lift the bar");
+  assert.equal(medianOrNull([null, undefined, 4, 6, 8, 10, 12]), 8, "nulls are skipped, never zeroed");
+  assert.equal(medianOrNull([null, null, null, null, null]), null, "five nulls are still no data");
+  assert.equal(BASELINE.minDays, 5);
+
+  const days = [
+    { interactions: 10, fallEvents: 0 },
+    { interactions: 8 },
+    { interactions: 12 },
+    { interactions: 9 },
+    { interactions: 11 },
+  ];
+  const b = baselineFrom(days);
+  assert.equal(b.interactions, 10, "median of 8,9,10,11,12");
+  assert.equal(b.fallEvents, undefined, "one measured day is not a baseline for falls");
+
+  // 5 < 60% of 10 -> the only signal worth raising.
+  assert.deepEqual(careSignals({ today: { interactions: 5 }, baseline: b }), ["fewer_interactions"]);
+  assert.deepEqual(careSignals({ today: { interactions: 7 }, baseline: b }), [], "7 is 70% of usual: no signal");
+  // Without a baseline, a quiet day says nothing at all.
+  assert.deepEqual(careSignals({ today: { interactions: 0 } }), []);
+
+  // Garbage must not become 0: 0 means "he did nothing", which is a claim.
+  assert.deepEqual(
+    normalizeCounters({ interactions: 3, unheard: -1, repeats: NaN, nightWakeCount: undefined }),
+    { interactions: 3 }
+  );
+  assert.equal(CARE_KEYS.length, 7, "seven counters: adding one must also reach the baseline");
+}
+
+// --- fence: one sample in, at most one event out -----------------------------
+{
+  const t0 = 1_700_000_000_000;
+  const P = FENCE_POLICY;
+
+  // First fix already outside: he is "out", but nobody is paged yet.
+  let step = stepFence(null, { at: t0, distanceM: 900 });
+  assert.equal(step.event, null, "a single stray fix must not alert");
+  assert.equal(step.presence.inside, false);
+
+  // 30 minutes out: still inside the away window.
+  step = stepFence(step.presence, { at: t0 + 30 * 60_000, distanceM: 950 });
+  assert.equal(step.event, null);
+
+  // Past 60 minutes: this is the alert.
+  step = stepFence(step.presence, { at: t0 + 61 * 60_000, distanceM: 1200 });
+  assert.equal(step.event?.kind, "exit");
+  assert.equal(step.event?.distanceM, 1200, "the family sees a distance, not a track");
+  assert.equal(step.event?.id, `gf-exit-${t0 + 61 * 60_000}`, "id is derived from the sample time");
+  assert.equal(step.presence.lastAlertAt, t0 + 61 * 60_000);
+
+  // Coming back needs the 5s dwell first (GPS jitter), and only then closes
+  // the loop for the family.
+  let back = stepFence(step.presence, { at: t0 + 70 * 60_000, distanceM: 120 });
+  assert.equal(back.event, null, "the flip is not accepted yet");
+  back = stepFence(back.presence, { at: t0 + 70 * 60_000 + 6_000, distanceM: 100 });
+  assert.equal(back.event?.kind, "enter");
+  assert.equal(back.event?.minutesAway, 70);
+
+  // A 20-minute trip the family was never paged about must stay silent.
+  let short = stepFence(back.presence, { at: t0 + 200 * 60_000, distanceM: 800 });
+  short = stepFence(short.presence, { at: t0 + 200 * 60_000 + 6_000, distanceM: 850 });
+  assert.equal(short.event, null, "leaving for 20 minutes is not an alert");
+  short = stepFence(short.presence, { at: t0 + 220 * 60_000, distanceM: 100 });
+  short = stepFence(short.presence, { at: t0 + 220 * 60_000 + 6_000, distanceM: 90 });
+  assert.equal(short.event, null, "and returning must not send an unsolicited 'he is back'");
+
+  // Cooldown: a second alert inside 30 minutes of the first is suppressed.
+  const alerted = markAlerted({ inside: false, since: t0, lastAlertAt: 0, pending: null }, t0 + 90 * 60_000);
+  assert.equal(shouldAlert(alerted, t0 + 100 * 60_000, P), false);
+  assert.equal(shouldAlert(alerted, t0 + 121 * 60_000, P), true);
 }
 
 console.log("selfcheck: OK");
