@@ -9,29 +9,43 @@
 //
 // Returning `false` means "not mine, keep your existing path".
 //
-// What is wired here: refusal rules, the local card fallback page.tsx already
-// does, and the LOCAL tool executor (task create/complete, location, SOS).
+// Two switches decide what this bridge can do, and both fail CLOSED:
 //
-// What is deliberately NOT wired: `requestTurn`. C's /agent/turn is live but its
-// planner is still a fixed `create_task` echo, so routing "幫我打電話畀阿明"
-// there would answer "好，我幫你記住了" and file a chore — visibly wrong in front
-// of a judge. Until C3 replaces `_plan`, a non-local utterance returns false and
-// A's original path runs unchanged. No fabricated answers.
+//   llmReady  — GET /health says `llmIntegration: "enabled"`. Without it we do
+//               NOT send the turn to /agent/turn: `config.llm_available` does not
+//               check the API key, so a backend started with AURA_LLM_ENABLED=true
+//               and no key still answers 200 with a fixed "我帮你记住了" echo.
+//               Routing there would be worse than not trying at all.
+//   canRun    — the local executor can actually perform the tool. Unrunnable
+//               tools are skipped BEFORE any confirmation question, so the senior
+//               is never asked "shall I call 阿明?" and then told it cannot.
+//
+// History is accumulated here (A's suggestion): the utterance we received plus
+// the line we spoke are exactly one question-answer pair. An UNHANDLED turn is
+// NOT recorded — we never saw A's answer, and a user turn with no reply would
+// teach the model that the senior sometimes speaks and gets ignored.
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { runTurn } from "@/lib/agent";
+import { appendTurn, isLlmReady, runTurn } from "@/lib/agent";
+import type { RecentTurn } from "@/lib/agent";
+import { getHealth, postAgentTurn } from "@/lib/api";
+import { flushClosedDay } from "@/lib/behaviourStore";
 import { bridge } from "@/lib/native";
+import { flushOutboxOnce, startOutboxAutoFlush } from "@/lib/outboxRunner";
 import { enqueue } from "@/lib/outboxStore";
 import { listTasks, saveTask } from "@/lib/taskStore";
 import { createToolRunner } from "@/lib/toolExec";
 import type { AgentCard, Locale, ReminderItem, Task } from "@/lib/types";
+
+/** How often to re-probe a backend that is not ready yet (ms). */
+const PROBE_INTERVAL_MS = 30_000;
 
 export interface AgentBridgeDeps {
   locale: Locale;
   reminders: ReminderItem[];
   /** A's card board entry point. */
   onCards: (cards: AgentCard[]) => void;
-  /** A's speak(); used for refusal lines and tool outcomes. */
+  /** A's speakLine(); used for refusal lines and tool outcomes. */
   onSpeak?: (text: string) => void;
   /** A's spoken yes/no; resolves false when the senior declines or stays silent. */
   onConfirm?: (question: string) => Promise<boolean>;
@@ -42,8 +56,10 @@ export interface AgentBridgeDeps {
 export interface AgentBridge {
   /** `true` = handled here; `false` = A should run its own intent path. */
   handleUtterance: (text: string) => Promise<boolean>;
-  /** True while a turn is in flight (drives A's state). */
+  /** True while a turn is in flight (drives A's "thinking" state). */
   busy: boolean;
+  /** True once /health confirms a real planner. False = local path only. */
+  llmReady: boolean;
   /** Local task list, kept in sync with the `tasks` store. */
   tasks: Task[];
 }
@@ -51,10 +67,16 @@ export interface AgentBridge {
 export function useAgentBridge(deps: AgentBridgeDeps): AgentBridge {
   const [busy, setBusy] = useState(false);
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [llmReady, setLlmReady] = useState(false);
+
   const ref = useRef(deps);
   ref.current = deps;
   const tasksRef = useRef(tasks);
   tasksRef.current = tasks;
+  const turnsRef = useRef<RecentTurn[]>([]);
+  /** mirrored into a ref so handleUtterance's empty dep list stays correct */
+  const llmRef = useRef(false);
+  llmRef.current = llmReady;
 
   // Load once on mount. A missing DB (private mode) just leaves the list empty —
   // it must never block the senior from talking.
@@ -70,9 +92,61 @@ export function useAgentBridge(deps: AgentBridgeDeps): AgentBridge {
     };
   }, []);
 
+  // Probe the backend until it reports a real planner, then stop asking.
+  // Failures stay silent: an unreachable backend simply means the local path.
+  useEffect(() => {
+    let alive = true;
+    let timer: ReturnType<typeof setInterval> | null = null;
+
+    const probe = async () => {
+      try {
+        const health = await getHealth();
+        if (!alive) return;
+        const ok = isLlmReady(health);
+        setLlmReady(ok);
+        if (ok && timer) {
+          clearInterval(timer);
+          timer = null;
+        }
+      } catch {
+        if (alive) setLlmReady(false);
+      }
+    };
+
+    void probe();
+    timer = setInterval(probe, PROBE_INTERVAL_MS);
+    return () => {
+      alive = false;
+      if (timer) clearInterval(timer);
+    };
+  }, []);
+
+  // Start the offline queue flush and the daily behaviour rollup.
+  //
+  // This hook is the only mount point B owns, so the queue is started here
+  // rather than in page.tsx (A's file). Everything below fails closed and
+  // silently: a missing backend must never stop the senior from talking.
+  useEffect(() => {
+    const stop = startOutboxAutoFlush();
+
+    // One closed day at most per open. Runs after the first flush attempt so an
+    // item left over from last night goes out before we enqueue a new one.
+    void (async () => {
+      try {
+        const r = await flushClosedDay();
+        if (r.uploaded) void flushOutboxOnce();
+      } catch {
+        /* offline / no DB — the next open tries again */
+      }
+    })();
+
+    return stop;
+  }, []);
+
   const handleUtterance = useCallback(async (text: string): Promise<boolean> => {
     const d = ref.current;
     const now = Date.now();
+    const history = turnsRef.current;
     setBusy(true);
     try {
       // A fresh runner per turn: it reads the task snapshot, and its effects go
@@ -88,10 +162,14 @@ export function useAgentBridge(deps: AgentBridgeDeps): AgentBridge {
         // idempotent per event id, so a replay cannot double-count.
         recordEvent: async (e) => {
           await enqueue("taskEvent", e, now);
+          // Kick, don't wait: the turn must finish speaking before the phone
+          // finishes talking to the backend.
+          void flushOutboxOnce(now);
         },
         // Same id on every replay -> the family is paged once, not once per retry.
         sendSos: async (e) => {
           await enqueue("sos", e, now);
+          void flushOutboxOnce(now);
         },
         raiseSos: () => d.onSos?.(),
         locate: bridge()
@@ -107,13 +185,21 @@ export function useAgentBridge(deps: AgentBridgeDeps): AgentBridge {
         now,
         reminders: d.reminders,
         tasks: tasksRef.current,
+        recentTurns: history,
+        // Gated: without a confirmed planner the turn never leaves the device.
+        requestTurn: llmRef.current ? postAgentTurn : undefined,
         canRun: runner.canRun,
         runTool: runner.run,
         confirm: d.onConfirm,
-        // requestTurn intentionally absent — see the header. C3 flips this on.
       });
 
       if (!out.handled) return false;
+
+      // Record the pair only now: we know both halves of it.
+      let next = appendTurn(history, { role: "user", text });
+      if (out.reply) next = appendTurn(next, { role: "assistant", text: out.reply });
+      turnsRef.current = next;
+
       if (out.reply && d.onSpeak) d.onSpeak(out.reply);
       if (out.cards.length > 0) d.onCards(out.cards);
 
@@ -132,5 +218,5 @@ export function useAgentBridge(deps: AgentBridgeDeps): AgentBridge {
     }
   }, []);
 
-  return { handleUtterance, busy, tasks };
+  return { handleUtterance, busy, llmReady, tasks };
 }

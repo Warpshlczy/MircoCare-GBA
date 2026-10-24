@@ -29,6 +29,48 @@ import type {
 /** Intents the local card factory can satisfy without any backend. */
 export const LOCAL_CARD_INTENTS = new Set(["weather", "tasks", "medication"]);
 
+/** How many turns of history travel with a request (contract: ≤10, oldest first). */
+export const MAX_RECENT_TURNS = 10;
+
+export interface RecentTurn {
+  role: "user" | "assistant";
+  text: string;
+}
+
+/**
+ * Appends one turn and keeps the last `MAX_RECENT_TURNS`.
+ *
+ * Why this is not just `[...turns, t].slice(-10)`: an empty or whitespace-only
+ * turn is not a turn. Pushing one would teach the model that the senior
+ * sometimes says nothing, which is exactly the kind of "quiet = withdrawn"
+ * inference this product must not encourage.
+ */
+export function appendTurn(
+  turns: readonly RecentTurn[],
+  turn: RecentTurn,
+  limit = MAX_RECENT_TURNS
+): RecentTurn[] {
+  const text = (turn.text ?? "").trim();
+  if (!text) return [...turns];
+  return [...turns, { role: turn.role, text }].slice(-limit);
+}
+
+/** The only fields of GET /health this client cares about. */
+export interface HealthLike {
+  llmIntegration?: string | null;
+}
+
+/**
+ * FAIL CLOSED. `AURA_LLM_ENABLED=true` without an API key leaves the backend
+ * answering 200 with a fixed "我帮你记住了" echo (config.llm_available does not
+ * check the key). The health endpoint is the only way to tell a real planner
+ * from that echo, so anything unrecognised — a 502, a renamed field, an older
+ * backend — must mean "keep the local path", never "assume it works".
+ */
+export function isLlmReady(health: HealthLike | null | undefined): boolean {
+  return health?.llmIntegration === "enabled";
+}
+
 export interface ToolExecResult {
   ok: boolean;
   /** spoken after the call; must be senior-legible, never an error code */
@@ -41,7 +83,7 @@ export interface AgentDeps {
   reminders: ReminderItem[];
   tasks: Task[];
   /** ≤10 latest turns, oldest first. Empty is fine. */
-  recentTurns?: { role: "user" | "assistant"; text: string }[];
+  recentTurns?: RecentTurn[];
   /** backend turn; resolve null when unavailable (501 / 503 / offline). */
   requestTurn?: (req: AgentTurnRequest) => Promise<AgentTurnResponse | null>;
   /**

@@ -54,8 +54,20 @@ import {
   gaitCvForDay,
   fallEventsForDay,
   hasMeasuredSignal,
+  addDays,
+  dayToUpload,
+  emptyAccumulator,
+  accumulateGait,
+  accumulateGaitAll,
+  accCv,
+  countInteractions,
+  appUsedOn,
+  shouldUploadDay,
+  MAX_BACKFILL_DAYS,
 } from "./lib/behaviour.ts";
-import { runTurn } from "./lib/agent.ts";
+import { makeSender, behaviourBody, telemetryBatch } from "./lib/outboxRunner.ts";
+import type { OutboxTransport } from "./lib/outboxRunner.ts";
+import { runTurn, appendTurn, isLlmReady, MAX_RECENT_TURNS } from "./lib/agent.ts";
 import type { AgentDeps } from "./lib/agent.ts";
 import { createToolRunner, emergencyNumber } from "./lib/toolExec.ts";
 import {
@@ -1181,6 +1193,191 @@ assert.equal(magnitude(3, 4, 0), 5);
   assert.equal(refused.refused, true);
   assert.equal(reached, false);
   assert.ok(refused.reply.includes("做唔到"), `reply=${refused.reply}`);
+}
+
+// --- planner gate + turn history (B / P1 wiring to C3) ----------------------
+{
+  // Fail CLOSED. A backend started with AURA_LLM_ENABLED=true and no API key
+  // answers 200 with a fixed "我帮你记住了" echo; only /health can tell.
+  assert.equal(isLlmReady({ llmIntegration: "enabled" }), true);
+  assert.equal(isLlmReady({ llmIntegration: "disabled-fallback" }), false);
+  assert.equal(isLlmReady({}), false, "an older backend must not be assumed ready");
+  assert.equal(isLlmReady(null), false);
+  assert.equal(isLlmReady(undefined), false);
+  assert.equal(isLlmReady({ llmIntegration: "ENABLED" }), false, "unknown casing is unknown");
+
+  // History keeps order, drops nothing said, and never records silence.
+  const empty: { role: "user" | "assistant"; text: string }[] = [];
+  const one = appendTurn(empty, { role: "user", text: "我想飲水" });
+  assert.equal(one.length, 1);
+  assert.equal(empty.length, 0, "appendTurn must not mutate the caller's array");
+  const two = appendTurn(one, { role: "assistant", text: "好，我幫你記低。" });
+  assert.deepEqual(two.map((t) => t.role), ["user", "assistant"]);
+  assert.equal(appendTurn(two, { role: "user", text: "   " }).length, 2, "silence is not a turn");
+
+  let long: { role: "user" | "assistant"; text: string }[] = [];
+  for (let i = 0; i < 15; i++) long = appendTurn(long, { role: "user", text: `t${i}` });
+  assert.equal(long.length, MAX_RECENT_TURNS);
+  assert.equal(long[long.length - 1].text, "t14", "the newest turn survives the trim");
+  assert.equal(long[0].text, "t5");
+
+  // And the history actually reaches the model: the request carries it.
+  // (A weather utterance would short-circuit to a local card, so use one that
+  // has to be planned: only a backend turn carries context at all.)
+  const NOW = Date.UTC(2026, 9, 24, 3, 0, 0);
+  let seen: { role: string; text: string }[] = [];
+  await runTurn("幫我打電話畀阿明", {
+    locale: "zh-HK",
+    now: NOW,
+    reminders: [],
+    tasks: [],
+    recentTurns: two,
+    requestTurn: async (req) => {
+      seen = req.context.recentTurns;
+      return { reply: "", calls: [], cards: [] };
+    },
+  });
+  assert.deepEqual(seen, two, "recentTurns must travel with the request");
+}
+
+// --- behaviour day rollup: accumulator, closed-day gate, upload eligibility ---
+{
+  const at = (d: number, h: number) => new Date(2026, 9, 24 + d, h, 0, 0).getTime();
+
+  // Day arithmetic must survive month, year and leap-day boundaries.
+  assert.equal(addDays("2026-10-24", -1), "2026-10-23");
+  assert.equal(addDays("2026-03-01", -1), "2026-02-28");
+  assert.equal(addDays("2026-12-31", 1), "2027-01-01");
+  assert.equal(addDays("2024-03-01", -1), "2024-02-29", "leap year");
+
+  // Only CLOSED days are uploaded, one per open.
+  const NOW = at(0, 9); // 2026-10-24 09:00 local
+  assert.equal(dayToUpload(NOW, null), "2026-10-23", "first run sends yesterday only");
+  assert.equal(dayToUpload(NOW, "2026-10-23"), null, "already sent today: nothing to do");
+  assert.equal(dayToUpload(NOW, "2026-10-24"), null, "a marker ahead of yesterday must not be trusted");
+  assert.equal(
+    dayToUpload(NOW, "2027-05-01"),
+    "2026-10-23",
+    "a marker from a clock jump must not silence the stream for a year"
+  );
+  assert.equal(dayToUpload(NOW, "2026-10-21"), "2026-10-22", "a gap catches up one day per open");
+  assert.equal(
+    dayToUpload(NOW, "2025-01-01"),
+    addDays("2026-10-23", -(MAX_BACKFILL_DAYS - 1)),
+    "a month-old backlog is capped, not replayed"
+  );
+
+  // --- accumulator: survives the window being deleted after upload ----------
+  const gait: GaitWindow[] = [
+    { id: "g1", startedAt: at(0, 8), endedAt: at(0, 8) + 60_000, steps: 60, cadence: 1.8, cv: 0.2, fall: false },
+    { id: "g2", startedAt: at(0, 9), endedAt: at(0, 9) + 60_000, steps: 55, cadence: 1.7, cv: 0.4, fall: true },
+  ];
+  const acc = accumulateGaitAll(emptyAccumulator("2026-10-24"), gait);
+  assert.equal(accCv(acc), 0.3, "mean of 0.2 and 0.4");
+  assert.equal(acc.fallEvents, 1);
+
+  // Replaying the same windows (a retry, a backfill) must not double count.
+  const replayed = accumulateGaitAll(acc, gait);
+  assert.equal(accCv(replayed), 0.3, "idempotent per window id");
+  assert.equal(replayed.fallEvents, 1, "a fall counted twice would alarm the family twice");
+
+  // The `gait` store is emptied as windows upload — the rollup must still know.
+  const fromAcc = behaviourForDay({ day: "2026-10-24", tasks: [], gait: [], gaitAcc: acc, interactionCount: 3 });
+  assert.equal(fromAcc.gaitCv, 0.3, "the accumulator outlives the deleted window");
+  assert.equal(fromAcc.fallEvents, 1, "a fall must not vanish with its window");
+
+  // Both sources at once is the normal case; it must still count once.
+  const mixed = behaviourForDay({ day: "2026-10-24", tasks: [], gait, gaitAcc: acc, interactionCount: 3 });
+  assert.equal(mixed.gaitCv, 0.3, "no double counting when store and accumulator overlap");
+  assert.equal(mixed.fallEvents, 1);
+
+  // A brand-new window adds exactly once.
+  const g3: GaitWindow = { id: "g3", startedAt: at(0, 12), endedAt: at(0, 12) + 60_000, steps: 40, cadence: 1.6, cv: 0.45, fall: false };
+  const grown = behaviourForDay({ day: "2026-10-24", tasks: [], gait: [g3], gaitAcc: acc, interactionCount: 3 });
+  assert.equal(grown.gaitCv, 0.35, "(0.2 + 0.4 + 0.45) / 3");
+
+  // --- interactions come from A's local conversation memory ----------------
+  const turns = [
+    { at: at(0, 8), role: "user" as const },
+    { at: at(0, 8), role: "assistant" as const },
+    { at: at(0, 9), role: "user" as const },
+    { at: at(-1, 20), role: "user" as const },
+  ];
+  assert.equal(countInteractions(turns, "2026-10-24"), 2, "assistant lines must not double the count");
+  assert.equal(countInteractions(turns, "2026-10-23"), 1);
+  assert.equal(appUsedOn(turns, "2026-10-24"), true);
+  assert.equal(appUsedOn(turns, "2026-10-20"), false);
+
+  // A silent day and an unused day look identical in the numbers, and only one
+  // of them is worth reporting. This is the whole reason `appUsed` exists.
+  const silent = behaviourForDay({ day: "2026-10-24", tasks: [], gait: [], interactionCount: 0 });
+  assert.equal(hasMeasuredSignal(silent), false);
+  assert.equal(shouldUploadDay(silent, true), true, "app open + no words IS the signal");
+  assert.equal(shouldUploadDay(silent, false), false, "a phone left in a drawer is not");
+  assert.equal(shouldUploadDay(fromAcc, false), true, "a measured gait day uploads without any chat");
+}
+
+// --- outbox senders: every queued kind must have a route ---------------------
+{
+  const seen: string[] = [];
+  const fake: OutboxTransport = {
+    sos: async (e) => void seen.push(`sos:${e.id}`),
+    taskEvent: async (e) => void seen.push(`taskEvent:${e.id}`),
+    behaviour: async (b) => void seen.push(`behaviour:${b.behaviour.day}`),
+    geofence: async (e) => void seen.push(`geofence:${e.id}`),
+    gait: async (w) => void seen.push(`gait:${w.id}`),
+    screening: async (s) => void seen.push(`screening:${s.id}`),
+    telemetry: async (ev) => void seen.push(`telemetry:${ev.length}`),
+    reminder: async (e) => void seen.push(`reminder:${e.id}`),
+    conversation: async (t) => void seen.push(`conversation:${t.id}`),
+  };
+  const send = makeSender(fake);
+  const NOW = Date.UTC(2026, 9, 24, 3, 0, 0);
+  const queued = (kind: OutboxItem["kind"], payload: unknown): OutboxItem => ({
+    id: `q-${kind}`,
+    kind,
+    payload,
+    createdAt: NOW,
+    attempts: 0,
+    nextAttemptAt: NOW,
+  });
+
+  const behaviour = behaviourForDay({ day: "2026-10-23", tasks: [], gait: [], interactionCount: 4 });
+
+  await send(queued("sos", { id: "sos-1", at: NOW, locale: "zh-HK", reason: "button", confirmed: true, status: "pending" }));
+  await send(queued("taskEvent", taskEventFor(newTask({ text: "食藥", now: NOW, dueAt: NOW, id: "t1" }), "created", NOW)));
+  await send(queued("behaviour", behaviourEnvelope(behaviour)));
+  await send(queued("geofence", { id: "gf-1", at: NOW, kind: "exit", distanceM: 620 }));
+  await send(queued("gait", { id: "g9", startedAt: NOW, endedAt: NOW + 1000, steps: 5, cadence: 1.5, cv: 0.2, fall: false }));
+  await send(queued("screening", { id: "s1", startedAt: NOW, durationMs: 1000, speechRatio: 0.8, trimmedStartMs: 0, trimmedEndMs: 900, features: {} }));
+  await send(queued("telemetry", { id: "e1", name: "tap", at: NOW, locale: "zh-HK" }));
+  await send(queued("reminder", { id: "r1", at: NOW, locale: "zh-HK", kind: "medication", stage: "notify-caregiver" }));
+  await send(queued("conversation", { id: "c1", at: NOW, role: "user", text: "", locale: "zh-HK" }));
+
+  assert.deepEqual(seen, [
+    "sos:sos-1",
+    "taskEvent:te-t1-created-" + NOW,
+    "behaviour:2026-10-23",
+    "geofence:gf-1",
+    "gait:g9",
+    "screening:s1",
+    "telemetry:1",
+    "reminder:r1",
+    "conversation:c1",
+  ]);
+
+  // Payload normalisation: two callers, two shapes, one endpoint.
+  assert.deepEqual(behaviourBody({ behaviour }), { behaviour }, "an envelope passes through");
+  assert.deepEqual(behaviourBody(behaviour), { behaviour }, "a bare rollup gets wrapped");
+  assert.equal(telemetryBatch({ id: "e2" }).length, 1, "a single event is batched");
+  assert.equal(telemetryBatch([{ id: "e2" }, { id: "e3" }]).length, 2, "a batch stays a batch");
+
+  // An unknown kind must THROW: resolving would delete the row and lose the
+  // event, and a silent loss is exactly the bug this file exists to fix.
+  await assert.rejects(
+    send({ id: "q-x", kind: "nope" as OutboxItem["kind"], payload: {}, createdAt: NOW, attempts: 0, nextAttemptAt: NOW }),
+    /no sender for kind "nope"/
+  );
 }
 
 console.log("selfcheck: OK");

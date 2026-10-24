@@ -15,6 +15,8 @@ const API_BASE = (process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000").r
 const TIMEOUT_MS = 4000;
 /** LLM calls are slower; the backend falls back to 501/502 if it cannot answer. */
 const LLM_TIMEOUT_MS = 15000;
+/** /health is a liveness probe: if it is slow, the backend is not ready for us. */
+const PROBE_TIMEOUT_MS = 2500;
 
 function deviceId(): string {
   if (typeof window === "undefined") return "ssr";
@@ -201,6 +203,26 @@ export async function getMedicationPlan(req: MedicationPlanRequest): Promise<Med
     { method: "POST", body: JSON.stringify(req) },
     LLM_TIMEOUT_MS
   );
+}
+
+// ---------------------------------------------------------------------------
+// Service probe. `/health` needs no session — checked here so the agent bridge
+// can answer "is the backend really planning, or is it echoing?" (see
+// agent.ts#isLlmReady for why 200 alone proves nothing).
+// ---------------------------------------------------------------------------
+export interface HealthResponse {
+  status: string;
+  engineVersion?: string;
+  featureSetVersion?: string;
+  privacyMode?: string;
+  /** "enabled" | "disabled-fallback" — the ONLY honest signal that a real planner is behind /agent/turn */
+  llmIntegration?: string;
+  weather?: string;
+  notForDiagnosis?: boolean;
+}
+
+export async function getHealth(): Promise<HealthResponse> {
+  return request<HealthResponse>("/health", { method: "GET" }, PROBE_TIMEOUT_MS);
 }
 
 // ---------------------------------------------------------------------------
