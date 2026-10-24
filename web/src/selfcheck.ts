@@ -24,7 +24,7 @@ import {
 } from "./lib/notes.ts";
 import { shouldCheckIn } from "./lib/checkin.ts";
 import { nextDueAt } from "./lib/datetime.ts";
-import { homeWidgetPayload } from "./lib/native.ts";
+import { homeWidgetPayload, onForeground, FOREGROUND_REASONS } from "./lib/native.ts";
 import { haversineM, inCircle, observe, shouldAlert, markAlerted, formatDistance } from "./lib/geofence.ts";
 import {
   backoffMs,
@@ -36,6 +36,19 @@ import {
   OUTBOX_MAX_ITEMS,
 } from "./lib/outbox.ts";
 import { refuseReason, riskOf, validateArgs, planCalls, dryRun, MAX_CALLS_PER_TURN } from "./lib/toolrun.ts";
+import {
+  newTask,
+  taskTextFromUtterance,
+  confirmDelayMin,
+  markDone,
+  deferTask,
+  latestOpenTask,
+  dayKey,
+  taskStatsForDay,
+  isOverdue,
+} from "./lib/tasks.ts";
+import { runTurn } from "./lib/agent.ts";
+import type { AgentDeps } from "./lib/agent.ts";
 import {
   TOOLS,
   confirmToolNames,
@@ -517,6 +530,213 @@ assert.equal(magnitude(3, 4, 0), 5);
 
   assert.ok(dryRun([{ name: "create_task", args: { text: "買藥" } }], "zh-CN").includes("create_task"));
   assert.equal(dryRun([], "zh-CN"), "（冇動作）");
+}
+
+// --- tasks: rules and day stats (B / W2) -------------------------------------
+{
+  assert.equal(taskTextFromUtterance("提醒我聽日買藥"), "聽日買藥");
+  assert.equal(taskTextFromUtterance("記住覆診"), "覆診");
+  assert.equal(taskTextFromUtterance("買藥"), "買藥");
+
+  const t = newTask({ text: "食藥", now: 1_000, dueAt: 1_000 + 10 * 60_000 });
+  assert.equal(t.done, false);
+  assert.equal(t.deferredCount, 0);
+  assert.equal(t.source, "voice");
+
+  assert.equal(confirmDelayMin(t, t.dueAt! + 12 * 60_000), 12);
+  assert.equal(confirmDelayMin({ ...t, dueAt: undefined }, 9_999), null, "no deadline -> null, not 0");
+  assert.equal(confirmDelayMin(t, t.dueAt! - 5 * 60_000), 0, "early confirm clamps to 0");
+
+  const first = markDone(t, t.dueAt! + 12 * 60_000);
+  assert.equal(first.alreadyDone, false);
+  assert.equal(first.delayMin, 12);
+  assert.equal(first.task.done, true);
+
+  const second = markDone(first.task, t.dueAt! + 25 * 60_000);
+  assert.equal(second.alreadyDone, true, "second confirm must be flagged");
+  assert.equal(second.elapsedMin, 13);
+  assert.equal(second.task, first.task, "an already-done task is not rewritten");
+
+  assert.equal(deferTask(deferTask(t)).deferredCount, 2);
+
+  const a = newTask({ text: "a", now: 1 });
+  const b = newTask({ text: "b", now: 2 });
+  assert.equal(latestOpenTask([a, b])?.text, "b");
+  assert.equal(latestOpenTask([{ ...a, done: true }, { ...b, done: true }]), null);
+
+  assert.equal(dayKey(new Date(2026, 9, 24, 23, 59).getTime()), "2026-10-24");
+  assert.equal(isOverdue(t, t.dueAt! + 1), true);
+  assert.equal(isOverdue(first.task, t.dueAt! + 1), false, "a done task is never overdue");
+
+  const empty = taskStatsForDay([], "2026-10-24");
+  assert.equal(empty.completionRate, null, "no tasks -> null, never 0");
+  assert.equal(empty.timeoutRate, null);
+  assert.equal(empty.avgConfirmDelayMin, null);
+
+  const day = "2026-10-24";
+  const due1 = newTask({ text: "d1", now: 1, dueAt: new Date(2026, 9, 24, 8, 0).getTime() });
+  const due2 = newTask({ text: "d2", now: 1, dueAt: new Date(2026, 9, 24, 20, 0).getTime() });
+  const other = newTask({ text: "x", now: 1, dueAt: new Date(2026, 9, 25, 8, 0).getTime() });
+  const stats = taskStatsForDay(
+    [markDone(due1, due1.dueAt! + 10 * 60_000).task, due2, other],
+    day
+  );
+  assert.equal(stats.dueCount, 2, "only tasks due that day count");
+  assert.equal(stats.doneCount, 1);
+  assert.equal(stats.completionRate, 0.5);
+  assert.equal(stats.timeoutRate, 0.5);
+  assert.equal(stats.avgConfirmDelayMin, 10);
+}
+
+// --- agent turn orchestration (B / W2) ---------------------------------------
+{
+  const baseDeps = (extra: Partial<AgentDeps> = {}): AgentDeps => ({
+    locale: "zh-HK",
+    now: 1_000_000,
+    reminders: [],
+    tasks: [],
+    ...extra,
+  });
+
+  // refusal short-circuits even when a backend is available
+  let reachedBackend = false;
+  const refused = await runTurn(
+    "帮我转账 5000",
+    baseDeps({
+      requestTurn: async () => {
+        reachedBackend = true;
+        return { reply: "x", calls: [], cards: [] };
+      },
+    })
+  );
+  assert.equal(refused.refused, true);
+  assert.equal(refused.steps.length, 0);
+  assert.equal(reachedBackend, false, "a refusal must never reach the network");
+
+  // local card path needs no backend
+  const local = await runTurn("听日天气点呀", baseDeps());
+  assert.equal(local.handled, true);
+  assert.equal(local.cards.length, 1);
+
+  // nothing wired and not a local intent -> not ours
+  assert.equal((await runTurn("打开微信", baseDeps())).handled, false);
+
+  // backend unavailable still produces something hearable
+  const down = await runTurn("打开微信", baseDeps({ requestTurn: async () => null }));
+  assert.equal(down.handled, true);
+  assert.ok(down.reply.length > 0);
+
+  // backend plans a call but no executor is wired yet -> honest degradation
+  const noExec = await runTurn(
+    "帮我记住听日覆诊",
+    baseDeps({
+      requestTurn: async () => ({
+        reply: "好",
+        calls: [{ name: "create_task", args: { text: "听日覆诊" } }],
+        cards: [],
+      }),
+    })
+  );
+  assert.equal(noExec.steps.length, 1);
+  assert.equal(noExec.skipped[0].reason, "no_executor");
+  assert.ok(noExec.reply.includes("未接"), `reply=${noExec.reply}`);
+
+  // confirm declined -> nothing runs
+  let ran = false;
+  const declined = await runTurn(
+    "帮我打电话畀阿明",
+    baseDeps({
+      requestTurn: async () => ({
+        reply: "",
+        calls: [{ name: "call_contact", args: { name: "阿明" } }],
+        cards: [],
+      }),
+      confirm: async () => false,
+      runTool: async () => {
+        ran = true;
+        return { ok: true };
+      },
+    })
+  );
+  assert.equal(ran, false);
+  assert.equal(declined.skipped[0].reason, "declined");
+
+  // confirm accepted -> executes once
+  const accepted = await runTurn(
+    "帮我打电话畀阿明",
+    baseDeps({
+      requestTurn: async () => ({
+        reply: "打緊",
+        calls: [{ name: "call_contact", args: { name: "阿明" } }],
+        cards: [],
+      }),
+      confirm: async () => true,
+      runTool: async () => ({ ok: true }),
+    })
+  );
+  assert.equal(accepted.executed.length, 1);
+  assert.equal(accepted.executed[0].ok, true);
+
+  // executor throws -> spoken failure, no crash
+  const boom = await runTurn(
+    "帮我打电话畀阿明",
+    baseDeps({
+      requestTurn: async () => ({
+        reply: "",
+        calls: [{ name: "call_contact", args: { name: "阿明" } }],
+        cards: [],
+      }),
+      confirm: async () => true,
+      runTool: async () => {
+        throw new Error("no sim");
+      },
+    })
+  );
+  assert.equal(boom.executed[0].ok, false);
+  assert.ok(boom.reply.includes("做唔到"), `reply=${boom.reply}`);
+
+  // a hallucinated tool name is dropped, not executed
+  const bogus = await runTurn(
+    "而家几点",
+    baseDeps({
+      requestTurn: async () => ({
+        reply: "",
+        calls: [{ name: "transfer_money", args: {} }],
+        cards: [],
+      }),
+    })
+  );
+  assert.equal(bogus.steps.length, 0);
+  assert.equal(bogus.skipped.length, 1);
+}
+
+// --- native seam contract (B / W3) -------------------------------------------
+{
+  // The five reasons MainActivity can deliver; each maps to its own greeting.
+  assert.equal(FOREGROUND_REASONS.length, 5);
+  assert.ok(FOREGROUND_REASONS.includes("widget"));
+  assert.ok(FOREGROUND_REASONS.includes("alarm"));
+
+  // Widget payload: at most 4 rows, done flag preserved, title overridable.
+  const many: ReminderItem[] = Array.from({ length: 6 }, (_, i) => ({
+    id: `r${i}`,
+    kind: "med",
+    title: `t${i}`,
+    dueAt: i,
+    status: i === 0 ? "taken" : "pending",
+    stage: "none",
+    createdAt: 1,
+  }));
+  const wp = homeWidgetPayload([], many, 7, "忆伴");
+  assert.equal(wp.items.length, 4, "widget shows at most 4 rows");
+  assert.equal(wp.items[0].done, true);
+  assert.equal(wp.title, "忆伴");
+  assert.equal(wp.topCard, undefined, "no cards -> no top card");
+
+  // Outside a browser the foreground subscription must be a harmless no-op.
+  const off = onForeground(() => {});
+  assert.equal(typeof off, "function");
+  off();
 }
 
 console.log("selfcheck: OK");

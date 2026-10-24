@@ -1,13 +1,39 @@
 // Offline-first IndexedDB wrapper. ~30 lines, promise-based, no library.
-// Stores: reminders | gait | screening | meta | events | conversation | notes.
+// Stores: reminders | gait | screening | meta | events | conversation | notes
+//       | tasks | outbox | agent_audit
 // Records use an `id` key.
 
-export type Store = "reminders" | "gait" | "screening" | "meta" | "events" | "conversation" | "notes";
+export type Store =
+  | "reminders"
+  | "gait"
+  | "screening"
+  | "meta"
+  | "events"
+  | "conversation"
+  | "notes"
+  // v5 (agent layer, B): local tasks, offline replay queue, tool audit trail.
+  | "tasks"
+  | "outbox"
+  | "agent_audit";
 
-const DB_NAME = "auragba";
-// v4 adds the `notes` store (private on-device memory notes).
-const DB_VERSION = 4;
-const STORES: Store[] = ["reminders", "gait", "screening", "meta", "events", "conversation", "notes"];
+const DB_NAME = "auragba"; // FROZEN: renaming opens an empty DB (docs/dev.md §1.3)
+// v4 adds `notes`; v5 adds `tasks` / `outbox` / `agent_audit`.
+// Bumping the version is REQUIRED when adding a store: `onupgradeneeded` only
+// runs on a version change, so an existing install would otherwise open fine
+// and then throw NotFoundError on the first `objectStore("tasks")` call.
+const DB_VERSION = 5;
+const STORES: Store[] = [
+  "reminders",
+  "gait",
+  "screening",
+  "meta",
+  "events",
+  "conversation",
+  "notes",
+  "tasks",
+  "outbox",
+  "agent_audit",
+];
 
 let dbPromise: Promise<IDBDatabase> | null = null;
 

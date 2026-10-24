@@ -15,6 +15,7 @@
             android:label="@string/title_activity_main"
             android:theme="@style/AppTheme.NoActionBarLaunch"
             android:launchMode="singleTask"
+            android:showWhenLocked="true"
             android:exported="true">
 
             <intent-filter>
@@ -39,6 +40,36 @@
             android:name=".WakeListenService"
             android:exported="false"
             android:foregroundServiceType="microphone" />
+
+        <!-- W3: 2x2 home-screen widget (待办 3 条 + SOS 热区).
+             exported=false is the AppWidget template: AppWidgetService calls the
+             provider directly, the intent-filter only exists for the framework. -->
+        <receiver
+            android:name=".HomeWidgetProvider"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_info" />
+        </receiver>
+
+        <!-- W3: daily alarm -> notification. Fired by our own PendingIntent. -->
+        <receiver
+            android:name=".DailyAlarmReceiver"
+            android:exported="false" />
+
+        <!-- W3: re-arm the alarm after reboot. Must be exported=true: the system
+             broadcast comes from another UID, so exported=false would drop it. -->
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
     </application>
 
     <!-- Permissions -->
@@ -54,4 +85,14 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- W3 native layer. Each one is declared in docs/dev.md §3.6 with the
+         degraded behaviour when the senior refuses it. -->
+    <!-- re-arm the daily alarm after a reboot (BootReceiver) -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- exact daily alarm; if revoked on API 31+ we fall back to an inexact one -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <!-- foreground-only geofence; NO background location, ever -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 </manifest>
