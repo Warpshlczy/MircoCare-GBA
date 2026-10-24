@@ -12,6 +12,7 @@ import io
 import sys
 import tempfile
 import wave
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -24,6 +25,7 @@ from auragba.audio import (  # noqa: E402
     frame_rms_db, load_audio,
 )
 from auragba.audit import AuditLog  # noqa: E402
+from auragba.config import settings, validate_runtime  # noqa: E402
 from auragba.economics import estimate as economics  # noqa: E402
 from auragba.model import late_fusion, score_acoustic, score_semantic  # noqa: E402
 from auragba.nlp import analyse_linguistics, coherence  # noqa: E402
@@ -53,6 +55,31 @@ def _wav_bytes(audio: AudioData) -> bytes:
         w.writeframes((audio.samples * 32767).astype("<i2").tobytes())
     return buf.getvalue()
 
+
+# --- runtime configuration (DEV.md C0 / D5) -----------------------------------
+# Code defaults must equal the 322-subject calibration in .env.example, otherwise
+# a bare `python selfcheck.py` and a `--env-file .env` server disagree on bands.
+assert settings.fusion_w_acoustic == 0.2, f"acoustic weight default drifted: {settings.fusion_w_acoustic}"
+assert settings.fusion_w_semantic == 0.8, f"semantic weight default drifted: {settings.fusion_w_semantic}"
+assert settings.risk_watch == 0.409, f"watch threshold drifted: {settings.risk_watch}"
+assert settings.risk_elevated == 0.521, f"elevated threshold drifted: {settings.risk_elevated}"
+assert abs(settings.fusion_w_acoustic + settings.fusion_w_semantic - 1.0) < 1e-9
+
+# band boundaries are inclusive on the lower edge
+assert settings.risk_band(0.408) == "low"
+assert settings.risk_band(0.409) == "watch"
+assert settings.risk_band(0.520) == "watch"
+assert settings.risk_band(0.521) == "elevated"
+
+# Importing the config must stay side-effect free (selfcheck runs with no server
+# env), while the serve-time check still rejects unsafe configuration.
+try:
+    validate_runtime(replace(settings, auth_secret="too-short"))
+except RuntimeError:
+    pass
+else:
+    raise AssertionError("a short AURA_AUTH_SECRET must be rejected at serve time")
+validate_runtime(replace(settings, auth_secret="x" * 32, environment="development"))
 
 # --- audio: schema + features -------------------------------------------------
 assert len(FUNCTIONAL_NAMES) == FUNCTIONAL_DIM == 88, "functional schema must be 88 slots"

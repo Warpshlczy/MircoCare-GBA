@@ -18,13 +18,13 @@ python3 selfcheck.py                              # 可运行断言自检 → se
 
 - 交互式文档：`http://localhost:8000/docs`
 - 元信息根路由：`GET /`
-- `selfcheck.py` 与 `uvicorn` 都要求环境里有 `AURA_AUTH_SECRET`（≥32 字节）；`.env.example` 已带本地开发值，生产必须更换。
+- `uvicorn` 要求环境里有 `AURA_AUTH_SECRET`（≥32 字节）；`.env.example` 已带本地开发值，生产必须更换。`selfcheck.py` 是纯引擎自检，**不需要**该变量（未设置也能裸跑）。
 - 本机 Python 3.13；核心依赖为 `fastapi / uvicorn / pydantic / numpy / python-multipart`；
   启用真实模型另需 `opensmile / faster-whisper / jieba / lightgbm / scikit-learn / joblib`。
 
 > **`--env-file .env` 建议带上**：`.env`（同本机例子见 `.env.example`）指向训练好的双流模型、
 > 本地 Whisper，以及在 322 人上校准过的融合权重（0.2/0.8）与风险阈值（0.409/0.521）。
-> 不带它启动会回落 `config.py` 的默认值（0.5/0.5、0.45/0.65）——跑的是未校准配置，且两个模型都不加载。
+> 不带它启动时，融合权重与阈值仍与 `.env` 一致（代码默认值已校准），但**两个已训练模型和本地 Whisper 不会加载**。
 > 新环境先执行 `cp .env.example .env`，校准值已写在 example 里。
 
 ## 与前端联调
@@ -103,7 +103,7 @@ uvicorn auragba.main:app --env-file .env --reload --port 8000
 见 [.env.example](.env.example)（模板）。**`AURA_AUTH_SECRET` 必填**（≥32 字节，未设置时服务拒绝启动）；其余变量未设置时用 `config.py` 的默认值。
 
 > `.env.example` 里已经写入**校准值**（融合 0.2/0.8、阈值 0.409/0.521）与一个本地开发用 `AURA_AUTH_SECRET`，`cp .env.example .env` 即复现附录中的行为；
-> 直接不设变量跑，则回到 `config.py` 的保守默认（0.5/0.5、0.45/0.65）——那是未校准配置。
+> `config.py` 的**代码默认值已与校准值一致**（DEV.md C0），所以不设变量直接跑也不会掉回未校准配置。
 
 | 变量 | 说明 | 默认值 |
 |---|---|---|
@@ -114,8 +114,8 @@ uvicorn auragba.main:app --env-file .env --reload --port 8000
 | `AURA_WHISPER_MODEL` | Whisper 模型名或本地目录（`./models/whisper-small`） | `tiny` |
 | `AURA_PRIVACY_MODE` | `extract-and-burn` / `vector-only` | `extract-and-burn` |
 | `AURA_BASELINE_DAYS` | 个人基线窗口（天） | 14 |
-| `AURA_FUSION_W_ACOUSTIC` / `AURA_FUSION_W_SEMANTIC` | 双流融合权重（自动归一） | 0.5 / 0.5 |
-| `AURA_RISK_WATCH` / `AURA_RISK_ELEVATED` | 风险分档切点 | 0.45 / 0.65 |
+| `AURA_FUSION_W_ACOUSTIC` / `AURA_FUSION_W_SEMANTIC` | 双流融合权重（自动归一） | 0.2 / 0.8 |
+| `AURA_RISK_WATCH` / `AURA_RISK_ELEVATED` | 风险分档切点 | 0.409 / 0.521 |
 | `AURA_DATA_DIR` | 假名存储 / 审计日志目录 | `./.data` |
 | `AURA_CORS_ORIGINS` | 允许的 CORS 源（逗号分隔，禁止 `*`） | `http://localhost:3000,http://localhost:8000` |
 | `AURA_LLM_ENABLED` | 是否启用三个 LLM 端点 | `false` |
@@ -128,8 +128,8 @@ uvicorn auragba.main:app --env-file .env --reload --port 8000
 | `AURA_WEATHER_ENABLED` | 是否使用 Open-Meteo 实时天气 | `true` |
 | `AURA_WEATHER_TTL_S` | 天气缓存秒数 | 600 |
 
-`.env` 里写的是**校准值**（融合 0.2/0.8、阈值 0.409/0.521），与上表中的保守默认值不同——
-校准来源见「已训练模型」一节。
+`.env` 与 `config.py` 默认值现在**都是校准值**（融合 0.2/0.8、阈值 0.409/0.521），
+无论是否带 `--env-file .env` 启动，同一输入都会得到同一 `riskBand`。校准来源见「已训练模型」一节。
 
 ## 目录结构
 

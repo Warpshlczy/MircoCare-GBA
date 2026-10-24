@@ -9,7 +9,11 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .api import auth_router, caregiver_router, contract_router, insight_router
-from .config import ENGINE_VERSION, FEATURE_SET_VERSION, settings
+from .config import ENGINE_VERSION, FEATURE_SET_VERSION, settings, validate_runtime
+
+# Refuse to serve with a missing/short AURA_AUTH_SECRET or a wildcard CORS origin.
+# This lives here (not at config import) so `python selfcheck.py` stays runnable.
+validate_runtime()
 
 _DESCRIPTION = """
 AuraGBA (湾区灵犀) backend — non-invasive MCI/AD screening from everyday speech.

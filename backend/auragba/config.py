@@ -48,10 +48,14 @@ class Settings:
 
     privacy_mode: str = os.getenv("AURA_PRIVACY_MODE", "extract-and-burn")
     baseline_days: int = _env_int("AURA_BASELINE_DAYS", 14)
-    fusion_w_acoustic: float = _env_float("AURA_FUSION_W_ACOUSTIC", 0.5)
-    fusion_w_semantic: float = _env_float("AURA_FUSION_W_SEMANTIC", 0.5)
-    risk_watch: float = _env_float("AURA_RISK_WATCH", 0.45)
-    risk_elevated: float = _env_float("AURA_RISK_ELEVATED", 0.65)
+    # Calibrated on the 322-subject cohort (scripts/eval_fusion.py weight sweep):
+    # 0.2/0.8 fusion AUC 0.717, thresholds 0.409/0.521. Defaults MUST match
+    # `.env.example` so a bare `python selfcheck.py` and a `--env-file .env`
+    # server produce the same risk bands.
+    fusion_w_acoustic: float = _env_float("AURA_FUSION_W_ACOUSTIC", 0.2)
+    fusion_w_semantic: float = _env_float("AURA_FUSION_W_SEMANTIC", 0.8)
+    risk_watch: float = _env_float("AURA_RISK_WATCH", 0.409)
+    risk_elevated: float = _env_float("AURA_RISK_ELEVATED", 0.521)
     data_dir: Path = field(
         default_factory=lambda: Path(
             os.getenv("AURA_DATA_DIR", str(Path(__file__).resolve().parents[1] / ".data"))
@@ -101,12 +105,23 @@ class Settings:
 
 
 settings = Settings()
-if not settings.auth_secret or len(settings.auth_secret.encode("utf-8")) < 32:
-    raise RuntimeError("AURA_AUTH_SECRET must be set to at least 32 bytes before starting the backend")
-if settings.environment == "production" and not settings.cookie_secure:
-    raise RuntimeError("AURA_COOKIE_SECURE=true is required in production")
-if "*" in settings.cors_origins:
-    raise RuntimeError("Wildcard CORS is incompatible with credentialed session cookies")
+
+
+def validate_runtime(s: Settings = settings) -> None:
+    """Reject unsafe runtime configuration before the service serves traffic.
+
+    Deliberately NOT executed at import time: ``selfcheck.py`` imports the engine
+    modules without a server environment, so the import must stay side-effect
+    free. ``main.py`` calls this when the app is created, which means
+    ``uvicorn auragba.main:app`` still refuses to boot without a strong secret.
+    """
+    if not s.auth_secret or len(s.auth_secret.encode("utf-8")) < 32:
+        raise RuntimeError("AURA_AUTH_SECRET must be set to at least 32 bytes before starting the backend")
+    if s.environment == "production" and not s.cookie_secure:
+        raise RuntimeError("AURA_COOKIE_SECURE=true is required in production")
+    if "*" in s.cors_origins:
+        raise RuntimeError("Wildcard CORS is incompatible with credentialed session cookies")
+
 
 # Sampling rate the acoustic front-end works at (16 kHz mono, telephony-grade).
 TARGET_SR = 16_000
