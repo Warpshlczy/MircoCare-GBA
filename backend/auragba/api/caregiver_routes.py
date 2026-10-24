@@ -11,7 +11,8 @@ from ..store import store
 router = APIRouter(prefix="/caregiver", tags=["caregiver"])
 
 
-def _linked_device(principal: Principal, senior_device_id: str | None) -> str:
+def linked_device(principal: Principal, senior_device_id: str | None) -> str:
+    """Resolve a family account to one of its bound senior devices."""
     relations = family_relations(require_role(principal, "family"))
     if senior_device_id:
         if not any(r["seniorDeviceId"] == senior_device_id for r in relations):
@@ -27,7 +28,7 @@ def overview(
     senior_device_id: str | None = None,
     principal: Principal = Depends(current_principal),
 ) -> dict:
-    device = _linked_device(principal, senior_device_id)
+    device = linked_device(principal, senior_device_id)
     card = store.get_doc(device, "health_card")
     if not card:
         card = {"id": f"hc-{device}", "updatedAt": 0}
@@ -63,7 +64,7 @@ def acknowledge_sos(
     senior_device_id: str,
     principal: Principal = Depends(current_principal),
 ) -> dict:
-    device = _linked_device(principal, senior_device_id)
+    device = linked_device(principal, senior_device_id)
     events = store.history(device, "sos")
     event = next((item for item in events if item.get("id") == sos_id), None)
     if not event:

@@ -8,7 +8,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .api import auth_router, caregiver_router, contract_router, insight_router
+from .api import auth_router, caregiver_router, contract_router, insight_router, report_router
 from .config import ENGINE_VERSION, FEATURE_SET_VERSION, settings, validate_runtime
 
 # Refuse to serve with a missing/short AURA_AUTH_SECRET or a wildcard CORS origin.
@@ -44,6 +44,7 @@ app.include_router(contract_router)
 app.include_router(insight_router)
 app.include_router(auth_router)
 app.include_router(caregiver_router)
+app.include_router(report_router)
 
 
 @app.get("/", tags=["meta"])
@@ -62,4 +63,9 @@ def root() -> dict:
         ],
         "auth": ["POST /auth/register", "POST /auth/pairing-code", "POST /auth/pair"],
         "insight": ["POST /screening/analyze", "GET /baseline/me", "GET /economics/me", "GET /audit/screening"],
+        "reports": [
+            "GET /reports/weekly/me", "GET /reports/weekly/me.html",
+            "POST /reports/weekly/send",
+            "GET /caregiver/reports/weekly", "GET /caregiver/reports/weekly.html",
+        ],
     }

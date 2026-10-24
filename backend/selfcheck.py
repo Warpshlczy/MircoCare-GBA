@@ -12,6 +12,7 @@ import io
 import math
 import sys
 import tempfile
+import time
 import wave
 from dataclasses import replace
 from pathlib import Path
@@ -32,6 +33,7 @@ from auragba.economics import estimate as economics  # noqa: E402
 from auragba.model import late_fusion, score_acoustic, score_semantic  # noqa: E402
 from auragba.nlp import analyse_linguistics, coherence  # noqa: E402
 from auragba.privacy import pseudonymize, purge, scrub_props  # noqa: E402
+from auragba.reports.weekly import DIAGNOSTIC_WORDS, build_weekly_report, render_html  # noqa: E402
 from auragba.screening import run_screening  # noqa: E402
 from auragba.store import Store  # noqa: E402
 
@@ -204,6 +206,52 @@ assert cp.at is not None
 assert detect([0.300 + 0.002 * (i % 2) for i in range(12)]) is None, "stable series must not alarm"
 assert detect([0.3] * 12) is None, "constant series must not alarm"
 assert detect([0.3] * 5) is None, "fewer than 6 points cannot be judged"
+
+# --- weekly family report: six sections, traceable evidence, no disease words --
+with tempfile.TemporaryDirectory() as tmp:
+    st = Store(Path(tmp))
+    now_ms = int(time.time() * 1000)
+    for i in range(12):
+        value = 0.300 + (0.002 if i % 2 else 0.0) + 0.02 * max(0, i - 7)
+        st.record("dev-rep", "screening_metrics",
+                  {"at": now_ms - (11 - i) * 86_400_000, "metrics": {"pause_ratio": value}})
+    for i in range(10):
+        st.record("dev-rep", "conversation",
+                  {"id": f"c{i}", "at": now_ms - i * 3_600_000, "role": "user",
+                   "text": "你好", "locale": "zh-CN"})
+    st.record("dev-rep", "screening_sessions",
+              {"at": now_ms - 3_600_000, "id": "s1", "durationMs": 60_000, "speechRatio": 0.6,
+               "trimmedStartMs": 0, "trimmedEndMs": 0})
+    st.record("dev-rep", "gait",
+              {"id": "g1", "startedAt": now_ms - 86_400_000, "endedAt": now_ms - 86_400_000 + 5_000,
+               "steps": 12, "cadence": 60, "cv": 0.08, "fall": False})
+    st.record("dev-rep", "gait_falls", {"at": now_ms - 86_400_000, "reason": "impact"})
+    st.record("dev-rep", "reminder_escalations",
+              {"id": "r1", "at": now_ms - 7_200_000, "locale": "zh-CN", "kind": "med",
+               "stage": "notify-caregiver"})
+    st.record("dev-rep", "screening_results",
+              {"at": now_ms - 86_400_000, "id": "s1", "riskIndex": 0.55, "riskBand": "elevated"})
+    st.record("dev-rep", "telemetry",
+              {"id": "t1", "name": "daily_checkin", "at": now_ms - 3_600_000, "locale": "zh-CN"})
+
+    report = build_weekly_report("dev-rep", st, now=now_ms)
+    assert [s.key for s in report.sections] == [
+        "talk", "change", "tasks", "activity", "advice", "privacy"
+    ], "the report must always contain exactly the six fixed sections"
+
+    change = report.sections[1]
+    assert change.available and change.evidence, "a worsening series must surface a change"
+    ev = change.evidence[0]
+    assert ev.feature and ev.samples >= 10 and ev.windowDays == settings.baseline_days
+    assert ev.z > 0 and ev.direction == "high"
+    assert report.sections[4].counts[0].value == "尽快就医"
+    assert next(c.value for c in report.sections[5].counts if c.label == "上传原始音频") == "0"
+
+    html_doc = render_html(report)
+    assert "<!doctype html>" in html_doc and "查看依据" in html_doc
+    blob = report.model_dump_json() + html_doc
+    for word in DIAGNOSTIC_WORDS:
+        assert word not in blob, f"diagnostic word leaked into the family report: {word}"
 
 # --- health economics ---------------------------------------------------------
 lo = economics(0.2, "low")

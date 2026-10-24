@@ -57,6 +57,9 @@ python3 selfcheck.py                              # 可运行断言自检 → se
 | `GET /economics/me` | STEMB：QALY 获得值 / 每患者节约成本 |
 | `GET /audit/screening` | SaMD 审计日志（校验 hash 链完整性） |
 | `GET /health` | 引擎版本 / 特征集版本 / 运行状态 |
+| `GET /reports/weekly/me` · `.html` | 长者本人 7 天周报（固定 6 段，可展开证据链） |
+| `POST /reports/weekly/send` | 周报进入家属通知 outbox（202；demo 不真发） |
+| `GET /caregiver/reports/weekly` · `.html` | 家属按配对关系读取长者周报 |
 
 ## 模型产物共享（协作必读）
 
@@ -164,7 +167,8 @@ backend/
     ├── nlp/    asr.py · metrics.py · coherence.py # ASR / TTR·名动比·句长方差 / 语义连贯度
     ├── model/  acoustic.py · semantic.py · fusion.py # 双流分类（模型指纹 / SHAP 贡献）+ 晚期融合
     ├── llm/    client.py · prompts.py · safety.py · weather.py · usage.py · service.py
-    └── api/    contract_routes.py · insight_routes.py · auth_routes.py · caregiver_routes.py
+    ├── reports/ weekly.py                      # 家属周报（6 段 + HTML 渲染）
+    └── api/    contract_routes.py · insight_routes.py · auth_routes.py · caregiver_routes.py · report_routes.py
 ```
 
 ## 四项目标理念的落地位置

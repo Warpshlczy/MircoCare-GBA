@@ -202,6 +202,48 @@ class AssistantChatResponse(_Base):
 
 
 # --------------------------------------------------------------------------- #
+# Weekly family report (C4) — six fixed sections, no diagnostic words.
+# --------------------------------------------------------------------------- #
+class ReportCount(_Base):
+    label: str
+    value: str
+    delta: str | None = None  # e.g. "+2 较上周"
+
+
+class ReportEvidence(_Base):
+    """Why a "change" item is on the page — traceable feature / z / samples."""
+
+    feature: str
+    z: float
+    samples: int
+    windowDays: int
+    direction: Literal["high", "low", "normal"]
+    changepointAt: int | None = None
+    sustained: bool = False
+
+
+class ReportSection(_Base):
+    key: Literal["talk", "change", "tasks", "activity", "advice", "privacy"]
+    title: str
+    summary: str
+    counts: list[ReportCount] = Field(default_factory=list)
+    evidence: list[ReportEvidence] = Field(default_factory=list)
+    available: bool = True
+    note: str | None = None
+
+
+class WeeklyReport(_Base):
+    deviceId: str
+    locale: Locale
+    periodStart: int
+    periodEnd: int
+    generatedAt: int
+    sections: list[ReportSection]
+    disclaimer: str
+    notForDiagnosis: bool = True
+
+
+# --------------------------------------------------------------------------- #
 # Screening engine payloads (backend -> frontend, and internal)
 # --------------------------------------------------------------------------- #
 class BiomarkerContribution(_Base):
