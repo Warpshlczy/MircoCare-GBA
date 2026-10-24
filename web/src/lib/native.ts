@@ -46,6 +46,21 @@ export interface ForegroundEvent {
   at: number;
 }
 
+/** TTS timbre knobs, passed through unchanged to Android TextToSpeech. */
+export interface VoiceProfile {
+  /** 1.0 = engine default; >1 is higher/smaller. Android clamps at 2.0. */
+  pitch: number;
+  /** 1.0 = engine default; <1 is slower. */
+  rate: number;
+}
+
+export interface NativeSpeechResult {
+  ok: boolean;
+  /** intentionally cancelled (barge-in) — the caller must NOT fall back */
+  stopped?: boolean;
+  reason?: string;
+}
+
 export interface AuraNativeBridge {
   startBackgroundWake(): Promise<boolean>;
   stopBackgroundWake(): Promise<void>;
@@ -68,6 +83,13 @@ export interface AuraNativeBridge {
   getCircadian(day: string): Promise<CircadianDaily | null>;
   /** Foreground-only, last known fix. Resolves null when unavailable/denied. */
   getLocation(): Promise<NativeLocation | null>;
+  /**
+   * Native TTS. Resolves `ok:false` when the device has no engine/voice for the
+   * locale — the caller then falls back to Web Speech. `stopped` is a barge-in,
+   * not a failure, so the caller must not retry.
+   */
+  speak(text: string, locale: string, voice: VoiceProfile): Promise<NativeSpeechResult>;
+  stopSpeak(): Promise<void>;
   /** Opens the system accessibility list so the senior's family can enable it.
    *  An accessibility service can NEVER be enabled programmatically. */
   openAccessibilitySettings(): Promise<boolean>;
@@ -103,6 +125,10 @@ interface AuraNativePlugin {
   circadianStart(): Promise<{ ok?: boolean }>;
   getCircadian(o: { day: string }): Promise<Partial<CircadianDaily> | void>;
   getLocation(): Promise<Partial<NativeLocation> | void>;
+  speak(o: { text: string; locale: string; pitch: number; rate: number }): Promise<
+    { ok?: boolean; stopped?: boolean; reason?: string } | void
+  >;
+  stopSpeak(): Promise<void>;
   openAccessibilitySettings(): Promise<{ ok?: boolean }>;
   consumePendingReason(): Promise<{ reason?: string; at?: number; sos?: boolean } | void>;
   addListener?(
@@ -139,6 +165,14 @@ function withDefaults(src: Partial<AuraNativeBridge>): AuraNativeBridge {
       Promise.resolve(src.getLocation?.())
         .then((r) => (r && typeof r.lat === "number" ? (r as NativeLocation) : null))
         .catch(() => null),
+    // A browser has no native engine: report "cannot", and audio.ts falls back
+    // to Web Speech. Never throw — a missing voice must not break a reminder.
+    speak: (text, locale, voice) =>
+      Promise.resolve(src.speak?.(text, locale, voice))
+        .then((r) => ({ ok: !!r?.ok, stopped: !!r?.stopped, reason: r?.reason }))
+        .catch(() => ({ ok: false })),
+    stopSpeak: () =>
+      Promise.resolve(src.stopSpeak?.()).then(() => undefined).catch(() => undefined),
     openAccessibilitySettings: () =>
       Promise.resolve(src.openAccessibilitySettings?.()).then((v) => !!v).catch(() => false),
     consumePendingReason: () =>
@@ -183,6 +217,11 @@ export function bridge(): AuraNativeBridge | null {
       const r = await p.getLocation();
       return r && typeof r.lat === "number" ? (r as NativeLocation) : null;
     },
+    speak: async (text, locale, voice) => {
+      const r = await p.speak({ text, locale, pitch: voice.pitch, rate: voice.rate });
+      return { ok: !!r?.ok, stopped: !!r?.stopped, reason: r?.reason };
+    },
+    stopSpeak: () => p.stopSpeak(),
     openAccessibilitySettings: () => p.openAccessibilitySettings().then((r) => !!r?.ok),
     consumePendingReason: async () => {
       const r = await p.consumePendingReason();

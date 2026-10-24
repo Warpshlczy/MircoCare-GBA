@@ -454,6 +454,49 @@ assert.equal(magnitude(3, 4, 0), 5);
   assert.equal(ok.motionGroups.tap, "TapBody");
 }
 
+// --- native TTS wiring (docs/dev.md §2.3 A3, decision D-13) -------------------
+{
+  // audio.ts cannot be imported here: it uses bundler-style extensionless imports
+  // that Node's ESM resolver rejects. Assert on the source text instead, which is
+  // also what the other cross-file checks do.
+  const audio = readFileSync(new URL("./lib/audio.ts", import.meta.url), "utf8");
+
+  // The boy timbre must stay inside what both engines accept. Android clamps to
+  // 0.5–2.0, and a pitch above 2.0 turns into chipmunk, not a child.
+  const voice = /BOY_VOICE[^=]*=\s*\{\s*pitch:\s*([\d.]+),\s*rate:\s*([\d.]+)\s*\}/.exec(audio);
+  assert.ok(voice, "audio.ts must declare the boy timbre preset");
+  const pitch = Number(voice[1]);
+  const rate = Number(voice[2]);
+  assert.ok(pitch > 1 && pitch <= 2, `pitch=${pitch}`);
+  assert.ok(rate > 0.5 && rate <= 1.2, `rate=${rate}`);
+
+  assert.ok(audio.includes(".speak(text, locale, BOY_VOICE)"), "native TextToSpeech is asked BEFORE Web Speech");
+  assert.ok(audio.includes("r.ok || r.stopped"), "a barge-in resolves normally instead of replaying via Web Speech");
+  assert.ok(audio.includes("bridge()?.stopSpeak()"), "cancelSpeech also stops the native engine");
+
+  const seam = readFileSync(new URL("./lib/native.ts", import.meta.url), "utf8");
+  assert.ok(seam.includes("speak(text: string, locale: string, voice: VoiceProfile)"), "the bridge exposes speak()");
+  assert.ok(seam.includes("stopSpeak"), "the bridge exposes stopSpeak()");
+
+  const java = readFileSync(
+    new URL("../android/app/src/main/java/com/auragba/app/AuraNativePlugin.java", import.meta.url),
+    "utf8"
+  );
+  assert.ok(java.includes("@PluginMethod") && java.includes("public void speak("), "Android implements speak()");
+  assert.ok(java.includes("public void stopSpeak("), "Android implements stopSpeak()");
+  assert.ok(java.includes("UtteranceProgressListener"), "the JS promise resolves on onDone/onError, not on speak() return");
+  assert.ok(java.includes("tts.setPitch"), "the boy timbre reaches the native engine");
+
+  const manifest = readFileSync(
+    new URL("../android/app/src/main/AndroidManifest.xml", import.meta.url),
+    "utf8"
+  );
+  assert.ok(
+    manifest.includes("android.intent.action.TTS_SERVICE"),
+    "Android 11+ package visibility: without <queries> the TTS engine is invisible"
+  );
+}
+
 // --- capture quality gate (docs/dev.md §2.4 A4) -------------------------------
 {
   const steadyNoise = Array.from({ length: 300 }, (_, i) => -30 + (i % 3)); // 30s of TV/fan hum

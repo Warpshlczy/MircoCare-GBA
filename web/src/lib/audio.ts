@@ -1,6 +1,9 @@
-// Web Speech (TTS + STT) and Web Audio (amplitude for lip-sync). No dependencies.
+// TTS (native AuraNative.speak first, Web Speech fallback), STT, and Web Audio
+// amplitude for the mic meter. No dependencies.
 
 import { FRAMES_PER_CHAR, VISEME_FRAME_MS, visemeFromText } from "./viseme";
+import { bridge, nativeAvailable } from "./native";
+import type { VoiceProfile } from "./native";
 
 // --- minimal SpeechRecognition typings (not in TS DOM lib yet) ---
 interface SpeechRecognitionAlternative {
@@ -44,61 +47,127 @@ export function sttSupported(): boolean {
   return srCtor() !== null;
 }
 
+/** Voices that read younger/higher; used only to break ties within a locale. */
+const YOUNG_VOICE = /child|kid|girl|female|woman|xiaoxiao|xiaoyi|huihui|tingting|yaoyao/i;
+
 function pickVoice(locale: string): SpeechSynthesisVoice | undefined {
   if (typeof window === "undefined" || !window.speechSynthesis) return undefined;
   const voices = window.speechSynthesis.getVoices();
-  const exact = voices.find((v) => v.lang.replace("_", "-").toLowerCase() === locale.toLowerCase());
-  if (exact) return exact;
+  const wanted = locale.replace("_", "-").toLowerCase();
+  const exact = voices.filter((v) => v.lang.replace("_", "-").toLowerCase() === wanted);
   const prefix = locale.slice(0, 2).toLowerCase();
-  return voices.find((v) => v.lang.toLowerCase().startsWith(prefix));
+  const candidates = exact.length ? exact : voices.filter((v) => v.lang.toLowerCase().startsWith(prefix));
+  return candidates.find((v) => YOUNG_VOICE.test(v.name)) ?? candidates[0];
 }
 
 /**
- * Slower rate (0.85) — seniors need it. Resolves when speech ends (or is
- * cancelled). `onViseme` gets 0..1 mouth openness every frame, re-synced to the
- * engine's `onboundary` char index when the engine emits it (see viseme.ts).
+ * The digital human is a small boy. Pitch is the only portable timbre knob
+ * (Android TextToSpeech clamps it to 0.5–2.0; Web Speech accepts 0–2), so we
+ * ask for 1.35 and let each engine colour the rest. Rate stays near the old
+ * 0.85 because a higher pitch already costs intelligibility for seniors.
+ */
+export const BOY_VOICE: VoiceProfile = { pitch: 1.35, rate: 0.9 };
+
+/** viseme frames are calibrated at rate 0.85; other rates stretch the timeline. */
+function frameMsFor(rate: number): number {
+  return Math.round(VISEME_FRAME_MS * (0.85 / (rate > 0 ? rate : 0.85)));
+}
+
+/**
+ * Speaks one line and resolves when it ends (or is cancelled). `onViseme` gets
+ * 0..1 mouth openness every frame, re-synced to the engine's `onboundary` char
+ * index when the engine emits it (see viseme.ts).
+ *
+ * Native TTS is tried first on the Android shell: Web Speech inside a WebView is
+ * frequently voice-less, and it cannot promise a Cantonese voice. When the
+ * native engine reports "no engine/voice", we fall back to Web Speech with the
+ * same BOY_VOICE, so the PWA demo keeps working.
  */
 export function speak(text: string, locale: string, onViseme?: (v: number) => void): Promise<void> {
-  if (typeof window === "undefined" || !window.speechSynthesis) return Promise.resolve();
+  if (typeof window === "undefined") return Promise.resolve();
   return new Promise((resolve) => {
-    const u = new SpeechSynthesisUtterance(text);
-    u.lang = locale;
-    u.rate = 0.85;
-    u.pitch = 1.0;
-    const v = pickVoice(locale);
-    if (v) u.voice = v;
     const frames = visemeFromText(text);
+    const frameMs = frameMsFor(BOY_VOICE.rate);
     let frame = 0;
     let timer: ReturnType<typeof setInterval> | null = null;
+    let guard: ReturnType<typeof setTimeout> | null = null;
     let done = false;
+
+    const startMouth = () => {
+      if (!onViseme || !frames.length || timer !== null) return;
+      onViseme(frames[frame++ % frames.length]);
+      timer = setInterval(() => onViseme(frames[frame++ % frames.length]), frameMs);
+    };
+    const stopMouth = () => {
+      if (timer !== null) clearInterval(timer);
+      timer = null;
+      onViseme?.(0);
+    };
     const finish = () => {
       if (done) return;
       done = true;
-      if (timer !== null) clearInterval(timer);
-      clearTimeout(guard);
-      onViseme?.(0);
+      stopMouth();
+      if (guard !== null) clearTimeout(guard);
       resolve();
     };
     // Some Android engines never fire `onend` for long utterances; without this
     // guard the assistant would stay "speaking" and the senior would be locked out.
-    const guard = setTimeout(finish, frames.length * VISEME_FRAME_MS * 2 + 4000);
-    u.onstart = () => {
-      if (!onViseme || !frames.length) return;
-      timer = setInterval(() => onViseme(frames[frame++ % frames.length]), VISEME_FRAME_MS);
+    guard = setTimeout(finish, frames.length * frameMs * 2 + 4000);
+
+    const webSpeak = () => {
+      if (!window.speechSynthesis) {
+        finish();
+        return;
+      }
+      const u = new SpeechSynthesisUtterance(text);
+      u.lang = locale;
+      u.rate = BOY_VOICE.rate;
+      u.pitch = BOY_VOICE.pitch;
+      const v = pickVoice(locale);
+      if (v) u.voice = v;
+      u.onstart = startMouth;
+      u.onboundary = (e) => {
+        frame = e.charIndex * FRAMES_PER_CHAR;
+      };
+      u.onend = finish;
+      u.onerror = finish;
+      window.speechSynthesis.cancel();
+      window.speechSynthesis.speak(u);
     };
-    u.onboundary = (e) => {
-      frame = e.charIndex * FRAMES_PER_CHAR;
-    };
-    u.onend = finish;
-    u.onerror = finish;
-    window.speechSynthesis.cancel();
-    window.speechSynthesis.speak(u);
+
+    const native = bridge();
+    if (!native) {
+      webSpeak();
+      return;
+    }
+    // The native call resolves only when the utterance finishes (or is stopped),
+    // so the mouth timeline runs while we wait.
+    startMouth();
+    void native
+      .speak(text, locale, BOY_VOICE)
+      .then((r) => {
+        if (done) return;
+        if (r.ok || r.stopped) {
+          finish();
+          return;
+        }
+        stopMouth();
+        frame = 0;
+        webSpeak();
+      })
+      .catch(() => {
+        if (done) return;
+        stopMouth();
+        frame = 0;
+        webSpeak();
+      });
   });
 }
 
 /** Stops whatever is being said. The pending `speak()` promise resolves. */
 export function cancelSpeech(): void {
   if (typeof window !== "undefined") window.speechSynthesis?.cancel();
+  void bridge()?.stopSpeak().catch(() => {});
 }
 
 /** Wraps SpeechRecognition with graceful failure when unsupported. Returns null then. */
@@ -223,7 +292,9 @@ export function createAmplitudeMeter(stream: MediaStream): { getLevel: () => num
 }
 
 export function canPlayAudio(): boolean {
-  return typeof window !== "undefined" && "speechSynthesis" in window;
+  if (typeof window === "undefined") return false;
+  // The Android shell can speak even when the WebView has no speechSynthesis.
+  return "speechSynthesis" in window || nativeAvailable();
 }
 
 /** Some browsers block audio until a user gesture. Call this inside a click handler. */
