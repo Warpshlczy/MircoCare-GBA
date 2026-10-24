@@ -29,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 os.environ.setdefault("AURA_ENCRYPTION_KEY", "selfcheck-encryption-key-" + "0" * 16)
 
 from auragba import baseline as bl  # noqa: E402
+from auragba.anonymity import assert_k_anonymity, merge_small_bands  # noqa: E402
 from auragba.audio import (  # noqa: E402
     FUNCTIONAL_DIM, FUNCTIONAL_NAMES, AudioData, energy_vad, extract_features,
     frame_rms_db, load_audio,
@@ -110,6 +111,12 @@ except RuntimeError:
     pass
 else:
     raise AssertionError("a missing AURA_ENCRYPTION_KEY must be rejected at serve time")
+try:
+    validate_runtime(replace(settings, auth_secret="x" * 32, regulatory_claim_level="diagnostic"))
+except RuntimeError:
+    pass
+else:
+    raise AssertionError("the diagnostic claim level must be rejected without clearance")
 validate_runtime(replace(settings, auth_secret="x" * 32, environment="development"))
 
 # --- intent whitelist parity with web/src/lib/types.ts (Issue #2 P0) ----------
@@ -640,6 +647,42 @@ with tempfile.TemporaryDirectory() as tmp:
     blob = report.model_dump_json() + html_doc
     for word in DIAGNOSTIC_WORDS:
         assert word not in blob, f"diagnostic word leaked into the family report: {word}"
+
+    assert report.claimLevel == "observation" and "辅助观察" in report.disclaimer
+
+    import auragba.reports.weekly as weekly_mod  # noqa: E402
+
+    _real_weekly_settings = weekly_mod.settings
+    weekly_mod.settings = replace(settings, regulatory_claim_level="triage_support")
+    try:
+        _triage = build_weekly_report("dev-rep", st, now=now_ms)
+    finally:
+        weekly_mod.settings = _real_weekly_settings
+    assert _triage.claimLevel == "triage_support" and "辅助分诊" in _triage.disclaimer
+
+# --- k-anonymity gate (DPIA D.3) ---------------------------------------------
+_small = (
+    [{"band": "low"} for _ in range(5)]
+    + [{"band": "watch"} for _ in range(20)]
+    + [{"band": "elevated"} for _ in range(20)]
+)
+assert_k_anonymity([{"band": "watch"} for _ in range(20)])
+try:
+    assert_k_anonymity(_small)
+except ValueError:
+    pass
+else:
+    raise AssertionError("a band below k must be refused")
+_merged = merge_small_bands(_small)
+assert {row["band"] for row in _merged} == {"watch", "elevated"}
+assert sum(1 for row in _merged if row["band"] == "watch") == 25
+assert_k_anonymity(_merged)
+try:
+    assert_k_anonymity([{"band": "low"} for _ in range(10)])
+except ValueError:
+    pass
+else:
+    raise AssertionError("a total below k must be refused")
 
 # --- health economics ---------------------------------------------------------
 lo = economics(0.2, "low")

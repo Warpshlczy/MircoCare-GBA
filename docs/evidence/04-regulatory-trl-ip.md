@@ -17,7 +17,7 @@
 
 1. **默认声称是「辅助观察与随访提示」，不写「诊断阿尔兹海默症」**。一旦市场材料出现「诊断 / diagnose」，香港按 Class II→III 论证、欧盟按 Rule 11 升类、美国需 De Novo 或 PMA，成本差一个数量级。
 2. 报告用「一切如常 / 值得留意 / 建议检查」，附固定免责句；产品永不输出疾病名称。**已实现**：`ScreeningResult.notForDiagnosis = true`；周报 `DIAGNOSTIC_WORDS` 词表自检（阿尔兹海默/痴呆/患病/确诊等零命中）。
-3. **降级声称配置**：`REGULATORY_CLAIM_LEVEL ∈ {observation, triage_support, diagnostic}`，报告文案与阈值由开关决定，默认 `observation`。**现状：未实现**（C 待办）。当前代码等价于固定 `observation`。
+3. **降级声称配置**：`AURA_REGULATORY_CLAIM_LEVEL ∈ {observation, triage_support}`，默认 `observation`；报告免责句由该开关决定。`diagnostic` **被配置校验拒绝**（本版本无监管 clearance，且产品永不输出疾病名称）。**现状：已实现配置 + 报告分支；阈值档位未分档**（沿用校准阈值 0.409/0.521）。
 
 ### 路径排序（资源有限时的真实选择）
 
@@ -89,4 +89,5 @@
 | 数据最小化 | `privacy.py` extract-and-burn / vector-only | `audioDiscarded: true` |
 | 会话撤回 | `DELETE /conversation/turns/{id}` | 204 + 审计 `conversation_revoke` |
 
-**尚未实现**：`REGULATORY_CLAIM_LEVEL` 开关、`assert_k_anonymity`、ISO 13485/IEC 62304 文档、正式临床评价。答辩不得声称已具备。
+**已实现**：`AURA_REGULATORY_CLAIM_LEVEL` 配置 + 报告免责句分支（`diagnostic` 被拒绝）、`anonymity.py#assert_k_anonymity` / `merge_small_bands`。
+**尚未实现**：阈值档位随声称切换（仍用校准 0.409/0.521）、ISO 13485/IEC 62304 文档、正式临床评价；答辩不得声称已具备。

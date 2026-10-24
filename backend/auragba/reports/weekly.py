@@ -25,9 +25,19 @@ from ..store import Store
 DAY_MS = 86_400_000
 WEEK_MS = 7 * DAY_MS
 
-DISCLAIMER = (
-    "本报告是认知变化的辅助观察，不是医疗器械诊断结论，不能替代医生、护士或家属的判断。"
-)
+_DISCLAIMERS = {
+    "observation": (
+        "本报告是认知变化的辅助观察，不是医疗器械诊断结论，不能替代医生、护士或家属的判断。"
+    ),
+    "triage_support": (
+        "本报告用于辅助分诊，提示是否需要进一步评估；不是医疗器械诊断结论，最终由医生判断。"
+    ),
+}
+
+
+def disclaimer() -> str:
+    """Report copy follows the configured claim level (DEV.md C.1 rule 3)."""
+    return _DISCLAIMERS.get(settings.regulatory_claim_level, _DISCLAIMERS["observation"])
 
 # Words that must never appear in a family-facing report. "诊断" itself is allowed
 # only inside the mandated disclaimer above, so it is not in this list.
@@ -324,7 +334,8 @@ def build_weekly_report(
         periodEnd=end,
         generatedAt=end,
         sections=sections,
-        disclaimer=DISCLAIMER,
+        disclaimer=disclaimer(),
+        claimLevel=settings.regulatory_claim_level,
     )
 
 

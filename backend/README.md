@@ -122,6 +122,7 @@ uvicorn auragba.main:app --env-file .env --reload --port 8000
 | `AURA_AUTH_SECRET` | HMAC 会话签名密钥，**必填**（≥32 字节） | 无（缺失即拒绝启动） |
 | `AURA_ENCRYPTION_KEY` | 会话文字 AES-GCM 密钥，**必填**（≥32 字节） | 无（缺失即拒绝启动） |
 | `AURA_CONVERSATION_TTL_DAYS` | 会话记忆保留天数（`scripts/purge.py`） | 90 |
+| `AURA_REGULATORY_CLAIM_LEVEL` | 声称档位：`observation` / `triage_support`（`diagnostic` 被拒绝） | `observation` |
 | `AURA_COOKIE_SECURE` | 生产 HTTPS 会话 Cookie；`AURA_ENV=production` 时强制为 `true` | `false` |
 | `AURA_ACOUSTIC_MODEL` | 声学流模型路径（`./models/acoustic_lgbm.txt`） | 空 → 手工权重兜底 |
 | `AURA_SEMANTIC_MODEL` | 语义流模型路径（`./models/semantic_lr.joblib`） | 空 → 手工权重兜底 |
@@ -174,6 +175,7 @@ backend/
     ├── notifications.py     # 家属 notification_outbox（推送 provider 的接缝）
     ├── notify.py            # 通知分发：outbox + 「已通知家属 N 人」日志 + 可选 webhook
     ├── crypto.py            # AES-GCM：会话文字静态加密（AAD 绑定 device+turn）
+    ├── anonymity.py         # k≥20 聚合导出闸门 + 相邻层合并
     ├── store.py             # SQLite（WAL）：派生特征/事件按设备+类型+时间索引
     ├── audit.py             # SaMD 审计：append-only JSONL hash 链 + verify()
     ├── baseline.py          # 个人 14 天基线 Z-score（normal/watch/elevated）

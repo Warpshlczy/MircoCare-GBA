@@ -100,6 +100,12 @@ class Settings:
     weather_enabled: bool = _env_bool("AURA_WEATHER_ENABLED", True)
     weather_ttl_s: int = _env_int("AURA_WEATHER_TTL_S", 600)
 
+    # --- Regulatory claim level (DEV.md C.1 rule 3) ------------------------
+    # "observation" (default) or "triage_support". "diagnostic" is rejected:
+    # the product never names diseases, and a diagnostic claim requires
+    # regulatory clearance this build does not have.
+    regulatory_claim_level: str = os.getenv("AURA_REGULATORY_CLAIM_LEVEL", "observation")
+
     # --- Notification provider seam (demo: webhook + log) -------------------
     notify_webhook: str = os.getenv("AURA_NOTIFY_WEBHOOK", "")
 
@@ -145,6 +151,11 @@ def validate_runtime(s: Settings = settings) -> None:
         raise RuntimeError("AURA_COOKIE_SECURE=true is required in production")
     if "*" in s.cors_origins:
         raise RuntimeError("Wildcard CORS is incompatible with credentialed session cookies")
+    if s.regulatory_claim_level not in ("observation", "triage_support"):
+        raise RuntimeError(
+            "AURA_REGULATORY_CLAIM_LEVEL must be 'observation' or 'triage_support'; "
+            "diagnostic claims require regulatory clearance this build does not have"
+        )
 
 
 # Sampling rate the acoustic front-end works at (16 kHz mono, telephony-grade).

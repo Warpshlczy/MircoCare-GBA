@@ -404,6 +404,7 @@ class WeeklyReport(_Base):
     generatedAt: int
     sections: list[ReportSection]
     disclaimer: str
+    claimLevel: str = "observation"
     notForDiagnosis: bool = True
 
 
