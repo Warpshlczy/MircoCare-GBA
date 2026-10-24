@@ -6,7 +6,7 @@
 //
 // Tested in src/selfcheck.ts.
 
-import type { Task } from "./types";
+import type { Task, TaskEvent } from "./types";
 
 /** "You already confirmed this 20 minutes ago" window (docs/dev.md §1.8). */
 export const DUPLICATE_WINDOW_MS = 30 * 60 * 1000;
@@ -80,6 +80,35 @@ export function markDone(task: Task, at: number): DoneResult {
 /** The senior pushed it back — an executive-function signal, not a failure. */
 export function deferTask(task: Task): Task {
   return { ...task, deferredCount: task.deferredCount + 1 };
+}
+
+/**
+ * Builds the wire event for one transition. Uploaded to POST /task/events,
+ * which keys on `id` — so the id must be DETERMINISTIC for a given
+ * (task, state, at): a replayed outbox item then overwrites the same doc
+ * instead of counting twice.
+ *
+ * `source` defaults to how the task was created. Pass it explicitly when the
+ * transition's cause differs — e.g. a `reminder` firing on a `voice` task.
+ *
+ * NOTE: never call this for `timeout` events produced by the boot-time rescan.
+ * A reboot is not a behaviour observation; see docs and issue #2.
+ */
+export function taskEventFor(
+  task: Task,
+  state: TaskEvent["state"],
+  at: number,
+  source: TaskEvent["source"] = task.source
+): TaskEvent {
+  return {
+    id: `te-${task.id}-${state}-${at}`,
+    taskId: task.id,
+    state,
+    at,
+    source,
+    dueAt: task.dueAt,
+    doneAt: state === "completed" ? task.doneAt ?? at : undefined,
+  };
 }
 
 export function openTasks(tasks: Task[]): Task[] {

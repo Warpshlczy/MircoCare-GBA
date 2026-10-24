@@ -1,9 +1,10 @@
 // api.ts — authenticated backend endpoints for the AuraGBA apps.
 
 import type {
-  GaitWindow, ScreeningSession, SosEvent, HealthCard, Locale, AgentCard,
-  AgentIntentRequest, TelemetryEvent, ConversationTurn, MedicationPlan,
-  MedicationPlanRequest, ReminderKind,
+  GaitWindow, ScreeningSession, SosEvent, SosAck, HealthCard, Locale, AgentCard,
+  AgentIntentRequest, AgentTurnRequest, AgentTurnResponse, TelemetryEvent,
+  ConversationTurn, MedicationPlan, MedicationPlanRequest, ReminderKind,
+  BehaviourDaily, CircadianDaily, DigitalSkillDaily, TaskEvent,
 } from "./types";
 
 export interface AssistantMessage { role: "system" | "user" | "assistant"; content: string; }
@@ -152,8 +153,13 @@ export async function postGaitWindow(w: GaitWindow): Promise<void> {
 export async function postScreeningSession(s: ScreeningSession): Promise<void> {
   await request<void>("/screening/sessions", { method: "POST", body: JSON.stringify(s) });
 }
-export async function postSos(e: SosEvent): Promise<void> {
-  await request<void>("/sos", { method: "POST", body: JSON.stringify(e) });
+/**
+ * 202 — the escalation is queued, not delivered. Callers MUST branch on
+ * `notified.length`: empty means no family account is bound yet, so the senior
+ * may only be told "已记录", never "已通知家属".
+ */
+export async function postSos(e: SosEvent): Promise<SosAck> {
+  return request<SosAck>("/sos", { method: "POST", body: JSON.stringify(e) });
 }
 export async function getHealthCard(): Promise<HealthCard> {
   return request("/health-card/me", { method: "GET" });
@@ -195,4 +201,40 @@ export async function getMedicationPlan(req: MedicationPlanRequest): Promise<Med
     { method: "POST", body: JSON.stringify(req) },
     LLM_TIMEOUT_MS
   );
+}
+
+// ---------------------------------------------------------------------------
+// Agent turn + behaviour stream (B ↔ C, issue #2).
+// The planner may call a model, so it gets the LLM timeout; the two ingest
+// endpoints are plain 204 writes.
+// ---------------------------------------------------------------------------
+
+/**
+ * One agent turn. The tool declarations travel with every request (the backend
+ * holds no copy), which is what makes "the client cannot downgrade a tool's
+ * risk" enforceable server-side.
+ *
+ * Throws on 422 (bad intent/enum), 429 (quota) and 5xx — callers must treat any
+ * throw as "no answer" and fall back, never as "nothing to do".
+ */
+export async function postAgentTurn(req: AgentTurnRequest): Promise<AgentTurnResponse> {
+  return request<AgentTurnResponse>(
+    "/agent/turn",
+    { method: "POST", body: JSON.stringify(req) },
+    LLM_TIMEOUT_MS
+  );
+}
+
+/** Daily rollup. 204. `circadian` / `digitalSkill` are OMITTED (not nulled) until W4. */
+export async function postBehaviourDaily(body: {
+  behaviour: BehaviourDaily;
+  circadian?: CircadianDaily;
+  digitalSkill?: DigitalSkillDaily;
+}): Promise<void> {
+  await request<void>("/behaviour/daily", { method: "POST", body: JSON.stringify(body) });
+}
+
+/** One task transition. 204, keyed by `event.id` server-side (safe to replay). */
+export async function postTaskEvent(event: TaskEvent): Promise<void> {
+  await request<void>("/task/events", { method: "POST", body: JSON.stringify(event) });
 }
