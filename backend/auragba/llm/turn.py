@@ -33,6 +33,11 @@ logger = logging.getLogger("auragba.llm.turn")
 
 MAX_CALLS = 3
 
+# Some OpenAI-compatible providers (observed with GLM) occasionally render a
+# tool call as prose markup instead of populating `tool_calls`. Speaking that to
+# a senior is worse than asking them to repeat, so such content is discarded.
+_TOOL_MARKUP = ("<arg_key>", "<arg_value>", "<tool_call>", "</tool_call>")
+
 # Mirrors `confirmToolNames()` in web/src/lib/tools.ts. Kept here as a hard set:
 # the client supplies tool descriptions, but it must not be able to downgrade a
 # confirm-risk tool to "safe" by editing its declaration.
@@ -191,6 +196,8 @@ def from_llm_message(
     locale = req.locale
     raw_content = message.get("content")
     reply = raw_content.strip() if isinstance(raw_content, str) else ""
+    if any(mark in reply for mark in _TOOL_MARKUP):
+        reply = ""
 
     raw_calls = message.get("tool_calls") or []
     if not isinstance(raw_calls, list):

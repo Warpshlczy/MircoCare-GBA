@@ -250,6 +250,14 @@ _advice = from_llm_message(
 )
 assert "痴呆" not in _advice.reply and "建议服用" not in _advice.reply
 
+# GLM sometimes writes a tool call as prose markup; never speak that to a senior.
+_markup = from_llm_message(
+    {"content": "create_task<arg_key>text</arg_key><arg_value>听日覆诊</arg_value></tool_call>",
+     "tool_calls": []},
+    _llm_req, _llm_schemas,
+)
+assert _markup.calls == [] and "<arg_key>" not in _markup.reply and "再" in _markup.reply
+
 # --- /assistant/chat reply word list (A's copy assertions cannot cover this) --
 _bad_reply = filter_chat_reply("你患有痴呆，建议服用多奈哌齐。", "zh-CN")
 assert _bad_reply == safe_chat_reply("zh-CN")
