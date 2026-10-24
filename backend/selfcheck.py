@@ -38,8 +38,9 @@ from auragba.audit import AuditLog  # noqa: E402
 from auragba.changepoint import detect  # noqa: E402
 from auragba.config import settings, validate_runtime  # noqa: E402
 from auragba.contract import (  # noqa: E402
-    AgentCard, AgentIntentRequest, AgentTool, AgentTurnRequest, BehaviourDaily,
-    BehaviourDailyEnvelope, GeofenceEvent, SosEvent, TaskEvent, ToolCall,
+    AgentCard, AgentIntentRequest, AgentTool, AgentTurnRequest, AssistantChatRequest,
+    BehaviourDaily, BehaviourDailyEnvelope, GeofenceEvent, ScreeningSession, SosEvent,
+    TaskEvent, ToolCall,
 )
 from auragba.crypto import decrypt_text, encrypt_text  # noqa: E402
 from auragba.economics import estimate as economics  # noqa: E402
@@ -47,13 +48,14 @@ from auragba.llm.turn import (  # noqa: E402
     from_llm_message, needs_confirm, plan_turn, sanitize_calls,
 )
 from auragba.llm.errors import LLMUpstreamError  # noqa: E402
+from auragba.llm.safety import filter_chat_reply, safe_chat_reply  # noqa: E402
 from auragba.model import (  # noqa: E402
     late_fusion, load_stream, score_acoustic, score_behavior, score_semantic,
 )
 from auragba.nlp import analyse_linguistics, coherence  # noqa: E402
 from auragba.privacy import pseudonymize, purge, scrub_props  # noqa: E402
 from auragba.reports.weekly import DIAGNOSTIC_WORDS, build_weekly_report, render_html  # noqa: E402
-from auragba.screening import run_screening  # noqa: E402
+from auragba.screening import ingest_session, run_screening  # noqa: E402
 from auragba.store import Store  # noqa: E402
 
 SR = 16_000
@@ -244,6 +246,40 @@ _advice = from_llm_message(
     _llm_req, _llm_schemas,
 )
 assert "痴呆" not in _advice.reply and "建议服用" not in _advice.reply
+
+# --- /assistant/chat reply word list (A's copy assertions cannot cover this) --
+_bad_reply = filter_chat_reply("你患有痴呆，建议服用多奈哌齐。", "zh-CN")
+assert _bad_reply == safe_chat_reply("zh-CN")
+for _word in DIAGNOSTIC_WORDS:
+    assert _word not in _bad_reply, f"diagnostic word leaked into a chat reply: {_word}"
+_clean_reply = filter_chat_reply("今日天氣幾好，記得飲多啲水。", "zh-HK")
+assert "飲多啲水" in _clean_reply, "benign replies must pass through unchanged"
+
+class _ChatLLM:
+    def complete_text(self, messages, max_tokens=None):
+        return "你患有痴呆，建议服用多奈哌齐。"
+
+
+import auragba.llm.service as service_mod  # noqa: E402
+
+_real_service_settings = service_mod.settings
+_real_service_client = service_mod.LLMClient
+_real_reserve = service_mod.usage.reserve
+service_mod.settings = replace(settings, llm_enabled=True)
+service_mod.LLMClient = lambda: _ChatLLM()
+service_mod.usage.reserve = lambda device_id: 0
+try:
+    _chat_reply = service_mod.assistant_reply(
+        AssistantChatRequest(messages=[{"role": "user", "content": "我最近记性差"}], locale="zh-CN"),
+        "",
+    )
+finally:
+    service_mod.settings = _real_service_settings
+    service_mod.LLMClient = _real_service_client
+    service_mod.usage.reserve = _real_reserve
+assert _chat_reply == safe_chat_reply("zh-CN")
+for _word in DIAGNOSTIC_WORDS:
+    assert _word not in _chat_reply, f"/assistant/chat leaked {_word}"
 
 import auragba.llm.turn as turn_mod  # noqa: E402
 
@@ -614,7 +650,13 @@ with tempfile.TemporaryDirectory() as tmp:
                    "text": "你好", "locale": "zh-CN"})
     st.record("dev-rep", "screening_sessions",
               {"at": now_ms - 3_600_000, "id": "s1", "durationMs": 60_000, "speechRatio": 0.6,
-               "trimmedStartMs": 0, "trimmedEndMs": 0})
+               "trimmedStartMs": 0, "trimmedEndMs": 0, "quality": "good", "snrDb": 18.0})
+    st.record("dev-rep", "screening_sessions",
+              {"at": now_ms - 3_000_000, "id": "s2", "durationMs": 60_000, "speechRatio": 0.5,
+               "trimmedStartMs": 0, "trimmedEndMs": 0, "quality": "fair", "snrDb": 12.0})
+    st.record("dev-rep", "screening_sessions",
+              {"at": now_ms - 2_400_000, "id": "s3", "durationMs": 60_000, "speechRatio": 0.1,
+               "trimmedStartMs": 0, "trimmedEndMs": 0, "quality": "reject", "snrDb": 3.0})
     st.record("dev-rep", "gait",
               {"id": "g1", "startedAt": now_ms - 86_400_000, "endedAt": now_ms - 86_400_000 + 5_000,
                "steps": 12, "cadence": 60, "cv": 0.08, "fall": False})
@@ -626,6 +668,12 @@ with tempfile.TemporaryDirectory() as tmp:
               {"at": now_ms - 86_400_000, "id": "s1", "riskIndex": 0.55, "riskBand": "elevated"})
     st.record("dev-rep", "telemetry",
               {"id": "t1", "name": "daily_checkin", "at": now_ms - 3_600_000, "locale": "zh-CN"})
+    st.record("dev-rep", "telemetry",
+              {"id": "t2", "name": "interview_answer", "at": now_ms - 3_500_000, "locale": "zh-CN",
+               "props": {"questionId": 3, "answerLen": 12}})
+    st.record("dev-rep", "telemetry",
+              {"id": "t3", "name": "interview_end", "at": now_ms - 3_400_000, "locale": "zh-CN",
+               "props": {"answered": 6, "durationSec": 240}})
     _today_key = time.strftime("%Y-%m-%d", time.localtime(now_ms / 1000))
     st.set_doc("dev-rep", f"behaviour:{_today_key}", {
         "behaviour": {"id": "b1", "day": _today_key, "taskConfirmDelayMin": 8.0,
@@ -658,6 +706,12 @@ with tempfile.TemporaryDirectory() as tmp:
         assert word not in blob, f"diagnostic word leaked into the family report: {word}"
 
     assert report.claimLevel == "observation" and "辅助观察" in report.disclaimer
+    change_section = next(s for s in report.sections if s.key == "change")
+    assert "1 条 fair" in change_section.note and "1 次采集质量不合格" in change_section.note
+    talk_section = next(s for s in report.sections if s.key == "talk")
+    assert any(
+        c.label == "完成访谈" and c.value == "1 次" for c in talk_section.counts
+    ), "interview_end counts once; interview_answer must not double-count"
 
     import auragba.reports.weekly as weekly_mod  # noqa: E402
 
@@ -780,5 +834,31 @@ with tempfile.TemporaryDirectory() as tmp:
         assert key in dumped, f"wire payload missing {key}"
     payload = result.model_dump_json()
     assert '"semanticStream"' in payload
+    rows = st.history("dev-check", "screening_results")
+    assert rows and rows[-1]["insufficientStreams"] is True
+    assert rows[-1]["baselineSufficient"] is False, "family badge needs the baseline flag"
+
+# --- ingest_session: quality is persisted, reject never enters the baseline ----
+with tempfile.TemporaryDirectory() as tmp:
+    st = Store(Path(tmp))
+    now_q = int(time.time() * 1000)
+    base = dict(durationMs=3000, speechRatio=0.8, trimmedStartMs=0, trimmedEndMs=3000,
+                features={"jitter": 0.1})
+    ingest_session(ScreeningSession(id="q-reject", startedAt=now_q, quality="reject", snrDb=3.0, **base),
+                   "dev-q", store=st)
+    assert st.history("dev-q", "screening_metrics") == [], "reject must not enter the baseline"
+    rejected_row = st.history("dev-q", "screening_sessions")[-1]
+    assert rejected_row["quality"] == "reject" and rejected_row["snrDb"] == 3.0
+    assert rejected_row["usedInBaseline"] is False
+
+    ingest_session(ScreeningSession(id="q-fair", startedAt=now_q + 1000, quality="fair", snrDb=12.0, **base),
+                   "dev-q", store=st)
+    assert len(st.history("dev-q", "screening_metrics")) == 1, "fair still feeds the baseline"
+    fair_row = st.history("dev-q", "screening_sessions")[-1]
+    assert fair_row["quality"] == "fair" and fair_row["snrDb"] == 12.0
+    assert fair_row["usedInBaseline"] is True
+
+    ingest_session(ScreeningSession(id="q-legacy", startedAt=now_q + 2000, **base), "dev-q", store=st)
+    assert len(st.history("dev-q", "screening_metrics")) == 2, "old clients without quality still count"
 
 print("selfcheck: OK")

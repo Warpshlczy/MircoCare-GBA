@@ -44,10 +44,14 @@ def overview(
             item["status"] = updates[item["id"]]
         alerts.append(item)
     alerts.extend(store.history(device, "gait_falls")[-20:])
+    trend = store.history(device, "screening_results")[-30:]
     return {
         "seniorDeviceId": device,
         "healthCard": card,
-        "riskTrend": store.history(device, "screening_results")[-30:],
+        "riskTrend": trend,
+        # Top-level shortcut for clients that only render a single badge. Older
+        # rows predate the flag, so `None` means "unknown", never "sufficient".
+        "sufficient": trend[-1].get("baselineSufficient") if trend else None,
         "screeningSessions": store.history(device, "screening_sessions")[-30:],
         "activityTrend": store.history(device, "gait")[-30:],
         "alerts": alerts[-30:],

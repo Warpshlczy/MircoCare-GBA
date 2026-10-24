@@ -179,7 +179,14 @@ def run_screening(
     store.record(
         device_id,
         "screening_results",
-        {"at": result.at, "id": result.id, "riskIndex": fusion.risk_index, "riskBand": fusion.band},
+        {
+            "at": result.at, "id": result.id, "riskIndex": fusion.risk_index,
+            "riskBand": fusion.band,
+            # Data-quality flags only (booleans). The family dashboard needs them
+            # to show "not enough data" instead of a misleading low risk.
+            "insufficientStreams": fusion.insufficient_streams,
+            "baselineSufficient": baseline.sufficient,
+        },
     )
     return result
 
@@ -193,7 +200,10 @@ def ingest_session(session: ScreeningSession, device_id: str, store: Store | Non
     store = store or default_store
     flat = {k: float(v) for k, v in session.features.items()}
     flat["speech_ratio"] = float(session.speechRatio)
-    store.record(device_id, "screening_metrics", {"at": session.startedAt, "metrics": flat})
+    if session.quality != "reject":
+        # Only reject samples are excluded from the personal baseline; `fair` is
+        # kept because a quiet senior at home rarely reaches "good".
+        store.record(device_id, "screening_metrics", {"at": session.startedAt, "metrics": flat})
     store.record(
         device_id,
         "screening_sessions",
@@ -201,5 +211,7 @@ def ingest_session(session: ScreeningSession, device_id: str, store: Store | Non
             "at": session.startedAt, "id": session.id, "durationMs": session.durationMs,
             "speechRatio": session.speechRatio, "trimmedStartMs": session.trimmedStartMs,
             "trimmedEndMs": session.trimmedEndMs,
+            "quality": session.quality, "snrDb": session.snrDb,
+            "usedInBaseline": session.quality != "reject",
         },
     )

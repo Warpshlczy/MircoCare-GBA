@@ -57,6 +57,11 @@ class ScreeningSession(_Base):
     trimmedStartMs: int
     trimmedEndMs: int
     features: dict[str, float] = Field(default_factory=dict)
+    # A's capture gate (`signal.ts#qualityOf`). `reject` is still uploaded so the
+    # family report can say "N captures were unusable", but it never enters the
+    # personal baseline; `fair` is kept (quiet rooms are the norm for seniors).
+    quality: Literal["good", "fair", "reject"] | None = None
+    snrDb: float | None = None
 
 
 class SosEvent(_Base):

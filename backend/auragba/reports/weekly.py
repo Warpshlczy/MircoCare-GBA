@@ -74,6 +74,7 @@ _TEXTS: dict[str, dict[str, Any]] = {
             "minutesLabel": "语音筛查时长",
             "minutesValue": "{minutes} 分钟",
             "checkins": "主动签到",
+            "interviews": "完成访谈",
             "timesValue": "{n} 次",
         },
         "change": {
@@ -87,6 +88,7 @@ _TEXTS: dict[str, dict[str, Any]] = {
             "phrase": "{feature}{word}平时（{z:.1f} 个基线单位{extra}）",
             "sustainedExtra": "，而且是持续偏移",
             "note": "依据：每个变化项都可展开查看特征名、Z 值、样本数与时间窗。",
+            "qualityNote": "另：{fair} 条 fair 样本已计入，{reject} 次采集质量不合格未计入。",
         },
         "tasks": {
             "title": "做事情况",
@@ -192,6 +194,7 @@ _TEXTS: dict[str, dict[str, Any]] = {
             "minutesLabel": "語音篩查時長",
             "minutesValue": "{minutes} 分鐘",
             "checkins": "主動簽到",
+            "interviews": "完成訪談",
             "timesValue": "{n} 次",
         },
         "change": {
@@ -205,6 +208,7 @@ _TEXTS: dict[str, dict[str, Any]] = {
             "phrase": "{feature}{word}平時（{z:.1f} 個基線單位{extra}）",
             "sustainedExtra": "，而且是持續偏移",
             "note": "依據：每個變化項都可展開查看特徵名、Z 值、樣本數與時間窗。",
+            "qualityNote": "另：{fair} 條 fair 樣本已計入，{reject} 次採集質量不合格未計入。",
         },
         "tasks": {
             "title": "做事情況",
@@ -306,6 +310,7 @@ def _talk_section(
     prev_turns: list[dict[str, Any]],
     sessions: list[dict[str, Any]],
     checkins: list[dict[str, Any]],
+    interviews: list[dict[str, Any]],
     t: dict[str, Any],
 ) -> ReportSection:
     copy = t["talk"]
@@ -327,6 +332,7 @@ def _talk_section(
             ),
             ReportCount(label=copy["minutesLabel"], value=copy["minutesValue"].format(minutes=minutes)),
             ReportCount(label=copy["checkins"], value=copy["timesValue"].format(n=len(checkins))),
+            ReportCount(label=copy["interviews"], value=copy["timesValue"].format(n=len(interviews))),
         ],
     )
 
@@ -338,6 +344,15 @@ def _change_section(
     copy = t["change"]
     since = end - max(settings.trend_days, settings.baseline_days) * DAY_MS
     history = [h for h in store.history(device_id, "screening_metrics", since_ms=since) if _row_at(h) < end]
+    sessions = [
+        s for s in store.history(device_id, "screening_sessions", since_ms=since)
+        if _row_at(s) < end
+    ]
+    fair = sum(1 for s in sessions if s.get("quality") == "fair")
+    rejected = sum(1 for s in sessions if s.get("quality") == "reject")
+    quality_note = (
+        copy["qualityNote"].format(fair=fair, reject=rejected) if fair or rejected else ""
+    )
     if not history:
         return (
             ReportSection(
@@ -345,7 +360,7 @@ def _change_section(
                 title=copy["title"],
                 summary=copy["noData"],
                 available=False,
-                note=copy["noDataNote"],
+                note=" ".join(part for part in (copy["noDataNote"], quality_note) if part),
             ),
             False,
         )
@@ -364,7 +379,7 @@ def _change_section(
                 title=copy["title"],
                 summary=copy["insufficient"],
                 available=False,
-                note=outcome.note,
+                note=" ".join(part for part in (outcome.note, quality_note) if part),
             ),
             False,
         )
@@ -405,7 +420,7 @@ def _change_section(
             title=copy["title"],
             summary=summary,
             evidence=evidence,
-            note=copy["note"],
+            note=" ".join(part for part in (copy["note"], quality_note) if part),
         ),
         any(e.sustained or e.changepointAt for e in evidence),
     )
@@ -569,9 +584,12 @@ def build_weekly_report(
     falls = len(fall_rows) or sum(1 for g in gait if g.get("fall"))
     results = _between(store.history(device_id, "screening_results"), start, end)
     conversation = _between(store.history(device_id, "conversation"), start, end)
+    # Structured interview completions arrive as telemetry (`interview_end`).
+    # Answer-level props stay in telemetry; only the completion count is shown.
+    interviews = [e for e in telemetry if e.get("name") == "interview_end"]
 
     sections = [
-        _talk_section(turns, prev_turns, sessions, checkins, t),
+        _talk_section(turns, prev_turns, sessions, checkins, interviews, t),
         change,
         _tasks_section(escalations, behaviour, t),
         _activity_section(gait, falls, t),
