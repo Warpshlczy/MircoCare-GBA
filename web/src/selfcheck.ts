@@ -33,6 +33,7 @@ import {
   DEFAULT_OPERATING_POINT,
 } from "./lib/riskExplain.ts";
 import { parseIntent, isQuestion } from "./lib/intent.ts";
+import { emergencyHit } from "./lib/emergency.ts";
 import {
   localCardsFor,
   followupCard,
@@ -1396,9 +1397,13 @@ assert.equal(magnitude(3, 4, 0), 5);
   const cannot = await runTurn("帶我去街市", baseDeps({ canRun: () => false }));
   assert.equal(cannot.handled, false);
 
-  // The model's own plan still wins when it has one — local is a floor, not a
-  // replacement for a richer planner.
-  const modelFirst = await runTurn(
+  // KEYWORD FIRST (2026-10-25): the device plan claims the turn. The locally
+  // matched ask is the one he actually said in words we can verify — a model
+  // answering 「帶我去街市」 with a bare `locate` must not outrank the route
+  // plan. The model still owns every turn the device did NOT match (and the
+  // medication-report exception keeps its richer args, see the log_medication
+  // tests above).
+  const modelLoses = await runTurn(
     "帶我去街市",
     baseDeps({
       canRun: () => true,
@@ -1406,7 +1411,21 @@ assert.equal(magnitude(3, 4, 0), 5);
       requestTurn: async () => ({ reply: "", calls: [{ name: "locate", args: {} }], cards: [] }),
     })
   );
-  assert.deepEqual(modelFirst.steps.map((s) => s.name), ["locate"]);
+  assert.deepEqual(modelLoses.steps.map((s) => s.name), ["plan_route"], "a locally matched ask outranks the model's plan");
+  // …and when the device matched nothing, the model still owns the turn.
+  const modelOnly = await runTurn(
+    "打電話畀阿明",
+    baseDeps({
+      canRun: () => true,
+      runTool: async () => ({ ok: true, message: "done" }),
+      requestTurn: async () => ({
+        reply: "",
+        calls: [{ name: "call_contact", args: { name: "阿明" } }],
+        cards: [],
+      }),
+    })
+  );
+  assert.deepEqual(modelOnly.steps.map((s) => s.name), ["call_contact"], "an unmatched turn belongs to the model");
 }
 
 // --- native seam contract (B / W3) -------------------------------------------
@@ -2687,6 +2706,86 @@ assert.equal(magnitude(3, 4, 0), 5);
   assert.equal(JSON.stringify(second).includes("降壓"), false);
 }
 
+// --- emergency triage (agent.ts step 0, lib/emergency.ts) --------------------
+// Before this existed, emergency detection lived in two disjoint word lists
+// (intent.ts trigger words vs backend safety.py symptom markers), and with the
+// LLM off 「我跌咗喺度起唔到身」 fell through the whole cascade into the todo
+// fallback — an emergency filed as a chore. The triage must fire before the
+// refusal gate, the local planner and the backend, and must win over a
+// misbehaving planner.
+{
+  const baseDeps = (extra: Partial<AgentDeps> = {}): AgentDeps => ({
+    locale: "zh-HK",
+    now: 1_000_000,
+    reminders: [],
+    tasks: [],
+    ...extra,
+  });
+  const fakeRunner =
+    (ran: string[]) =>
+    async (step: { name: string }): Promise<{ ok: boolean; message?: string }> => {
+      ran.push(step.name);
+      return { ok: true, message: "我即刻通知屋企人，你坐低唔好走開。" };
+    };
+
+  // Reverse verification of the hit list: these must NOT page anyone.
+  for (const text of ["唔使急", "我急住去廁所", "急咩", "今日天氣幾好", "我食咗藥", "帮我记住买药"]) {
+    assert.equal(emergencyHit(text), null, `must not be an emergency: ${text}`);
+  }
+  // …and these must. Symptoms (backend parity) and 呼救动词 both.
+  for (const text of [
+    "救命呀",
+    "救我",
+    "sos",
+    "我跌咗喺度起唔到身",
+    "我心口好痛",
+    "透唔到氣",
+    "幫我叫救護車",
+    "我好唔舒服",
+    "半邊身無力",
+    "fall down",
+  ]) {
+    assert.ok(emergencyHit(text), `must be an emergency: ${text}`);
+  }
+
+  // The full turn: triage wins over a misbehaving planner, offline or not.
+  for (const text of ["救命呀", "我跌咗喺度起唔到身", "我心口好痛", "我好唔舒服"]) {
+    const ran: string[] = [];
+    let modelWasAsked = false;
+    const out = await runTurn(
+      text,
+      baseDeps({
+        canRun: () => true,
+        runTool: fakeRunner(ran),
+        requestTurn: async () => {
+          modelWasAsked = true;
+          return { reply: "好，我幫你記住咗。", calls: [{ name: "create_task", args: { text } }], cards: [] };
+        },
+      })
+    );
+    assert.equal(out.handled, true, `emergency must be handled here: ${text}`);
+    assert.deepEqual(out.steps.map((s) => s.name), ["sos"], `sos must run first and alone: ${text}`);
+    assert.equal(ran[0], "sos", `the executor must see sos: ${text}`);
+    assert.equal(modelWasAsked, false, `the model must never decide an emergency: ${text}`);
+    assert.equal(
+      /記|记|记住/.test(out.reply),
+      false,
+      `an emergency must not be answered as a chore: ${text} -> ${out.reply}`
+    );
+    assert.ok(out.reply.length > 0, `he must hear something: ${text}`);
+  }
+
+  // Nothing wired at all (bare WebView / selfcheck): still claimed, still
+  // honest — the number, not "try again later".
+  const offline = await runTurn("救命", baseDeps());
+  assert.equal(offline.handled, true, "an emergency is claimed even with nothing wired");
+  assert.ok(/999|120/.test(offline.reply), `the offline escape says the number: ${offline.reply}`);
+
+  // A non-emergency utterance with a dead backend is STILL not ours: triage
+  // must not widen what the device claims.
+  assert.equal((await runTurn("打开微信", baseDeps())).handled, false);
+}
+
 // --- cross-repo contract drift (the bug that cost us a demo) ----------------
 // `CardKind` lived twice — 5 values in backend/auragba/contract.py, 8 in
 // types.ts — so any card kind B invented would make FastAPI's response
@@ -2721,6 +2820,41 @@ assert.equal(magnitude(3, 4, 0), 5);
       py,
       `${name} drifted: web=${ts.join(",")} backend=${py.join(",")}`
     );
+  }
+
+  // --- emergency lexicon drift: the device list must contain the backend's ----
+  // lib/emergency.ts is the device-side judge at runTurn step 0; safety.py's
+  // `_EMERGENCY` is the backend's. The device must catch everything the
+  // backend catches (the device may be the only judge offline), so THIS
+  // direction is load-bearing. C adds a marker → the gate goes red here until
+  // the same word lands in emergency.ts.
+  {
+    const safetyPy = readFileSync(
+      new URL("../../backend/auragba/llm/safety.py", import.meta.url),
+      "utf8"
+    ).replace(/#[^\n]*/g, "");
+    const m = /^_EMERGENCY = \(([\s\S]*?)^\)/m.exec(safetyPy);
+    assert.ok(m, "backend _EMERGENCY not found — did safety.py move?");
+    const backendMarkers = [...m[1].matchAll(/"([^"]+)"/g)].map((x) => x[1]);
+    assert.ok(
+      backendMarkers.length >= 30,
+      `backend emergency markers unexpectedly small: ${backendMarkers.length}`
+    );
+    const emergencySrc = readFileSync(new URL("./lib/emergency.ts", import.meta.url), "utf8").replace(
+      /\/\/[^\n]*/g,
+      "" // comments quote example words — never values
+    );
+    for (const marker of backendMarkers) {
+      assert.ok(
+        emergencySrc.includes(`"${marker}"`),
+        `emergency.ts is missing a backend marker — C added "${marker}" to safety.py, mirror it in web/src/lib/emergency.ts`
+      );
+    }
+    // The 呼救动词 the backend list lacks (救命 never reaches /agent/turn's
+    // lexicon). If these vanish from the device list, falls get filed as chores.
+    for (const word of ["救命", "救護車", "唔舒服", "sos"]) {
+      assert.ok(emergencySrc.includes(`"${word}"`), `emergency.ts lost a trigger word: ${word}`);
+    }
   }
 }
 

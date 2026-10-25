@@ -6,12 +6,15 @@
 // both arrive later as arguments.
 //
 // Order is deliberate and mirrors docs/dev.md §3.4 B1:
-//   refuse → local card → backend turn → plan calls → confirm → execute
-// A refusal or a local card never reaches the network. A backend failure is
-// NOT "handled": we hand the turn back (`handled: false`) so the caller's
-// pre-agent path still runs — speaking a generic apology there would be a
-// regression against the behaviour the app already had.
+//   emergency triage → refuse → local card → backend turn → plan calls →
+//   confirm → execute
+// The triage is step 0 because an emergency must never wait for a model (see
+// lib/emergency.ts). A refusal or a local card never reaches the network. A
+// backend failure is NOT "handled": we hand the turn back (`handled: false`)
+// so the caller's pre-agent path still runs — speaking a generic apology there
+// would be a regression against the behaviour the app already had.
 
+import { emergencyHit, emergencyNumber } from "./emergency.ts";
 import { localCardsFor } from "./cards.ts";
 import { parseIntent } from "./intent.ts";
 import { fitUtterance } from "./speech.ts";
@@ -306,6 +309,71 @@ export async function runTurn(utterance: string, deps: AgentDeps): Promise<TurnO
   const text = (utterance ?? "").trim();
   if (!text) return emptyOutcome();
 
+  // 0. Emergency triage — deterministic, offline, BEFORE everything.
+  //
+  // Why step 0: the symptom lexicon used to live only in the backend
+  // (`llm/safety.py#_EMERGENCY`), reachable through /agent/turn — which this
+  // device only calls when /health confirms a real planner. With the LLM off
+  // (or its key missing), 「我跌咗喺度起唔到身」 matched nothing anywhere and
+  // was filed as a todo by the offline fallback. An emergency must never wait
+  // for a model that may not exist, and never for the refusal gate either —
+  // if a fall and a 转账 ever share a sentence, the fall wins.
+  //
+  // The lexicon is `lib/emergency.ts` (one list, drift-checked against the
+  // backend's `_EMERGENCY` in selfcheck.ts). It deliberately lacks the bare
+  // 「急」: that word stays in intent.ts, where A's overlay adds a countdown
+  // and a cancel — a grace this auto-escalation does not have.
+  const emergencyMarker = emergencyHit(text);
+  if (emergencyMarker) {
+    const plan = planCalls([{ name: "sos", args: { reason: emergencyMarker } }], deps.locale);
+    const executed: ExecutedCall[] = [];
+    const skipped: SkippedCall[] = [];
+    for (const step of plan.steps) {
+      if ((deps.canRun && !deps.canRun(step.name)) || !deps.runTool) {
+        // Nothing wired can escalate (selfcheck / bare WebView). Say the
+        // number — never the generic "仲未接好", which tells a man on the
+        // floor to try again later.
+        skipped.push({ name: step.name, reason: "no_executor" });
+        try {
+          deps.onAudit?.({ tool: step.name, outcome: "failed", at: deps.now });
+        } catch {
+          /* audit must never change what we say */
+        }
+        continue;
+      }
+      try {
+        const out = await deps.runTool(step);
+        executed.push({ name: step.name, ok: out.ok, message: out.message });
+      } catch {
+        executed.push({ name: step.name, ok: false });
+      }
+    }
+    const doneLines = executed.filter((e) => e.ok && e.message).map((e) => e.message as string);
+    const failLines = executed.filter((e) => !e.ok && e.message).map((e) => e.message as string);
+    const reply =
+      executed.length === 0
+        ? deps.locale === "zh-CN"
+          ? `我未能帮你叫人，请即刻打 ${emergencyNumber(deps.locale)}。`
+          : `我未能幫你叫人，請即刻打 ${emergencyNumber(deps.locale)}。`
+        : composeReply({
+            doneLines,
+            failLines,
+            executed,
+            skipped,
+            plannerReply: "",
+            hadSteps: plan.steps.length > 0,
+            locale: deps.locale,
+          });
+    return {
+      ...emptyOutcome(),
+      handled: true,
+      reply,
+      steps: plan.steps,
+      executed,
+      skipped,
+    };
+  }
+
   // 1. Refusal beats everything — including a backend that would happily act.
   const refuse = refuseReason(text, deps.locale);
   if (refuse) {
@@ -359,12 +427,49 @@ export async function runTurn(utterance: string, deps: AgentDeps): Promise<TurnO
   // `log_medication` — then the model's richer args (name/note) are kept.
   const medReport = localCalls.some((c) => c.name === "log_medication");
   const modelLoggedMed = modelCalls.some((c) => c.name === "log_medication");
+
+  // Mock-echo guard (bridges the gap until the backend fail-closed fix lands).
+  //
+  // `config.llm_available` does not check the API key, so a backend started
+  // with AURA_LLM_ENABLED=true and no key still answers /health "enabled" —
+  // and its mock planner then turns EVERY utterance into
+  // `create_task(<verbatim>)` with the fixed 「好，我幫你記住咗。」 echo. The
+  // askOnly filter this used to hide behind is gone (mokie, 7d3862c: prompts
+  // constrain the real model instead), but prompts never reach the mock —
+  // without this guard a misconfigured key re-creates
+  // 「能听到我说话吗」→「幫你記住咗」 with nothing filtering it. The mock's
+  // signature is unmistakable: exactly one create_task whose text is the
+  // utterance verbatim plus the fixed echo line. Treated as "no planner":
+  // the turn goes back to the chat path, which either answers honestly or
+  // says nothing. A real model that happens to echo verbatim AND the exact
+  // fixed line in the same turn is vanishingly rare, and the cost of a false
+  // positive is one honest "not mine", never a wrong action.
+  const MOCK_ECHO_REPLIES = new Set(["好，我幫你記住咗。", "好，我帮你记住了。"]);
+  const mockEcho =
+    localCalls.length === 0 &&
+    modelCards.length === 0 &&
+    modelCalls.length === 1 &&
+    modelCalls[0].name === "create_task" &&
+    (modelCalls[0].args?.text ?? "") === text &&
+    MOCK_ECHO_REPLIES.has(((res?.reply ?? "") as string).trim());
+  if (mockEcho) return emptyOutcome();
+
+  // KEYWORD FIRST (2026-10-25): a deterministic device plan claims the turn
+  // BEFORE the model's. The locally matched ask is the one the senior actually
+  // said in words we can verify; letting the model's generic create_task
+  // outrank a real route/medication plan meant 「帶我去街市」 could come back
+  // as "好，我幫你記住" with nothing behind it. The only exception is the
+  // medication report above, where the model's richer args (name/note) win.
+  // Model-only cards are likewise dropped when the device claimed the turn —
+  // the executor's own cards carry what actually ran.
   const calls =
-    medReport && !modelLoggedMed
-      ? localCalls
-      : modelCalls.length > 0 || modelCards.length > 0
-        ? modelCalls
-        : localCalls;
+    medReport && modelLoggedMed
+      ? modelCalls
+      : localCalls.length > 0
+        ? localCalls
+        : modelCalls.length > 0 || modelCards.length > 0
+          ? modelCalls
+          : localCalls;
 
   if (!res && calls.length === 0) {
     // No answer from the model AND nothing this device can plan: not ours.
