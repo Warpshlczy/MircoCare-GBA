@@ -6,6 +6,8 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.location.Location;
 import android.location.LocationManager;
+import android.media.AudioAttributes;
+import android.media.AudioManager;
 import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
@@ -13,6 +15,7 @@ import android.provider.MediaStore;
 import android.provider.Settings;
 import android.speech.tts.TextToSpeech;
 import android.speech.tts.UtteranceProgressListener;
+import android.util.Log;
 
 import java.util.Locale;
 import java.util.UUID;
@@ -72,6 +75,7 @@ public class AuraNativePlugin extends Plugin {
     private static final String MIC = "mic";
     private static final String LOCATION = "location";
     private static final String TTS_UTTERANCE_PREFIX = "aura-tts-";
+    private static final String TAG = "AuraTTS";
 
     // --- native TTS (the boy-ish preset arrives from audio.ts#BOY_VOICE) -----
     private TextToSpeech tts;
@@ -82,6 +86,14 @@ public class AuraNativePlugin extends Plugin {
     private String queuedLocale;
     private float queuedPitch = 1.35f;
     private float queuedRate = 0.9f;
+    private boolean utteranceStarted;
+    private Runnable initWatchdog;
+    private Runnable startWatchdog;
+    private Runnable doneWatchdog;
+    private boolean focusHeld;
+    /** Volume we borrowed from: -1 means "we did not touch STREAM_MUSIC". */
+    private int savedVolume = -1;
+    private final AudioManager.OnAudioFocusChangeListener focusListener = change -> {};
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
 
     // --- wake word while backgrounded/locked ---------------------------------
@@ -336,15 +348,25 @@ public class AuraNativePlugin extends Plugin {
      * "speaking" state end together. A barge-in resolves `stopped`, NOT a
      * failure — JS must not retry it through Web Speech.
      *
+     * All engine work is posted to the main thread: TextToSpeech delivers its
+     * init/progress callbacks on the looper of the creating thread, so creating
+     * it from a plugin worker thread can leave the JS promise pending forever.
+     * That was the "真机冇聲" bug — the WebView stayed in `speaking` and every
+     * later call was starved.
+     *
      * `pitch` / `rate` come from audio.ts#BOY_VOICE so the native and browser
      * paths sound like the same character. There is no real child voice in
      * Android TTS; pitch is the honest approximation.
      */
     @PluginMethod
     public void speak(PluginCall call) {
+        mainHandler.post(() -> handleSpeak(call));
+    }
+
+    private void handleSpeak(PluginCall call) {
         String text = call.getString("text", "");
         if (text == null || text.trim().isEmpty()) {
-            resolveSpeak(call, false, false);
+            resolveSpeak(call, false, false, "empty_text");
             return;
         }
         queuedText = text;
@@ -353,19 +375,24 @@ public class AuraNativePlugin extends Plugin {
         Double rate = call.getDouble("rate", 0.9);
         queuedPitch = clamp(pitch == null ? 1.35f : pitch.floatValue(), 0.5f, 2.0f);
         queuedRate = clamp(rate == null ? 0.9f : rate.floatValue(), 0.5f, 2.0f);
+        Log.i(TAG, "speak " + text.length() + " chars locale=" + queuedLocale
+                + " thread=" + Thread.currentThread().getName());
 
         // New speech wins: tell the previous JS caller it was interrupted.
         if (pendingSpeak != null) {
-            resolveSpeak(pendingSpeak, false, true);
+            resolveSpeak(pendingSpeak, false, true, "interrupted");
             pendingSpeak = null;
         }
+        cancelWatchdogs();
+        requestAudioFocus();
         if (tts == null) {
             pendingSpeak = call;
-            tts = new TextToSpeech(getContext(), this::onTtsInit);
+            initTts();
             return;
         }
         if (!ttsReady) {
             pendingSpeak = call;
+            armInitWatchdog();
             return;
         }
         speakQueued(call);
@@ -373,46 +400,85 @@ public class AuraNativePlugin extends Plugin {
 
     @PluginMethod
     public void stopSpeak(PluginCall call) {
-        if (tts != null) tts.stop();
-        PluginCall pending = pendingSpeak;
-        pendingSpeak = null;
-        pendingUtteranceId = null;
-        if (pending != null) resolveSpeak(pending, false, true);
-        call.resolve();
+        mainHandler.post(() -> {
+            if (tts != null) tts.stop();
+            cancelWatchdogs();
+            abandonFocus();
+            PluginCall pending = pendingSpeak;
+            pendingSpeak = null;
+            pendingUtteranceId = null;
+            if (pending != null) resolveSpeak(pending, false, true, "stopped");
+            call.resolve();
+        });
+    }
+
+    private void initTts() {
+        Log.i(TAG, "creating TextToSpeech (system default engine)");
+        armInitWatchdog();
+        try {
+            tts = new TextToSpeech(getContext(), this::onTtsInit);
+        } catch (Throwable e) {
+            Log.e(TAG, "TextToSpeech constructor failed", e);
+            tts = null;
+            failPending("init_failed");
+        }
+    }
+
+    private void armInitWatchdog() {
+        if (initWatchdog != null) return;
+        initWatchdog = () -> {
+            if (ttsReady || pendingSpeak == null) return;
+            Log.w(TAG, "init watchdog: engine never reported readiness");
+            shutdownTts();
+            failPending("init_timeout");
+        };
+        mainHandler.postDelayed(initWatchdog, 5000L);
     }
 
     private void onTtsInit(int status) {
+        Log.i(TAG, "onTtsInit status=" + status);
         if (status != TextToSpeech.SUCCESS) {
-            if (pendingSpeak != null) {
-                resolveSpeak(pendingSpeak, false, false);
-                pendingSpeak = null;
-            }
-            if (tts != null) {
-                tts.shutdown();
-                tts = null;
-            }
-            ttsReady = false;
+            shutdownTts();
+            failPending("init_failed");
             return;
         }
         ttsReady = true;
+        cancelInitWatchdog();
+        try {
+            tts.setAudioAttributes(new AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build());
+            Log.i(TAG, "engines=" + tts.getEngines() + " voice=" + tts.getVoice());
+        } catch (Throwable e) {
+            Log.w(TAG, "audio attributes / engine introspection failed", e);
+        }
         tts.setOnUtteranceProgressListener(new UtteranceProgressListener() {
             @Override
             public void onStart(String utteranceId) {
-                // Mouth timing is driven by the WebView (viseme.ts); nothing to do.
+                mainHandler.post(() -> {
+                    Log.i(TAG, "onStart " + utteranceId);
+                    utteranceStarted = true;
+                    cancelStartWatchdog();
+                    armDoneWatchdog(utteranceId);
+                });
             }
 
             @Override
             public void onDone(String utteranceId) {
+                Log.i(TAG, "onDone " + utteranceId);
                 completeUtterance(utteranceId, true);
             }
 
             @Override
             public void onError(String utteranceId) {
+                Log.e(TAG, "onError " + utteranceId);
                 completeUtterance(utteranceId, false);
             }
 
             @Override
             public void onError(String utteranceId, int errorCode) {
+                Log.e(TAG, "onError " + utteranceId + " code=" + errorCode);
                 completeUtterance(utteranceId, false);
             }
         });
@@ -420,29 +486,22 @@ public class AuraNativePlugin extends Plugin {
             PluginCall call = pendingSpeak;
             pendingSpeak = null;
             if (queuedText != null) speakQueued(call);
-            else resolveSpeak(call, false, false);
+            else resolveSpeak(call, false, false, "empty_text");
         }
     }
 
     private void speakQueued(PluginCall call) {
         if (queuedText == null) {
-            resolveSpeak(call, false, false);
+            resolveSpeak(call, false, false, "empty_text");
             return;
         }
         Locale locale = Locale.forLanguageTag(
                 (queuedLocale == null ? "zh-HK" : queuedLocale).replace('_', '-'));
-        int availability = tts.setLanguage(locale);
+        int availability = applyBestLocale(locale);
+        Log.i(TAG, "language=" + tts.getLanguage() + " availability=" + availability);
         if (availability == TextToSpeech.LANG_MISSING_DATA
                 || availability == TextToSpeech.LANG_NOT_SUPPORTED) {
-            // Cantonese is not universal on Android. Prefer the other Chinese
-            // variant to silence, but the returned timbre is still pitch-shifted.
-            Locale chinese = isCantonese(queuedLocale)
-                    ? Locale.TRADITIONAL_CHINESE : Locale.SIMPLIFIED_CHINESE;
-            availability = tts.setLanguage(chinese);
-        }
-        if (availability == TextToSpeech.LANG_MISSING_DATA
-                || availability == TextToSpeech.LANG_NOT_SUPPORTED) {
-            resolveSpeak(call, false, false);
+            resolveSpeak(call, false, false, "lang_missing");
             return;
         }
         tts.setPitch(queuedPitch);
@@ -451,29 +510,201 @@ public class AuraNativePlugin extends Plugin {
         String utteranceId = TTS_UTTERANCE_PREFIX + UUID.randomUUID();
         pendingSpeak = call;
         pendingUtteranceId = utteranceId;
+        utteranceStarted = false;
+        requestAudioFocus();
         int status = tts.speak(queuedText, TextToSpeech.QUEUE_FLUSH, null, utteranceId);
+        Log.i(TAG, "tts.speak status=" + status);
         if (status == TextToSpeech.ERROR) {
             pendingSpeak = null;
             pendingUtteranceId = null;
-            resolveSpeak(call, false, false);
+            abandonFocus();
+            resolveSpeak(call, false, false, "speak_error");
+            return;
         }
+        // Some ROMs accept speak() and then emit no callback at all; without
+        // this the JS promise (and the mouth animation) would wait forever.
+        armStartWatchdog();
+    }
+
+    private void armStartWatchdog() {
+        cancelStartWatchdog();
+        startWatchdog = () -> {
+            if (utteranceStarted || pendingSpeak == null) return;
+            Log.w(TAG, "no onStart within 4s: engine accepted the text but never played");
+            if (tts != null) tts.stop();
+            failedUtterance("no_start");
+        };
+        mainHandler.postDelayed(startWatchdog, 4000L);
+    }
+
+    private void armDoneWatchdog(String utteranceId) {
+        cancelDoneWatchdog();
+        long budget = Math.min(35_000L, Math.max(8_000L, queuedText.length() * 700L + 6_000L));
+        doneWatchdog = () -> {
+            if (pendingUtteranceId == null) return;
+            Log.w(TAG, "onDone missing after " + budget + "ms; resolving so the UI can move on");
+            completeUtterance(utteranceId, true);
+        };
+        mainHandler.postDelayed(doneWatchdog, budget);
+    }
+
+    private void failedUtterance(String reason) {
+        PluginCall call = pendingSpeak;
+        pendingSpeak = null;
+        pendingUtteranceId = null;
+        cancelWatchdogs();
+        abandonFocus();
+        if (call != null) resolveSpeak(call, false, false, reason);
     }
 
     private void completeUtterance(String utteranceId, boolean ok) {
         mainHandler.post(() -> {
             if (utteranceId == null || !utteranceId.equals(pendingUtteranceId)) return;
             pendingUtteranceId = null;
+            cancelWatchdogs();
+            abandonFocus();
             PluginCall call = pendingSpeak;
             pendingSpeak = null;
-            if (call != null) resolveSpeak(call, ok, false);
+            if (call != null) {
+                resolveSpeak(call, ok, false, ok ? null : "engine_error");
+            }
         });
     }
 
-    private void resolveSpeak(PluginCall call, boolean ok, boolean stopped) {
+    private void failPending(String reason) {
+        PluginCall call = pendingSpeak;
+        pendingSpeak = null;
+        pendingUtteranceId = null;
+        cancelWatchdogs();
+        abandonFocus();
+        if (call != null) resolveSpeak(call, false, false, reason);
+    }
+
+    private void cancelInitWatchdog() {
+        if (initWatchdog != null) mainHandler.removeCallbacks(initWatchdog);
+        initWatchdog = null;
+    }
+
+    private void cancelStartWatchdog() {
+        if (startWatchdog != null) mainHandler.removeCallbacks(startWatchdog);
+        startWatchdog = null;
+    }
+
+    private void cancelDoneWatchdog() {
+        if (doneWatchdog != null) mainHandler.removeCallbacks(doneWatchdog);
+        doneWatchdog = null;
+    }
+
+    private void cancelWatchdogs() {
+        cancelInitWatchdog();
+        cancelStartWatchdog();
+        cancelDoneWatchdog();
+    }
+
+    private void shutdownTts() {
+        ttsReady = false;
+        cancelWatchdogs();
+        if (tts != null) {
+            try {
+                tts.shutdown();
+            } catch (Throwable ignored) {
+                /* engine already gone */
+            }
+            tts = null;
+        }
+    }
+
+    /**
+     * Transient focus so an incoming call/notification duck does not swallow the
+     * line, plus a floor on media volume. A handset left at 10/30 is about
+     * -29 dB at the port (measured with `dumpsys media.audio_flinger`), which
+     * an elderly ear reads as "the doll is mute"; a muted handset is
+     * indistinguishable from a broken engine. We raise, remember, and put the
+     * senior's own level back when the line ends.
+     */
+    private void requestAudioFocus() {
+        AudioManager am = (AudioManager) getContext().getSystemService(Context.AUDIO_SERVICE);
+        if (am == null) return;
+        int result = am.requestAudioFocus(
+                focusListener, AudioManager.STREAM_MUSIC,
+                AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK);
+        focusHeld = result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED;
+        int max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
+        int vol = am.getStreamVolume(AudioManager.STREAM_MUSIC);
+        int floor = max > 0 ? Math.max(1, Math.round(max * 0.6f)) : 0;
+        if (vol < floor) {
+            if (savedVolume < 0) savedVolume = vol;
+            try {
+                am.setStreamVolume(AudioManager.STREAM_MUSIC, floor, 0);
+                Log.i(TAG, "media volume " + vol + " -> " + floor + "/" + max + " for speech");
+            } catch (Throwable e) {
+                Log.w(TAG, "could not raise media volume", e);
+            }
+        }
+        Log.i(TAG, "audio focus granted=" + focusHeld + " volume=" + vol + "/" + max);
+    }
+
+    /** Idempotent: only acts when requestAudioFocus() actually moved the slider. */
+    private void restoreVolume() {
+        if (savedVolume < 0) return;
+        int prev = savedVolume;
+        savedVolume = -1;
+        AudioManager am = (AudioManager) getContext().getSystemService(Context.AUDIO_SERVICE);
+        if (am == null) return;
+        try {
+            am.setStreamVolume(AudioManager.STREAM_MUSIC, prev, 0);
+            Log.i(TAG, "media volume restored to " + prev);
+        } catch (Throwable e) {
+            Log.w(TAG, "could not restore media volume", e);
+        }
+    }
+
+    private void abandonFocus() {
+        if (!focusHeld) return;
+        AudioManager am = (AudioManager) getContext().getSystemService(Context.AUDIO_SERVICE);
+        if (am != null) am.abandonAudioFocus(focusListener);
+        focusHeld = false;
+    }
+
+    private void resolveSpeak(PluginCall call, boolean ok, boolean stopped, String reason) {
         JSObject ret = new JSObject();
         ret.put("ok", ok);
         if (stopped) ret.put("stopped", true);
+        if (reason != null) ret.put("reason", reason);
+        Log.i(TAG, "resolve ok=" + ok + " stopped=" + stopped + " reason=" + reason);
+        // "interrupted" is immediately followed by the next line: keep the
+        // borrowed level so the slider does not flicker between sentences.
+        if (!"interrupted".equals(reason)) restoreVolume();
         call.resolve(ret);
+    }
+
+    /**
+     * The handset decides which Chinese its TTS engine ships with. Xiaomi's
+     * MIUI engine reports LANG_NOT_SUPPORTED for zh-HK and zh-TW but speaks
+     * zh-CN happily, so a Cantonese request used to end in total silence.
+     * Always finish on a voice that exists: exact locale first, then Mandarin,
+     * then the other Chinese variant.
+     */
+    private int applyBestLocale(Locale requested) {
+        int availability = tts.setLanguage(requested);
+        Log.i(TAG, "setLanguage(" + requested + ")=" + availability);
+        if (isLocaleUsable(availability)) return availability;
+        if (!"zh".equals(requested.getLanguage())) return availability;
+
+        Locale[] candidates = isCantonese(queuedLocale)
+                ? new Locale[] { Locale.SIMPLIFIED_CHINESE, Locale.TRADITIONAL_CHINESE }
+                : new Locale[] { Locale.TRADITIONAL_CHINESE, Locale.SIMPLIFIED_CHINESE };
+        for (Locale candidate : candidates) {
+            int next = tts.setLanguage(candidate);
+            Log.i(TAG, "fallback setLanguage(" + candidate + ")=" + next);
+            if (isLocaleUsable(next)) return next;
+        }
+        return availability;
+    }
+
+    private static boolean isLocaleUsable(int availability) {
+        return availability != TextToSpeech.LANG_MISSING_DATA
+                && availability != TextToSpeech.LANG_NOT_SUPPORTED;
     }
 
     private static boolean isCantonese(String locale) {
@@ -488,12 +719,10 @@ public class AuraNativePlugin extends Plugin {
 
     @Override
     protected void handleOnDestroy() {
-        if (tts != null) {
-            tts.stop();
-            tts.shutdown();
-            tts = null;
-        }
-        ttsReady = false;
+        if (tts != null) tts.stop();
+        cancelWatchdogs();
+        abandonFocus();
+        shutdownTts();
         super.handleOnDestroy();
     }
 

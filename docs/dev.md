@@ -146,7 +146,7 @@ grep -rl "auragba" backend --include=*.py --include=*.txt --include=*.md | \
 | 能力 | 位置 | 现状 |
 |---|---|---|
 | 数字人 Canvas-2D + 口型 | [Avatar.tsx](https://github.com/Warpshlczy/MircoCare-GBA/blob/main/web/src/components/Avatar.tsx) | 眨眼/呼吸/嘴高 = `level`；props 仅 `state`/`level`/`size` |
-| 语音 TTS/STT/振幅表 | [audio.ts](https://github.com/Warpshlczy/MircoCare-GBA/blob/main/web/src/lib/audio.ts) | 原生 `AuraNative.speak` 优先、Web Speech 回退；小男孩音色 `BOY_VOICE = { pitch 1.35, rate 0.9 }`；`zh-CN` 用普通话，其余 `zh-HK` |
+| 语音 TTS/STT/振幅表 | [audio.ts](https://github.com/Warpshlczy/MircoCare-GBA/blob/main/web/src/lib/audio.ts) | 原生 `AuraNative.speak` 优先、Web Speech 回退；小男孩音色 `BOY_VOICE = { pitch 1.35, rate 0.9 }`；请求 `zh-HK`，引擎不支持时回落 `zh-CN` 保证有声（见 §2.3 A3） |
 | 前台唤醒词 | [useWakeWord.ts](https://github.com/Warpshlczy/MircoCare-GBA/blob/main/web/src/hooks/useWakeWord.ts) | 命中即停识别并回调 |
 | 后台上锁唤醒 | [WakeListenService.java](https://github.com/Warpshlczy/MircoCare-GBA/blob/main/web/android/app/src/main/java/com/auragba/app/WakeListenService.java) | 前台服务 + `SpeechRecognizer` 循环 |
 | 四条主动开口 | [page.tsx](https://github.com/Warpshlczy/MircoCare-GBA/blob/main/web/src/app/page.tsx) | 唤醒回调 / boot 每日签到 / 回前台 20s 冷却 / 提醒到期 |
@@ -450,9 +450,13 @@ mv public/live2d/model.manifest.json /tmp/ && npm run build; mv /tmp/model.manif
 3. 口型：`visemeFromText` 每字 4 帧 × 65ms（0.85 语速下粤语约 260ms/字），帧形为「开-全开-半开-收」，标点为闭口停顿；`speak()` 用 `setInterval(65)` 推进，Web Speech 的 `SpeechSynthesisUtterance.onboundary` 到来时**按 `charIndex×4` 跳帧校准**（平台事件，零依赖）；原生 TTS（Android `TextToSpeech` / `UtteranceProgressListener`）**不回调 boundary 也不输出 PCM**，因此原生路径只做纯时间推进；`frameMs` 按 `0.85 / rate` 拉伸，保证语速变了嘴形不脱节。不支持 boundary 的设备同样退化为纯时间推进（`ponytail:` 注明天花板）。
 4. **TTS 双路径（A3 新增）**：`audio.ts#speak` 先问 `bridge()`：
    - **原生优先**：`AuraNative.speak(text, locale, BOY_VOICE)` → Android `TextToSpeech`，`setPitch(1.35)` / `setSpeechRate(0.9)`；Promise 一直持有到 `UtteranceProgressListener.onDone/onError`，所以嘴型时间线与真实播报同起同止。
+   - **线程**：`TextToSpeech` 的构造与全部 `PluginCall` 回调都 `post` 到主线程（`Handler(Looper.getMainLooper())`）。在 Capacitor 的插件线程里构造会让初始化回调永远不回，`speak` 的 Promise 挂死、前端永久停在 `speaking`——这是真机无声的第一层原因。
+   - **语言协商**：MIUI 自带引擎（`com.xiaomi.mibrain.speech`）对 `zh-HK` / `zh-TW` 均返回 `LANG_NOT_SUPPORTED(-2)`，只有 `zh-CN` 可用。`applyBestLocale()` 在请求不可用时回退到另一支中文，粤语请求**优先回退 `zh-CN`**——宁可用普通话音色念粤语书面文本，也不静默。旧版回退到 `zh-TW` → `lang_missing` → 落到 WebView 的 Web Speech（Android WebView 无本地合成）→ 双重静默。
+   - **看门狗（保证必有结果）**：5s 初始化看门狗、4s `onStart` 看门狗、`max(8s, 文字数×700ms+6s)` 的 `onDone` 看门狗。任何一个超时都以 `{ok:false, reason}` resolve，绝不挂死 Promise；`reason` 取值 `empty_text / init_failed / init_timeout / lang_missing / speak_error / no_start / engine_error / stopped / interrupted`，真机排查直接看 `adb logcat -s AuraTTS`。
+   - **出声链路**：`AudioAttributes(USAGE_MEDIA, CONTENT_TYPE_SPEECH)` + `AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK`；媒体音量低于 60% 时临时抬到 60%（**记住原值，一句说完立刻还原**）。真机实测 10/30 档只有 −29 dB（`dumpsys media.audio_flinger` 的 `PortVol dB`），老人听感等同无声；抬到 18/30 后同一句是 −14 dB（+15 dB）。真机验证以引擎进程出现 `AudioTrack usage=USAGE_MEDIA content=CONTENT_TYPE_SPEECH … OUT_SPEAKER` 且 `Underruns 0`、`FrmRdy>0`、PortVol 明显高于 −29 dB 为准，不以 `onDone` 为准。
    - **Web Speech 回退**：无原生桥、`ok:false`（无引擎/无该语言）、抛异常时走 `SpeechSynthesisUtterance`，`rate/pitch` 用同一份 `BOY_VOICE`，音色在候选里优先挑 `child/kid/girl/female/…` 的年轻嗓音。
    - **打断**：`cancelSpeech()` 同时 `speechSynthesis.cancel()` 与 `stopSpeak()`；原生返回 `{ok:false, stopped:true}` 表示「是我们主动打断」，JS **不得**回退去重说（`ponytail:` 已在 `native.ts` 注释）。
-   - **隐私**：TTS 文本全程留在端上，不接任何云端童声 API。
+   - **隐私**：TTS 文本全程留在端上，不接任何云端童声 API。**已知风险**：小米引擎 `TtsEngineProcessor` 会先试云端合成（`onlyOffline: 1500` 超时）再回落本地，联网时长者文本可能经过小米云 TTS；符合 PDPO 数据最小化需后续强制离线或换成纯端内引擎（B/C 侧评估）。
 5. L2 Canvas 修复：`reduced-motion` 只关掉位移（呼吸、前倾），**眨眼与嘴照常**（修 §2.0 缺陷①）；聆听时轻微前倾 + 瞳孔朝中心。
 6. 单击数字人 = 重说上一句（适老化高频需求）；长按 1s = 取消播报并进入聆听，播报「你想講咩？」；长按期间不触发任何播报（issue #1 第 2 问）。
 
