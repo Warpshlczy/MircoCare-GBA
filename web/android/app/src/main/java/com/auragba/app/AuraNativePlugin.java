@@ -533,6 +533,13 @@ public class AuraNativePlugin extends Plugin {
         cancelWatchdogs();
         requestAudioFocus();
 
+        // Tell the background wake listener what it is about to hear. Without
+        // this it matched 「我係憶伴」 from our own greeting, took it as a wake
+        // word and shut itself down (2026-10-25). Placed AFTER the interruption
+        // of the previous line so the ordering is end-old -> start-new; the
+        // service's own RUNNING check keeps this a no-op when wake is off.
+        WakeListenService.notifySpeakStart(getContext(), queuedText);
+
         // 1) the neural child voice, when the model for this locale is loaded
         NeuralTts n = ensureNeural();
         if (n != null && n.isReadyFor(queuedLocale)) {
@@ -906,6 +913,9 @@ public class AuraNativePlugin extends Plugin {
     }
 
     private void resolveSpeak(PluginCall call, boolean ok, boolean stopped, String reason) {
+        // Every speak call exits here, so this is the one place that can promise
+        // the wake listener stops treating our words as wake words.
+        WakeListenService.notifySpeakEnd(getContext());
         JSObject ret = new JSObject();
         ret.put("ok", ok);
         if (stopped) ret.put("stopped", true);

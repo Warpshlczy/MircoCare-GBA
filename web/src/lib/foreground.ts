@@ -84,6 +84,12 @@ export function planForeground(reason: ForegroundReason, locale: Locale): Foregr
   switch (reason) {
     case "widget":
       return { kind: "listen", say: copy.widget };
+    case "wake":
+      // He said the assistant's name WHILE it was talking. That is a request to
+      // stop and listen, so: open the mic, say nothing. It is the only
+      // listen-with-no-greeting plan on purpose — a "我喺度" here would talk over
+      // the very sentence he just interrupted, and delay the mic by ~1s.
+      return { kind: "listen", say: "" };
     case "alarm":
       return { kind: "speak", say: copy.alarm };
     case "reminder":
