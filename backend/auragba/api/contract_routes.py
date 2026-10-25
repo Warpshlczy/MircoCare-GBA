@@ -64,7 +64,10 @@ _DEMO_CARD = {
     "allergies": ["青霉素"],
     "chronicConditions": ["高血压", "2 型糖尿病"],
     "medications": ["氨氯地平", "二甲双胍"],
-    "emergencyContact": {"name": "陳小明（儿子）", "phone": "+852 9000 0000"},
+    # Demo seed only: the phone MUST stay empty. A dialable fake number would be
+    # pre-filled by the client's SOS fallback and dialled in a live demo; an empty
+    # number makes the senior hear "未有屋企人嘅電話，叫屋企人設定一次".
+    "emergencyContact": {"name": "陳小明", "phone": ""},
 }
 
 
