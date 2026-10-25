@@ -64,15 +64,23 @@ export function inCircle(pt: LatLng, center: LatLng, radiusM: number): boolean {
  */
 export interface Presence {
   inside: boolean;
-  /** when the current *accepted* state began */
+  /** when the current *accepted* state began (= departure time when outside) */
   since: number;
   /** last time an away-alert fired (0 = never) */
   lastAlertAt: number;
   pending: { inside: boolean; since: number } | null;
+  /**
+   * Id of the `exit` row already written for THIS outing, null when at home.
+   * Persisted with the rest of `Presence`, so a cold start 40 minutes into a
+   * walk does not open a second outing row.
+   */
+  exitId?: string | null;
+  /** true once that exit was escalated to `alert: true` — never escalates twice. */
+  exitAlerted?: boolean;
 }
 
 export function initialPresence(inside: boolean, at: number): Presence {
-  return { inside, since: at, lastAlertAt: 0, pending: null };
+  return { inside, since: at, lastAlertAt: 0, pending: null, exitId: null, exitAlerted: false };
 }
 
 /**
@@ -102,6 +110,11 @@ export function observe(
 /**
  * True when the senior has been outside long enough that a caregiver should
  * hear about it. Pure: the caller records the alert with `markAlerted()`.
+ *
+ * NB: this is only the *threshold + cooldown* test. It says nothing about
+ * whether this outing was already escalated — `stepFence` owns that guard via
+ * `Presence.exitAlerted`, because "away 60 min" stays true for every sample of
+ * a three-hour walk and would otherwise page the family every cooldown.
  */
 export function shouldAlert(
   state: Presence,
@@ -128,46 +141,92 @@ export function formatDistance(distanceM: number): string {
 
 export interface FenceStep {
   presence: Presence;
-  /** the event to report for this sample, or null */
-  event: GeofenceEvent | null;
+  /**
+   * 0–2 events for this sample, `exit` always before `enter`. Two only on the
+   * single sample that accepts his return home after leaving: the silent exit
+   * bookkeeping and the closing `enter` are different facts about the same trip.
+   */
+  events: GeofenceEvent[];
 }
 
 /**
- * One sample -> updated presence + at most one event.
+ * One sample -> updated presence + the events this sample owes.
  *
- * Two deliberate rules:
- *  - An `enter` event is emitted ONLY when the matching `exit` was actually
- *    alerted (i.e. he was away long enough for the family to be paged). Paging
- *    someone about a 10-minute trip to the shop is noise, and noise is what
- *    makes families mute the app before the day it matters.
- *  - `enter` is emitted on the transition itself, so ordinary samples while he
- *    is at home produce nothing at all.
+ * The rules, and why each one exists:
+ *
+ *  1. **Departure is reported silently, immediately** (`alert: false`). The
+ *     weekly report needs every outing, not just the alarming ones; walking out
+ *     less often is one of the earliest changes in Alzheimer's, and "0 outings"
+ *     for someone who goes to the market daily is a false reading. Nobody's
+ *     phone rings for it.
+ *  2. **Escalation reuses the same id** (`gf-exit-<departure>`) with
+ *     `alert: true` once `awayAlertMs` has passed. C's `/geofence/events`
+ *     replaces the row and pages once, so the count stays one per outing and an
+ *     outbox replay cannot page twice. The row's `at` stays the departure time.
+ *  3. **Every return closes the loop** with an `enter` carrying `minutesAway`.
+ *     Before this change only outings long enough to page the family had one, so
+ *     "away minutes this week" silently covered a subset of outings.
+ *  4. **`enter` is still only emitted on the transition itself** — ordinary
+ *     samples while he is at home produce nothing at all.
+ *  5. A first-ever sample (`prev === null`) never emits: with no baseline we do
+ *     not know whether he is leaving or the fix is simply wrong.
  */
 export function stepFence(
   prev: Presence | null,
   sample: { at: number; distanceM: number },
   policy: FencePolicy = FENCE_POLICY
 ): FenceStep {
-  const presence = observe(prev, sample, policy);
+  const observed = observe(prev, sample, policy);
   const distanceM = Math.max(0, Math.round(sample.distanceM));
+  const events: GeofenceEvent[] = [];
+  let presence = observed;
 
-  if (shouldAlert(presence, sample.at, policy)) {
-    return {
-      presence: markAlerted(presence, sample.at),
-      event: { id: `gf-exit-${sample.at}`, at: sample.at, kind: "exit", distanceM },
-    };
+  // 1. The flip into "outside" has just survived the debounce window.
+  if (prev !== null && prev.inside === true && observed.inside === false) {
+    const id = `gf-exit-${observed.since}`;
+    presence = { ...presence, exitId: id, exitAlerted: false };
+    events.push({ id, at: observed.since, kind: "exit", distanceM, alert: false });
   }
 
-  // Back home, and the family was told he had left: close the loop for them.
-  const wasOut = prev !== null && prev.inside === false;
-  const exitWasAlerted = wasOut && prev.lastAlertAt >= prev.since;
-  if (wasOut && exitWasAlerted && presence.inside) {
+  // 2. Same outing, now long enough that a caregiver should be told.
+  if (presence.exitAlerted !== true && shouldAlert(presence, sample.at, policy)) {
+    const id = presence.exitId ?? `gf-exit-${presence.since}`;
+    presence = { ...markAlerted(presence, sample.at), exitId: id, exitAlerted: true };
+    // `distanceM` here is how far he is NOW — the family wants "1.2 公里 away",
+    // not "500 米, the instant he stepped over the fence".
+    events.push({ id, at: presence.since, kind: "exit", distanceM, alert: true });
+  }
+
+  // 3. Back home: close the trip for the weekly report, on the transition only.
+  if (prev !== null && prev.inside === false && observed.inside === true) {
     const minutesAway = Math.max(0, Math.round((sample.at - prev.since) / 60_000));
-    return {
-      presence,
-      event: { id: `gf-enter-${sample.at}`, at: sample.at, kind: "enter", distanceM, minutesAway },
-    };
+    events.push({
+      id: `gf-enter-${sample.at}`,
+      at: sample.at,
+      kind: "enter",
+      distanceM,
+      minutesAway,
+      alert: false,
+    });
+    presence = { ...presence, exitId: null, exitAlerted: false };
   }
 
-  return { presence, event: null };
+  return { presence, events };
+}
+
+/**
+ * The id the OUTBOX should queue this event under.
+ *
+ * WHY THIS IS NOT JUST `event.id`: `outboxStore.enqueue` is idempotent by queue
+ * id and returns the pending row untouched when one already exists. The silent
+ * departure row and its escalation deliberately share a payload id (so the
+ * server replaces one row), so reusing that id here would make the escalation a
+ * no-op whenever the silent copy is still queued — i.e. exactly when the phone
+ * has been offline for the hour, which is when the page matters most. Suffixing
+ * the queue id keeps both queued; the server's `alert` rule collapses them.
+ *
+ * Pure and stable, so replaying the same sample still de-duplicates.
+ */
+export function fenceQueueId(event: GeofenceEvent): string {
+  return `${event.id}:${event.alert ? "alert" : "silent"}`;
 }

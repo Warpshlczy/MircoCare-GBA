@@ -102,29 +102,52 @@ export interface SosAck {
 }
 
 /**
- * One crossing of the home fence (mirrors `GeofenceEvent` in contract.py:74).
+ * One crossing of the home fence (mirrors `GeofenceEvent` in contract.py:82).
  * Event-shaped, not a daily rollup: the time point IS the signal, so the backend
  * stores one doc per id and a replay overwrites instead of counting twice.
  * Deliberately carries no coordinate — distance from home is all the family
  * needs to act, and a trail of positions is the highest-risk data we could keep.
+ *
+ * EVERY outing produces ONE `exit` row and ONE `enter` row. That is a deliberate
+ * change (issue #2 §2.2, C's `alert` field): the weekly report counts outings,
+ * and an outing the family was never paged about is still evidence about how
+ * much the person goes out — which is one of the earliest things that changes in
+ * Alzheimer's. Suppressing those rows would report "0 outings" for a person who
+ * goes to the market every morning.
  */
 export interface GeofenceEvent {
   id: string;
+  /**
+   * When he crossed the fence. For an `exit` this is the DEPARTURE time, not the
+   * moment the family was paged (that can be an hour later): the weekly report
+   * buckets by `at`, and a trip that straddles midnight must land on the day he
+   * left. The id is derived from it too (`gf-exit-<departure>`), so the silent
+   * row and the escalated row are the same row on the server.
+   */
   at: number;
   kind: "exit" | "enter";
+  /** Rough distance from home at the moment this row was reported. */
   distanceM: number;
   /**
-   * Set on `enter` ONLY — how long that outing lasted. An `exit` is emitted the
-   * moment the absence becomes an alert, so the trip's length does not exist
-   * yet; a consumer that sums `minutesAway` over `exit` rows always gets zero
-   * (this is exactly the bug in the weekly report, issue #4 P1).
+   * Set on `enter` ONLY — how long that outing lasted.
    *
-   * Consequence worth stating: only outings long enough to page the family
-   * (`awayAlertMs`, currently 60 min) produce a pair of events. A 20-minute
-   * trip to the market leaves no trace, so "outings this week" means "long
-   * outings", not "all outings".
+   * EVERY outing now gets a duration, because the matching `exit` is always
+   * emitted (silently) at departure. An `exit` still cannot carry it: at
+   * departure the trip has not finished, and the escalated copy is written
+   * before he is back.
    */
   minutesAway?: number;
+  /**
+   * Whether this crossing should page the family. `false` = stored for the
+   * weekly report, nobody is woken up. Only absences past `awayAlertMs`
+   * (60 min) escalate to `true`, and the escalation reuses the same id so the
+   * server replaces the row instead of counting a second outing.
+   *
+   * Missing on payloads written by builds before this field existed; the server
+   * defaults those to `true`, which is the old "only long absences exist"
+   * behaviour. Never read it back from the outbox — it is write-only.
+   */
+  alert: boolean;
 }
 
 export interface HealthCard {

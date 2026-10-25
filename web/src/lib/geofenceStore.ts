@@ -23,7 +23,7 @@
 // evening still reaches the family once the phone reconnects.
 
 import { enqueue } from "./outboxStore.ts";
-import { FENCE_POLICY, haversineM, initialPresence, stepFence } from "./geofence.ts";
+import { FENCE_POLICY, fenceQueueId, haversineM, initialPresence, stepFence } from "./geofence.ts";
 import type { FencePolicy, Geofence, LatLng, Presence } from "./geofence.ts";
 import { get, del, put } from "./db.ts";
 import { bridge } from "./native.ts";
@@ -97,8 +97,8 @@ async function readPresence(): Promise<Presence | null> {
 }
 
 export interface FenceSampleResult {
-  /** null when the sample was skipped (no home / no location source / bad fix) */
-  event: GeofenceEvent | null;
+  /** empty when the sample was skipped (no home / no location source / bad fix) */
+  events: GeofenceEvent[];
   skipped?: "no-home" | "no-native" | "no-fix" | "inaccurate";
   distanceM?: number;
   /** which source produced the fix — diagnostics only, never leaves the device */
@@ -149,13 +149,14 @@ function browserFix(timeoutMs = 10_000): Promise<Fix | null> {
 }
 
 /**
- * Takes one fix, folds it into the presence machine, and queues the event if
- * one is due. Safe to call at any cadence — `stepFence` is idempotent per
- * `at`, and the event id is derived from the sample time.
+ * Takes one fix, folds it into the presence machine, and queues whatever the
+ * sample owes (at most one `exit` + one `enter`). Safe to call at any cadence —
+ * `stepFence` is idempotent per `at`, and every event id is derived from the
+ * trip's own timestamps rather than from this call.
  */
 export async function sampleFence(now = Date.now(), policy: FencePolicy = FENCE_POLICY): Promise<FenceSampleResult> {
   const home = await readHome();
-  if (!home) return { event: null, skipped: "no-home" };
+  if (!home) return { events: [], skipped: "no-home" };
 
   const api = bridge();
   let fix: Fix | null = null;
@@ -172,11 +173,11 @@ export async function sampleFence(now = Date.now(), policy: FencePolicy = FENCE_
     source = "browser";
   }
   if (!fix) {
-    return { event: null, skipped: api ? "no-fix" : "no-native" };
+    return { events: [], skipped: api ? "no-fix" : "no-native" };
   }
   if (fix.accuracy > MAX_ACCURACY_M) {
     // Keep the previous presence untouched: a bad fix is not evidence of moving.
-    return { event: null, skipped: "inaccurate" };
+    return { events: [], skipped: "inaccurate" };
   }
 
   const distanceM = haversineM({ lat: fix.lat, lng: fix.lng }, home.center);
@@ -185,11 +186,14 @@ export async function sampleFence(now = Date.now(), policy: FencePolicy = FENCE_
 
   await put<PresenceDoc>("meta", { id: PRESENCE_KEY, presence: step.presence, at: now }).catch(() => {});
 
-  if (step.event) {
-    // Payload id = event id, so an outbox replay cannot page the family twice.
-    await enqueue("geofence", step.event, now);
+  // Queue id is NOT the payload id: the silent departure row and its escalation
+  // share a payload id (server replaces one row), but `enqueue` de-duplicates by
+  // queue id and would silently drop the escalation while the silent copy is
+  // still pending — i.e. after an hour offline. See `fenceQueueId`.
+  for (const event of step.events) {
+    await enqueue("geofence", event, now, fenceQueueId(event));
   }
-  return { event: step.event, distanceM, source };
+  return { events: step.events, distanceM, source };
 }
 
 // --------------------------------------------------------------------------- //
