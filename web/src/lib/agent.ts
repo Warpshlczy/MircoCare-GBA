@@ -14,6 +14,7 @@
 
 import { localCardsFor } from "./cards.ts";
 import { parseIntent } from "./intent.ts";
+import { fitUtterance } from "./speech.ts";
 import { planCalls, refuseReason } from "./toolrun.ts";
 import { TOOLS } from "./tools.ts";
 import type { PlannedStep } from "./toolrun.ts";
@@ -299,20 +300,23 @@ export async function runTurn(utterance: string, deps: AgentDeps): Promise<TurnO
   }
 
   // 6. Assemble the spoken reply.
-  // What actually happened beats what the planner said it would do. A senior
-  // should hear ONE sentence about the device's real action, not the model's
-  // prediction ("好，我帮你记住了") followed by the executor repeating it.
-  // The planner's line is only used when nothing ran at all.
-  const parts: string[] = [];
+  //
+  // 只挑**一句**，不拼接（speech.ts 的第 3 条理由）。
+  // 之前这里是 parts.join(" ")：两个工具都成功时，长者在一次呼吸里听到两件事，
+  // 而且字幕（13–14 字）连第一件都装不下 —— 第二件必然落在可视区外。
+  // 现在"发生了什么"完整留在 `executed`（审计与卡片），"该说哪一句"由
+  // composeReply 按优先级决定，读者只有一个：他本人。
   const doneLines = executed.filter((e) => e.ok && e.message).map((e) => e.message as string);
   const failLines = executed.filter((e) => !e.ok && e.message).map((e) => e.message as string);
-
-  if (executed.length === 0 && res.reply) parts.push(res.reply);
-  if (doneLines.length > 0) parts.push(...doneLines);
-  if (skipped.some((s) => s.reason === "no_executor")) parts.push(pick(copy.notWired));
-  if (failLines.length > 0) parts.push(failLines[0]);
-  else if (executed.some((e) => !e.ok)) parts.push(pick(copy.failed));
-  const reply = parts.join(" ").trim() || (plan.steps.length > 0 ? "" : pick(copy.nothing));
+  const reply = composeReply({
+    doneLines,
+    failLines,
+    executed,
+    skipped,
+    plannerReply: res.reply ?? "",
+    hadSteps: plan.steps.length > 0,
+    locale: deps.locale,
+  });
 
   return {
     handled: true,
@@ -323,4 +327,44 @@ export async function runTurn(utterance: string, deps: AgentDeps): Promise<TurnO
     executed,
     skipped,
   };
+}
+
+export interface ReplyParts {
+  /** 真做成了的朗读行，按执行顺序 */
+  doneLines: string[];
+  /** 失败了但带话的朗读行 */
+  failLines: string[];
+  executed: ExecutedCall[];
+  skipped: SkippedCall[];
+  /** 规划器自己的那句话（可能很长，也可能是"好，我幫你記住"这种空话） */
+  plannerReply: string;
+  hadSteps: boolean;
+  locale: Locale;
+}
+
+/**
+ * 从"这一轮发生了什么"里挑出**一句**给长者听。
+ *
+ * 优先级不是随意的，每条都对应一个长者实际会遇到的场景：
+ *
+ *   ① 做成了 → 报第一件。计划里 sos 排第一（toolrun.ts），所以第一件就是
+ *      最要紧的那件；第二、第三件进 `executed`，需要时看卡片。
+ *   ② 失败 → 报第一条具体原因。"我開唔到撥號，你睇下手機" 让长者知道该动哪里；
+ *      "有啲做唔到" 只会让他再问一次。
+ *   ③ 他自己说了"唔使" → **不说话**。刚刚做完决定的人不需要被告知他做过决定。
+ *   ④ 会做但这台机没接 → 说实话。绝不念规划器的"好，我幫你做咗"。
+ *   ⑤ 规划器只是聊天 / 只推卡 → 用它那句，压成一句。
+ *   ⑥ 有计划但一句都没说成 → 沉默（卡片会解释）。
+ *   ⑦ 完全没有计划 → "我未聽得明"，这就是 `nothing`。
+ */
+export function composeReply(p: ReplyParts): string {
+  const copy = COPY[p.locale];
+  if (p.doneLines.length > 0) return fitUtterance(p.doneLines[0]);
+  if (p.failLines.length > 0) return fitUtterance(p.failLines[0]);
+  if (p.executed.length > 0) return pick(copy.failed);
+  if (p.skipped.some((s) => s.reason === "declined")) return "";
+  if (p.skipped.some((s) => s.reason === "no_executor")) return pick(copy.notWired);
+  if (p.plannerReply) return fitUtterance(p.plannerReply);
+  if (p.hadSteps) return "";
+  return pick(copy.nothing);
 }

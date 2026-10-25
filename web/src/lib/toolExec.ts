@@ -35,6 +35,9 @@ import {
   taskTextFromUtterance,
 } from "./tasks.ts";
 import { formatDistance } from "./geofence.ts";
+// 回读长者自己的话必须截断：任务文本长度由他决定，整句回读可以轻易超过
+// 一个呼吸（speech.ts 的第 4 条理由）。
+import { clip } from "./speech.ts";
 import type { ToolExecResult } from "./agent.ts";
 import type { PlannedStep } from "./toolrun.ts";
 import type { Locale, SosEvent, Task, TaskEvent } from "./types";
@@ -146,9 +149,9 @@ interface Copy {
 // "系统/接口/失败" vocabulary — the senior is a person, not a log reader.
 const COPY: Record<Locale, Copy> = {
   "zh-HK": {
-    taskSaved: (t) => `好，我記低咗：${t}`,
-    taskSavedDue: (t) => `好，我記低咗：${t}，到時我提你。`,
-    taskRepeat: (t) => `你之前已經叫我記過：${t}`,
+    taskSaved: (t) => `好，我記低咗：${clip(t, 8)}`,
+    taskSavedDue: (t) => `好，我記低咗：${clip(t, 6)}，到時我提你。`,
+    taskRepeat: (t) => `你之前已經叫我記過：${clip(t, 6)}`,
     taskEmpty: "我未聽清楚要記咩，你再講一次？",
     taskDone: "好，我記低咗。",
     taskAlreadyDone: (m) => (m <= 0 ? "你啱啱已經確認過喇。" : `你 ${m} 分鐘前已經確認過喇。`),
@@ -164,9 +167,9 @@ const COPY: Record<Locale, Copy> = {
     alarmBadTime: "我聽唔清幾點，你講多次，例如「朝早八點」。",
     alarmFailed: "我設唔到鬧鐘，你睇下手機有冇閂咗鬧鐘權限。",
     noContact: "我部機未有屋企人嘅電話，你叫屋企人設定一次。",
-    strangerContact: (n) => `我冇${n}嘅電話，你叫屋企人幫你打。`,
+    strangerContact: (n) => `我冇${clip(n, 6)}嘅電話，你叫屋企人幫你打。`,
     dialFailed: "我開唔到撥號，你睇下手機。",
-    called: (n) => `好，撥咗${n}嘅電話，你按綠色個掣。`,
+    called: (n) => `好，撥咗${clip(n, 6)}嘅電話，你按綠色個掣。`,
     noHome: "我未知你屋企喺邊，你叫屋企人設定一次。",
     homeNear: "你而家就喺屋企附近。",
     homeFar: (d) => `你而家離屋企大約 ${d}。`,
@@ -176,9 +179,9 @@ const COPY: Record<Locale, Copy> = {
     appFailed: "我開唔到，你睇下手機。",
   },
   "zh-MO": {
-    taskSaved: (t) => `好，我記低咗：${t}`,
-    taskSavedDue: (t) => `好，我記低咗：${t}，到時我提你。`,
-    taskRepeat: (t) => `你之前已經叫我記過：${t}`,
+    taskSaved: (t) => `好，我記低咗：${clip(t, 8)}`,
+    taskSavedDue: (t) => `好，我記低咗：${clip(t, 6)}，到時我提你。`,
+    taskRepeat: (t) => `你之前已經叫我記過：${clip(t, 6)}`,
     taskEmpty: "我未聽清楚要記咩，你再講一次？",
     taskDone: "好，我記低咗。",
     taskAlreadyDone: (m) => (m <= 0 ? "你啱啱已經確認過喇。" : `你 ${m} 分鐘前已經確認過喇。`),
@@ -194,9 +197,9 @@ const COPY: Record<Locale, Copy> = {
     alarmBadTime: "我聽唔清幾點，你講多次，例如「朝早八點」。",
     alarmFailed: "我設唔到鬧鐘，你睇下手機有冇閂咗鬧鐘權限。",
     noContact: "我部機未有屋企人嘅電話，你叫屋企人設定一次。",
-    strangerContact: (n) => `我冇${n}嘅電話，你叫屋企人幫你打。`,
+    strangerContact: (n) => `我冇${clip(n, 6)}嘅電話，你叫屋企人幫你打。`,
     dialFailed: "我開唔到撥號，你睇下手機。",
-    called: (n) => `好，撥咗${n}嘅電話，你按綠色個掣。`,
+    called: (n) => `好，撥咗${clip(n, 6)}嘅電話，你按綠色個掣。`,
     noHome: "我未知你屋企喺邊，你叫屋企人設定一次。",
     homeNear: "你而家就喺屋企附近。",
     homeFar: (d) => `你而家離屋企大約 ${d}。`,
@@ -206,9 +209,9 @@ const COPY: Record<Locale, Copy> = {
     appFailed: "我開唔到，你睇下手機。",
   },
   "zh-CN": {
-    taskSaved: (t) => `好，我记下了：${t}`,
-    taskSavedDue: (t) => `好，我记下了：${t}，到时会提醒你。`,
-    taskRepeat: (t) => `你之前已经让我记过了：${t}`,
+    taskSaved: (t) => `好，我记下了：${clip(t, 8)}`,
+    taskSavedDue: (t) => `好，我记下了：${clip(t, 6)}，到时会提醒你。`,
+    taskRepeat: (t) => `你之前已经让我记过了：${clip(t, 6)}`,
     taskEmpty: "我没听清要记什么，你再说一次？",
     taskDone: "好，我记下了。",
     taskAlreadyDone: (m) => (m <= 0 ? "你刚才已经确认过了。" : `你 ${m} 分钟前已经确认过了。`),
@@ -224,9 +227,9 @@ const COPY: Record<Locale, Copy> = {
     alarmBadTime: "我没听清几点，你再说一次，比如说「早上八点」。",
     alarmFailed: "我设不了闹钟，你看看手机是不是关了闹钟权限。",
     noContact: "我这里还没有家里人的电话，你让家里人设一次。",
-    strangerContact: (n) => `我没有${n}的电话，你让家里人帮你打。`,
+    strangerContact: (n) => `我没有${clip(n, 6)}的电话，你让家里人帮你打。`,
     dialFailed: "我打不开拨号，你看看手机。",
-    called: (n) => `好，拨了${n}的电话，你按绿色的按钮。`,
+    called: (n) => `好，拨了${clip(n, 6)}的电话，你按绿色的按钮。`,
     noHome: "我还不知道你家在哪，你让家里人设一次。",
     homeNear: "你现在就在家附近。",
     homeFar: (d) => `你现在离家大约 ${d}。`,

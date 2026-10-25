@@ -43,6 +43,12 @@ import type { AgentCard, Locale, ReminderItem, Task } from "@/lib/types";
 /** How often to re-probe a backend that is not ready yet (ms). */
 const PROBE_INTERVAL_MS = 30_000;
 
+/**
+ * Tools whose success changes the local task list. The bridge re-reads the
+ * store only for these — a `locate` must not trigger a disk read on every turn.
+ */
+const MUTATING_TOOLS = new Set(["create_task", "complete_task", "defer_task"]);
+
 export interface AgentBridgeDeps {
   locale: Locale;
   reminders: ReminderItem[];
@@ -267,7 +273,13 @@ export function useAgentBridge(deps: AgentBridgeDeps): AgentBridge {
 
       // A mutation happened: re-read so the next turn sends correct openTasks
       // and A's task list stops showing the chore that was just completed.
-      if (out.executed.some((e) => e.ok && (e.name === "create_task" || e.name === "complete_task"))) {
+      //
+      // `defer_task` belongs in this list: it rewrites `dueAt` + `deferredAt`.
+      // Leaving it out kept the old due time in `tasks` state, so the very next
+      // turn told the planner the wrong deadline and A's board showed a time
+      // that had already been pushed back — the senior hears "10 分鐘後提你"
+      // while the screen still says 14:00.
+      if (out.executed.some((e) => e.ok && MUTATING_TOOLS.has(e.name))) {
         try {
           setTasks(await listTasks());
         } catch {

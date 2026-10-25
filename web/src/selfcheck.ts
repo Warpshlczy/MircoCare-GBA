@@ -94,7 +94,17 @@ import {
 } from "./lib/behaviour.ts";
 import { makeSender, behaviourBody, telemetryBatch } from "./lib/outboxRunner.ts";
 import type { OutboxTransport } from "./lib/outboxRunner.ts";
-import { runTurn, appendTurn, isLlmReady, MAX_RECENT_TURNS } from "./lib/agent.ts";
+import { runTurn, appendTurn, isLlmReady, composeReply, MAX_RECENT_TURNS } from "./lib/agent.ts";
+import {
+  spokenLength,
+  splitSentences,
+  firstSentence,
+  overBudget,
+  clip,
+  fitUtterance,
+  SPEECH_BUDGET,
+  SPEECH_HARD_LIMIT,
+} from "./lib/speech.ts";
 import type { AgentDeps } from "./lib/agent.ts";
 import { createToolRunner, emergencyNumber, alarmAtFrom, alarmWhenLabel } from "./lib/toolExec.ts";
 import {
@@ -2242,6 +2252,159 @@ assert.equal(magnitude(3, 4, 0), 5);
   assert.equal(stats.deferredCount, 0, "yesterday's deferral must not show up today");
   const statsYesterday = taskStatsForDay([deferredYesterday], dayKey(NOW - 86_400_000));
   assert.equal(statsYesterday.deferredCount, 1);
+}
+
+// --- 一句话原则：语音预算（B, P0 —— 见 lib/speech.ts 的来由） ----------------
+//
+// 这一段的断言全部锚在"长者能不能听完"上，不是锚在文案措辞上（措辞会改，
+// 呼吸长度不会）。任何一条挂掉，说明我们又打算让他在一次呼吸里听两件事。
+{
+  const T = new Date(2026, 9, 25, 9, 0, 0).getTime();
+
+  // 计数：空白不出声，所以不计
+  assert.equal(spokenLength("好，我記低咗：買藥"), 9);
+  assert.equal(spokenLength("  我 仲 未  "), 3, "空格不出声，不计入长度");
+  assert.equal(spokenLength(""), 0);
+  assert.equal(spokenLength("我仲未接到屋企人。你打 999。"), 15, "数字按字符计");
+
+  // 切句：句读留在句子里，空句不产出
+  assert.deepEqual(splitSentences("我仲未接到屋企人。你打 999。"), [
+    "我仲未接到屋企人。",
+    "你打 999。",
+  ]);
+  assert.deepEqual(splitSentences(""), []);
+  // 没有句读的整段仍然是一个"句"——不会被切碎
+  assert.equal(firstSentence("好，我記低咗：買藥"), "好，我記低咗：買藥");
+  assert.equal(firstSentence("我仲未接到屋企人。你打 999。"), "我仲未接到屋企人。");
+
+  // clip：回读长者原话必须截断，而且截断要看得见
+  const longTask = "幫我打電話去診所問下星期四覆診要唔要帶舊嘅藥單同埋身份證";
+  const clipped = clip(longTask, 8);
+  assert.ok(spokenLength(clipped) <= 9, `clip 要守住预算，实际 ${spokenLength(clipped)}: ${clipped}`);
+  assert.ok(clipped.endsWith("…"), "截断必须带省略号，否则长者以为这就是全部");
+  // 有句读时优先落在句读上，不在词中间切
+  assert.equal(clip("聽日要去診所覆診，記得帶藥單同身份證", 12), "聽日要去診所覆診…");
+  assert.equal(clip("買藥", 8), "買藥", "没超长就不动它");
+
+  // fitUtterance：模型给的回答不可编译期约束，运行时压成一句
+  const rambling = "你今日聽得幾好，不過我見你講嘢少咗少少。要唔要我幫你打電話畀阿明，等佢今晚同你傾下偈？";
+  assert.equal(fitUtterance(rambling), "你今日聽得幾好，不過我見你講嘢少咗少少。");
+  const oneBreathless =
+    "我見你今朝到而家都未同我講過一句說話所以我唔係好知你今日身體點樣不如你話我知邊度唔舒服";
+  assert.ok(
+    spokenLength(fitUtterance(oneBreathless)) <= SPEECH_HARD_LIMIT,
+    "一句到底的长句必须在运行时被截到兜底线以内"
+  );
+
+  // composeReply 的优先级：每一档对应一个长者真的会遇到的场景
+  const base = {
+    doneLines: [] as string[],
+    failLines: [] as string[],
+    executed: [] as { name: string; ok: boolean; message?: string }[],
+    skipped: [] as { name: string; reason: "declined" | "no_executor" | "invalid" }[],
+    plannerReply: "",
+    hadSteps: false,
+    locale: "zh-HK" as const,
+  };
+
+  // ① 两个工具都成功 → 只报第一件（计划里 sos 排第一，所以"第一件"最要紧）
+  const twoDone = composeReply({
+    ...base,
+    doneLines: ["好，我記低咗：買藥", "好，撥咗陳小明嘅電話，你按綠色個掣。"],
+    executed: [
+      { name: "create_task", ok: true },
+      { name: "call_contact", ok: true },
+    ],
+    hadSteps: true,
+  });
+  assert.equal(twoDone, "好，我記低咗：買藥", "不许把两句拼成一句让他在一口气里听完");
+
+  // ② 成功 + 有个工具没接 → 只说成功的那件，不追加"呢個功能仲未接好"
+  assert.equal(
+    composeReply({
+      ...base,
+      doneLines: ["好，我記低咗：買藥"],
+      executed: [{ name: "create_task", ok: true }],
+      skipped: [{ name: "send_message", reason: "no_executor" }],
+      hadSteps: true,
+    }),
+    "好，我記低咗：買藥"
+  );
+
+  // ③ 他自己说了"唔使" → 沉默。不把他刚做的决定念回给他
+  assert.equal(
+    composeReply({
+      ...base,
+      skipped: [{ name: "call_contact", reason: "declined" }],
+      plannerReply: "好，我幫你打電話畀阿明。",
+      hadSteps: true,
+    }),
+    "",
+    "declined 之后不许再说话"
+  );
+
+  // ④ 规划器只是聊天 → 用它的句子，但要压成一句
+  assert.equal(composeReply({ ...base, plannerReply: rambling }), "你今日聽得幾好，不過我見你講嘢少咗少少。");
+
+  // ⑤ 完全没有计划 → "我未聽得明"那一池
+  assert.ok(composeReply(base).length > 0, "nothing 池必须有话说");
+
+  // 自有文案的字数预算：连抽 40 次把 3 条随机池都覆盖到
+  for (const locale of ["zh-HK", "zh-CN", "zh-MO"] as const) {
+    const seen = new Set<string>();
+    for (let i = 0; i < 40; i += 1) {
+      const lines = [
+        composeReply({ ...base, locale, executed: [{ name: "x", ok: false }], hadSteps: true }),
+        composeReply({ ...base, locale, skipped: [{ name: "send_message", reason: "no_executor" }], hadSteps: true }),
+        composeReply({ ...base, locale }),
+      ];
+      for (const line of lines) {
+        if (!line) continue;
+        seen.add(line);
+        const len = spokenLength(line);
+        assert.ok(
+          overBudget(line, SPEECH_BUDGET) === null,
+          `${locale} 的提示语「${line}」有 ${len} 字，超过 ${SPEECH_BUDGET} 字的一个呼吸`
+        );
+      }
+    }
+    assert.ok(seen.size >= 6, `${locale} 的随机池覆盖不足（只抽到 ${seen.size} 条），断言可能空转`);
+  }
+
+  // 工具朗读行：回读长者原话之后仍在预算内（这是最容易失控的一类）
+  const budgetDeps = {
+    locale: "zh-HK" as const,
+    now: T,
+    tasks: [] as Task[],
+    saveTask: async () => {},
+  };
+  const savedLong = await createToolRunner(budgetDeps).run({
+    name: "create_task",
+    risk: "safe",
+    args: { text: longTask },
+    say: "",
+  });
+  assert.equal(savedLong.ok, true);
+  assert.ok(
+    spokenLength(savedLong.message ?? "") <= SPEECH_BUDGET,
+    `回读任务名超预算（${spokenLength(savedLong.message ?? "")} 字）：${savedLong.message}`
+  );
+
+  const strangerLong = await createToolRunner({
+    ...budgetDeps,
+    contacts: async () => [{ name: "陳小明", phone: "+85261234567" }],
+    dial: async () => true,
+  }).run({
+    name: "call_contact",
+    risk: "confirm",
+    args: { name: "陳大文陳大文陳大文" },
+    say: "",
+  });
+  assert.equal(strangerLong.ok, false);
+  assert.ok(
+    spokenLength(strangerLong.message ?? "") <= SPEECH_BUDGET,
+    `念错名字也超预算：${strangerLong.message}`
+  );
 }
 
 console.log("selfcheck: OK");
