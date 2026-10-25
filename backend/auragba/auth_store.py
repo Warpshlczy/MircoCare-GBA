@@ -324,6 +324,40 @@ class AuthStore:
             for row in rows
         ]
 
+    def remove_relation(self, family_account_id: str, senior_device_id: str) -> bool:
+        """Revoke one family member's access to one senior device."""
+        with self._connect() as db:
+            cur = db.execute(
+                "DELETE FROM family_relations WHERE family_account_id = ? AND senior_device_id = ?",
+                (family_account_id, senior_device_id),
+            )
+        return cur.rowcount > 0
+
+    def delete_account(self, account_id: str) -> dict[str, Any] | None:
+        """Delete one account and every pairing/relationship row it owns.
+
+        Returns the (role, deviceId) of the deleted row so the caller can erase
+        the pseudonymous device store for a senior. The signed token becomes
+        invalid as soon as the account row is gone.
+        """
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT role, device_id FROM accounts WHERE id = ?", (account_id,)
+            ).fetchone()
+            if not row:
+                return None
+            db.execute("BEGIN IMMEDIATE")
+            db.execute(
+                "DELETE FROM family_relations WHERE family_account_id = ? OR senior_account_id = ?",
+                (account_id, account_id),
+            )
+            db.execute("DELETE FROM pairing_codes WHERE senior_account_id = ?", (account_id,))
+            db.execute("DELETE FROM pairing_attempts WHERE family_account_id = ?", (account_id,))
+            db.execute("DELETE FROM family_pairing_limits WHERE family_account_id = ?", (account_id,))
+            db.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
+            db.commit()
+        return {"role": row["role"], "deviceId": row["device_id"]}
+
     def family_accounts_for_device(self, senior_device_id: str) -> list[str]:
         """Family account ids bound to a senior device (used by notifications)."""
         with self._connect() as db:

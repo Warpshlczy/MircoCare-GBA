@@ -25,6 +25,7 @@ from ..baseline import compute_baseline
 from ..config import settings
 from ..contract import Locale, ReportCount, ReportEvidence, ReportSection, WeeklyReport
 from ..store import Store
+from ..timeutil import day_key
 
 DAY_MS = 86_400_000
 WEEK_MS = 7 * DAY_MS
@@ -119,7 +120,9 @@ _TEXTS: dict[str, dict[str, Any]] = {
             "outings": "外出次数",
             "outingsValue": "{n} 次",
             "awayMinutes": "外出时长",
-            "awayMinutesValue": "{minutes} 分钟（{n} 次）",
+            "awayMinutesValue": "{minutes} 分钟",
+            "awayMinutesCoveredValue": "{minutes} 分钟（{n} 次）",
+            "awayMinutesUnderMinute": "不足 1 分钟",
             "proxy": "听力/视觉代理",
             "proxyValue": "能听清 {hearing}；能看清 {vision}",
             "proxyNote": "代理指标，非听力学/视力检查；数值越高表示越常听清/看清，不参与风险分。",
@@ -246,7 +249,9 @@ _TEXTS: dict[str, dict[str, Any]] = {
             "outings": "外出次數",
             "outingsValue": "{n} 次",
             "awayMinutes": "外出時長",
-            "awayMinutesValue": "{minutes} 分鐘（{n} 次）",
+            "awayMinutesValue": "{minutes} 分鐘",
+            "awayMinutesCoveredValue": "{minutes} 分鐘（{n} 次）",
+            "awayMinutesUnderMinute": "不足 1 分鐘",
             "proxy": "聽力/視覺代理",
             "proxyValue": "能聽清 {hearing}；能看清 {vision}",
             "proxyNote": "代理指標，非聽力學/視力檢查；數值越高表示越常聽清/看清，不參與風險分。",
@@ -316,7 +321,7 @@ def _between(rows: list[dict[str, Any]], start: int, end: int) -> list[dict[str,
 
 
 def _day(ms: int) -> str:
-    return time.strftime("%Y-%m-%d", time.localtime(ms / 1000))
+    return day_key(ms)
 
 
 def _talk_section(
@@ -528,10 +533,11 @@ def _activity_section(
             )
         )
         proxy_note = copy["proxyNote"]
-    # Home-fence exits are real per-event records; B only writes `minutesAway`
-    # on the closing `enter` event (and only when that exit was alerted), so the
-    # duration covers a subset of outings. A week with no exits is "not
-    # recorded", so the line is omitted rather than printed as 0.
+    # B emits an exit for EVERY crossing (`alert` only decides whether the
+    # family is paged) and a closing `enter` with `minutesAway` for every
+    # return. A stale comment used to claim duration covered only alerted trips;
+    # that is no longer true. The only gap is a missing enter (app killed), so
+    # the `(n 次)` suffix is shown only when coverage is incomplete.
     exits = [e for e in geofence if e.get("kind") == "exit"]
     away_minutes = [
         float(e["minutesAway"])
@@ -544,14 +550,15 @@ def _activity_section(
             ReportCount(label=copy["outings"], value=copy["outingsValue"].format(n=len(exits)))
         )
     if away_minutes:
-        outing_counts.append(
-            ReportCount(
-                label=copy["awayMinutes"],
-                value=copy["awayMinutesValue"].format(
-                    minutes=round(sum(away_minutes)), n=len(away_minutes)
-                ),
-            )
-        )
+        total = round(sum(away_minutes))
+        if total <= 0:
+            # A sub-minute trip must not read as "did not go out".
+            value = copy["awayMinutesUnderMinute"]
+        elif len(away_minutes) != len(exits):
+            value = copy["awayMinutesCoveredValue"].format(minutes=total, n=len(away_minutes))
+        else:
+            value = copy["awayMinutesValue"].format(minutes=total)
+        outing_counts.append(ReportCount(label=copy["awayMinutes"], value=value))
     if not gait:
         counts = proxy_counts + outing_counts
         return ReportSection(
@@ -748,6 +755,75 @@ def render_html(report: WeeklyReport) -> str:
 <footer>{esc(report.disclaimer)}</footer>
 </body>
 </html>"""
+
+
+def render_pdf(report: WeeklyReport) -> bytes:
+    """Self-contained PDF (C4). No external assets; CJK via the built-in CID font."""
+    from io import BytesIO
+
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+    pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
+    t = _text(report.locale)
+    copy = t["html"]
+    esc = html.escape
+    cell = ParagraphStyle("cell", fontName="STSong-Light", fontSize=9, leading=12)
+    cell_bold = ParagraphStyle("cell_bold", parent=cell, fontSize=9, leading=12,
+                               textColor=colors.HexColor("#0e7490"))
+    body = ParagraphStyle("body", fontName="STSong-Light", fontSize=10, leading=14)
+    note = ParagraphStyle("note", fontName="STSong-Light", fontSize=8, leading=11,
+                          textColor=colors.HexColor("#4b5b66"))
+    h1 = ParagraphStyle("h1", fontName="STSong-Light", fontSize=18, leading=22,
+                        textColor=colors.HexColor("#0e7490"))
+    h2 = ParagraphStyle("h2", parent=h1, fontSize=12, leading=16)
+
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(
+        buffer, pagesize=A4, topMargin=16 * mm, bottomMargin=16 * mm,
+        leftMargin=16 * mm, rightMargin=16 * mm, title=copy["title"],
+    )
+    meta = copy["meta"].format(
+        start=_day(report.periodStart), end=_day(report.periodEnd), n=len(report.sections)
+    )
+    story: list[Any] = [
+        Paragraph(esc(copy["h1"]), h1),
+        Paragraph(esc(meta), note),
+        Spacer(1, 4 * mm),
+    ]
+    for section in report.sections:
+        story.append(Paragraph(esc(section.title), h2))
+        story.append(Paragraph(esc(section.summary), body))
+        if section.counts:
+            rows = [
+                [Paragraph(esc(c.label), cell_bold),
+                 Paragraph(esc(c.value + (f"（{c.delta}）" if c.delta else "")), cell)]
+                for c in section.counts
+            ]
+            table = Table(rows, colWidths=[52 * mm, 108 * mm])
+            table.setStyle(TableStyle([
+                ("LINEBELOW", (0, 0), (-1, -1), 0.25, colors.HexColor("#e2e8f0")),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ]))
+            story.append(table)
+        if section.evidence:
+            items = "；".join(
+                f"{e.feature} Z={e.z:.2f} 方向={e.direction} 样本={e.samples} 窗口={e.windowDays}天"
+                + ("（持续）" if e.sustained else "")
+                for e in section.evidence
+            )
+            story.append(Paragraph(esc(items), note))
+        if section.note:
+            story.append(Paragraph(esc(section.note), note))
+        story.append(Spacer(1, 4 * mm))
+    story.append(Paragraph(esc(report.disclaimer), note))
+    doc.build(story)
+    return buffer.getvalue()
 
 
 def _section_html(section: ReportSection, t: dict[str, Any]) -> str:

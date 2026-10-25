@@ -30,6 +30,7 @@ sys.path.insert(0, str(BASE))
 sys.path.insert(0, str(BASE / "scripts"))
 
 from auragba.contract import StreamScore  # noqa: E402
+from auragba.config import settings  # noqa: E402
 from auragba.model import late_fusion  # noqa: E402
 from train_semantic_model import build_dataset  # noqa: E402
 
@@ -127,15 +128,36 @@ def main():
     sens = float((pos >= watch).mean()); spec = float((ctrl < watch).mean())
     print(f"以 watch={watch} 为界: 敏感度 {sens:.2f}, 特异度 {spec:.2f}（筛查向高敏感度倾斜）")
 
+    # 校准质量：riskIndex 不是概率，Brier 只用来和"永远猜基线率"比较
+    brier = float(np.mean((res.risk_cal.values - y) ** 2))
+    base_rate = float(y.mean())
+    brier_base = float(np.mean((base_rate - y) ** 2))
+    print(f"Brier={brier:.4f}；常数基线（{base_rate:.2%}）={brier_base:.4f}（越小越好）")
+
+    # PPV 只在显式配置患病率时输出；这是假设算术，不是模型测出来的性质
+    ppv = None
+    if settings.deploy_prevalence is not None:
+        p = settings.deploy_prevalence
+        denom = sens * p + (1 - spec) * (1 - p)
+        if denom > 0:
+            ppv = sens * p / denom
+            print(f"@假设患病率 {p:.0%}: PPV≈{ppv:.2%}"
+                  + (f"（约每 {round(1 / ppv)} 个提示 1 个确认）" if ppv > 0 else ""))
+
     out = {
         "n_subjects": int(len(res)),
         "metrics": metrics,
         "suggested_thresholds": suggested,
         "sensitivity_at_watch": round(sens, 3),
         "specificity_at_watch": round(spec, 3),
+        "brier": round(brier, 4),
+        "brier_baseline_rate": round(brier_base, 4),
+        "brier_note": "riskIndex 不是概率；Brier 仅用于校准比较",
+        "deploy_prevalence": settings.deploy_prevalence,
+        "ppv_at_deploy_prevalence": None if ppv is None else round(ppv, 4),
         "ctrl_risk_median": round(float(np.median(ctrl)), 3),
         "pos_risk_median": round(float(np.median(pos)), 3),
-        "note": "离线复现线上链路（eGeMAPS+转写 -> 双流 -> 融合），非临床验证",
+        "note": "离线复现线上链路（eGeMAPS+转写 -> 双流 -> 融合），非临床验证；PPV 依赖患病率假设",
     }
     REPORT_OUT.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\n报告已保存: {REPORT_OUT}")

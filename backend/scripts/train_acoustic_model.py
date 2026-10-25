@@ -19,6 +19,8 @@ import pandas as pd
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
 from sklearn.model_selection import LeaveOneOut, StratifiedKFold
 
+from confound import report as confound_report
+
 BASE = Path(__file__).resolve().parent.parent
 # 数据集不入库（.gitignore），默认落在 backend/data/ 下；
 # 若放在别处，用 AURA_DATASET_DIR 指过去即可。
@@ -87,6 +89,7 @@ def evaluate(X, y):
 def main():
     df, X, y, feature_cols = load_dataset()
     metrics = evaluate(X, y)
+    confound = confound_report(df, y, make_model, metrics["cv5_auc_mean"])
 
     # 全量训练最终模型并落盘（Booster 格式, auragba/model/acoustic.py 直接加载）
     final = make_model()
@@ -107,9 +110,11 @@ def main():
         "n_features": len(feature_cols),
         "class_balance": {"positive_AD_MCI": int(y.sum()), "negative_CTRL": int((1 - y).sum())},
         "metrics": metrics,
+        "demographic_baseline": confound,
         "top15_features": top15,
         "model_file": str(MODEL_OUT),
-        "note": "推理端必须安装 opensmile，保证线上特征与训练特征同分布",
+        "note": "推理端必须安装 opensmile，保证线上特征与训练特征同分布；"
+                "AUC 必须同时报告人口学混淆（education/age）",
     }
     REPORT_OUT.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\n模型已保存: {MODEL_OUT}")

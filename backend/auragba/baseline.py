@@ -185,4 +185,13 @@ def compute_baseline(
         )
 
     points.sort(key=lambda p: (p["at"] is None, p["at"] or 0, p["feature"]))
+    if not rows:
+        # Sample count alone is not a baseline: a device that only uploads
+        # energy/envelope features has nothing comparable to the tracked
+        # biomarkers, and claiming "stable" here would be an assertion.
+        return BaselineOutcome(
+            sufficient=False,
+            samples=len(ref_idx),
+            note="insufficient baseline: no tracked biomarker metrics in the samples",
+        )
     return BaselineOutcome(rows=rows, sufficient=True, samples=len(ref_idx), changepoints=points)

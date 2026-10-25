@@ -13,14 +13,14 @@ Three consumers:
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query
-from fastapi.responses import HTMLResponse
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import HTMLResponse, Response
 
 from ..auth import Principal, current_principal
 from ..contract import Locale, WeeklyReport
 from ..notify import dispatch as notify_dispatch
 from ..privacy import device_id
-from ..reports.weekly import build_weekly_report, render_html, report_summary
+from ..reports.weekly import build_weekly_report, render_html, render_pdf, report_summary
 from ..store import store
 from .caregiver_routes import linked_device
 
@@ -40,6 +40,11 @@ def my_weekly_report(dev: str = Depends(device_id)) -> WeeklyReport:
 @router.get("/reports/weekly/me.html", response_class=HTMLResponse)
 def my_weekly_report_html(dev: str = Depends(device_id)) -> HTMLResponse:
     return HTMLResponse(render_html(build_weekly_report(dev, store)))
+
+
+@router.get("/reports/weekly/me.pdf")
+def my_weekly_report_pdf(dev: str = Depends(device_id)) -> Response:
+    return _pdf_response(build_weekly_report(dev, store))
 
 
 @router.post("/reports/weekly/send", status_code=202)
@@ -73,3 +78,25 @@ def caregiver_weekly_report_html(
 ) -> HTMLResponse:
     device = linked_device(principal, senior_device_id)
     return HTMLResponse(render_html(build_weekly_report(device, store, locale=_locale(locale))))
+
+
+@router.get("/caregiver/reports/weekly.pdf")
+def caregiver_weekly_report_pdf(
+    senior_device_id: str | None = None,
+    locale: str = Query("zh-CN"),
+    principal: Principal = Depends(current_principal),
+) -> Response:
+    device = linked_device(principal, senior_device_id)
+    return _pdf_response(build_weekly_report(device, store, locale=_locale(locale)))
+
+
+def _pdf_response(report: WeeklyReport) -> Response:
+    try:
+        content = render_pdf(report)
+    except ImportError as exc:  # optional renderer not installed
+        raise HTTPException(status_code=503, detail="PDF renderer is not installed") from exc
+    return Response(
+        content=content,
+        media_type="application/pdf",
+        headers={"Content-Disposition": 'attachment; filename="weekly-report.pdf"'},
+    )

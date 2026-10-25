@@ -21,6 +21,67 @@ const KEY = "contact.emergency";
 export interface KnownContact {
   name: string;
   phone: string;
+  /** "大女" — spoken only when two people share a name */
+  relation?: string | null;
+}
+
+/**
+ * "陳小明（儿子）" -> { name: "陳小明", relation: "儿子" }.
+ *
+ * The seeded demo card puts the relationship inside the name, and the matcher
+ * below accepts a name that CONTAINS the spoken words — so without this, saying
+ * "儿子" would dial the emergency contact. A display label is not a name.
+ */
+export function splitDisplayName(raw: string): { name: string; relation: string | null } {
+  const text = (raw ?? "").trim();
+  const m = /^(.*?)\s*[（(]\s*(.+?)\s*[)）]\s*$/.exec(text);
+  if (m && m[1].trim()) return { name: m[1].trim(), relation: m[2].trim() };
+  return { name: text, relation: null };
+}
+
+/** Digits only, keeping a leading +. Used for de-duplication, never for dialling. */
+function phoneKey(phone: string): string {
+  const trimmed = (phone ?? "").replace(/[\s\-()]/g, "");
+  return trimmed.startsWith("+") ? `+${trimmed.slice(1).replace(/\D/g, "")}` : trimmed.replace(/\D/g, "");
+}
+
+function usable(c: { name?: string; phone?: string } | null | undefined): boolean {
+  return !!c && typeof c.name === "string" && c.name.trim().length > 0
+    && typeof c.phone === "string" && phoneKey(c.phone).length >= 5;
+}
+
+/**
+ * The list the agent is allowed to dial: family-curated `contacts` first, then
+ * the SOS contact if it is not already there.
+ *
+ * De-duplicated by number, because the same person can legitimately appear in
+ * both fields — and two rows for one person make every name match ambiguous,
+ * which would turn "打畀阿明" into a refusal.
+ */
+export function dialableContacts(
+  emergency: { name: string; phone: string } | null | undefined,
+  contacts: ReadonlyArray<{ name: string; phone: string; relation?: string | null; id?: string }> | null | undefined
+): KnownContact[] {
+  const out: KnownContact[] = [];
+  const seen = new Set<string>();
+
+  for (const c of contacts ?? []) {
+    if (!usable(c)) continue;
+    const key = phoneKey(c.phone);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const split = splitDisplayName(c.name);
+    out.push({ name: split.name, phone: c.phone.trim(), relation: c.relation ?? split.relation });
+  }
+
+  if (usable(emergency)) {
+    const key = phoneKey(emergency!.phone);
+    if (!seen.has(key)) {
+      const split = splitDisplayName(emergency!.name);
+      out.push({ name: split.name, phone: emergency!.phone.trim(), relation: split.relation });
+    }
+  }
+  return out;
 }
 
 interface ContactDoc {
@@ -32,7 +93,7 @@ interface ContactDoc {
 /** The cached contact, without touching the network. */
 export async function cachedContacts(): Promise<KnownContact[]> {
   const doc = await get<ContactDoc>("meta", KEY).catch(() => undefined);
-  return doc?.contacts ?? [];
+  return dialableContacts(null, doc?.contacts ?? []);
 }
 
 /**
@@ -43,13 +104,13 @@ export async function cachedContacts(): Promise<KnownContact[]> {
 export async function emergencyContacts(now = Date.now()): Promise<KnownContact[]> {
   try {
     const card = await getHealthCard();
-    const c = card?.emergencyContact;
-    const name = typeof c?.name === "string" ? c.name.trim() : "";
-    const phone = typeof c?.phone === "string" ? c.phone.trim() : "";
-    if (name && phone) {
-      await put<ContactDoc>("meta", { id: KEY, contacts: [{ name, phone }], at: now }).catch(() => {});
-      return [{ name, phone }];
+    // Family-curated list first, and the SOS contact only as a fallback: he can
+    // always reach the person the family designated, nothing else.
+    const list = dialableContacts(card?.emergencyContact, card?.contacts ?? []);
+    if (list.length > 0) {
+      await put<ContactDoc>("meta", { id: KEY, contacts: list, at: now }).catch(() => {});
     }
+    return list;
   } catch {
     /* offline / not authenticated / stub backend — fall through to the cache */
   }

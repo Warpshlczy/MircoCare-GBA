@@ -50,6 +50,12 @@ python3 selfcheck.py                              # 可运行断言自检 → se
 | 13 | `POST /task/events` | 任务状态事件（created/completed/deferred/timeout） | 204 |
 | 14 | `POST /geofence/events` | 离家/返家越界事件（与 SOS 分开，按 id 幂等） | 204 |
 | 15 | `DELETE /conversation/turns/{id}` | 撤回单条会话 + 审计记录 + 基线重算标记 | 204 / 404 |
+| 16 | `POST /caregiver/contacts` | 家属写入可拨联系人（≤5，整表替换；不动 SOS 联系人） | 200 |
+| 17 | `PUT /caregiver/health-card` | 家属编辑健康卡（姓名/年龄/过敏/用药/SOS 联系人） | 200 |
+| 18 | `DELETE /caregiver/health-card` | 家属删除健康卡与联系人 | 204 |
+| 19 | `DELETE /caregiver/pairing/{device}` | 家属撤销对某台长者设备的共享 | 204 |
+| 20 | `DELETE /auth/me` | 删除当前账号、配对关系；长者同时清空设备数据 | 204 |
+| 21 | `GET /reports/weekly/me.pdf` · `/caregiver/reports/weekly.pdf` | 周报 PDF | 200 |
 
 > `/sos`、`/reminders/escalate`、`/reports/weekly/send` 统一走 `notify.dispatch`：先写家属 outbox，再打印「已通知家属 N 人」；配置 `AURA_NOTIFY_WEBHOOK` 时额外推一条粗粒度通知。demo 不声称“已送达”。
 
@@ -129,11 +135,14 @@ uvicorn auragba.main:app --env-file .env --reload --port 8000
 | `AURA_WHISPER_MODEL` | Whisper 模型名或本地目录（`./models/whisper-small`） | `tiny` |
 | `AURA_PRIVACY_MODE` | `extract-and-burn` / `vector-only` | `extract-and-burn` |
 | `AURA_BASELINE_DAYS` | 个人基线窗口（天，robust Z） | 14 |
+| `AURA_TIMEZONE` | 日键/周报边界时区（IANA） | `Asia/Hong_Kong` |
 | `AURA_TREND_DAYS` | 趋势斜率与 CUSUM 的回看窗口（天） | 28 |
 | `AURA_NOTIFY_WEBHOOK` | demo 通知 webhook（留空 = 只写 outbox + 日志） | 空 |
+| `AURA_COMMUNITY_WEBHOOK` | 社区照顾员通知 webhook（留空 = 只打日志） | 空 |
 | `AURA_FUSION_W_ACOUSTIC` / `AURA_FUSION_W_SEMANTIC` | 两流融合权重（行为流缺失时使用，自动归一） | 0.2 / 0.8 |
 | `AURA_FUSION3_W_ACOUSTIC` / `_SEMANTIC` / `_BEHAVIOR` | 三流初始先验（行为流存在时使用，自动归一） | 0.15 / 0.65 / 0.20 |
 | `AURA_RISK_WATCH` / `AURA_RISK_ELEVATED` | 风险分档切点 | 0.409 / 0.521 |
+| `AURA_DEPLOY_PREVALENCE` | 部署患病率假设（仅用于 PPV 沟通；空 = 不输出数字） | 空 |
 | `AURA_DATA_DIR` | 假名存储 / 审计日志目录 | `./.data` |
 | `AURA_CORS_ORIGINS` | 允许的 CORS 源（逗号分隔，禁止 `*`） | `http://localhost:3000,http://localhost:8000` |
 | `AURA_LLM_ENABLED` | 是否启用三个 LLM 端点 | `false` |

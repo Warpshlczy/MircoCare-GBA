@@ -9,6 +9,7 @@ breaks. Pure/engine-level only — it does not boot a server.
 from __future__ import annotations
 
 import io
+import gc
 import logging
 import math
 import os
@@ -19,6 +20,7 @@ import time
 import wave
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -40,8 +42,9 @@ from auragba.changepoint import detect  # noqa: E402
 from auragba.config import settings, validate_runtime  # noqa: E402
 from auragba.contract import (  # noqa: E402
     AgentCard, AgentIntentRequest, AgentTool, AgentTurnRequest, AssistantChatRequest,
-    BehaviourDaily, BehaviourDailyEnvelope, GeofenceEvent, ScreeningSession, SosEvent,
-    StreamScore, TaskEvent, TelemetryEvent, ToolCall,
+    BehaviourDaily, BehaviourDailyEnvelope, Contact, ContactsRequest, GeofenceEvent,
+    HealthCardUpdate, ScreeningSession, SosEvent, StreamScore, TaskEvent, TelemetryEvent,
+    ToolCall,
 )
 from auragba.crypto import decrypt_text, encrypt_text  # noqa: E402
 from auragba.economics import estimate as economics  # noqa: E402
@@ -55,7 +58,9 @@ from auragba.model import (  # noqa: E402
 )
 from auragba.nlp import analyse_linguistics, coherence  # noqa: E402
 from auragba.privacy import pseudonymize, purge, scrub_props  # noqa: E402
-from auragba.reports.weekly import DIAGNOSTIC_WORDS, build_weekly_report, render_html  # noqa: E402
+from auragba.reports.weekly import (  # noqa: E402
+    DIAGNOSTIC_WORDS, build_weekly_report, render_html, render_pdf,
+)
 from auragba.screening import ingest_session, run_screening  # noqa: E402
 from auragba.store import Store  # noqa: E402
 
@@ -89,12 +94,27 @@ assert settings.fusion_w_acoustic == 0.2, f"acoustic weight default drifted: {se
 assert settings.fusion_w_semantic == 0.8, f"semantic weight default drifted: {settings.fusion_w_semantic}"
 assert settings.risk_watch == 0.409, f"watch threshold drifted: {settings.risk_watch}"
 assert settings.risk_elevated == 0.521, f"elevated threshold drifted: {settings.risk_elevated}"
+# The committed template must carry the same values: a `--env-file .env` server
+# and a bare `python selfcheck.py` must not disagree on bands (C0).
+_example_env = (Path(__file__).resolve().parent / ".env.example").read_text(encoding="utf-8")
+for _pinned in (
+    "AURA_FUSION_W_ACOUSTIC=0.2",
+    "AURA_FUSION_W_SEMANTIC=0.8",
+    "AURA_RISK_WATCH=0.409",
+    "AURA_RISK_ELEVATED=0.521",
+):
+    assert _pinned in _example_env, f".env.example drifted from code defaults: {_pinned}"
 assert abs(settings.fusion_w_acoustic + settings.fusion_w_semantic - 1.0) < 1e-9
 assert settings.fusion3_w_acoustic == 0.15 and settings.fusion3_w_semantic == 0.65
 assert settings.fusion3_w_behavior == 0.20
 assert abs(settings.fusion3_w_acoustic + settings.fusion3_w_semantic + settings.fusion3_w_behavior - 1.0) < 1e-9
 # A spoken turn must not wait longer than the client's spoken budget.
 assert settings.llm_timeout_s == 6.0 and settings.llm_turn_timeout_s == 6.0
+
+# Day keys must follow the configured GBA timezone, not the server's local zone.
+from auragba.timeutil import day_key  # noqa: E402
+
+assert day_key(int(16.5 * 3_600_000)) == "1970-01-02", "UTC 16:30 is the next day in HKT"
 
 # band boundaries are inclusive on the lower edge
 assert settings.risk_band(0.408) == "low"
@@ -676,6 +696,17 @@ rising = [{"pause_ratio": 0.30 + 0.01 * i} for i in range(12)]
 out5 = bl.compute_baseline(rising, {"pause_ratio": 0.42}, at_ms=_weekly(12), z_window_days=120)
 assert abs(out5.rows[0].trend - 0.01) < 1e-6, f"trend must be 0.01/week, got {out5.rows[0].trend}"
 
+# A path only sends energy/envelope features; sample count alone must not turn
+# into a "stable" baseline with zero comparable biomarkers.
+energy_hist = [
+    {"frameCount": 300, "meanRmsDb": -30.0, "speech_ratio": 0.6} for _ in range(12)
+]
+out_energy = bl.compute_baseline(
+    energy_hist, {"frameCount": 300}, at_ms=_weekly(12), z_window_days=120
+)
+assert not out_energy.sufficient and not out_energy.rows
+assert "no tracked" in (out_energy.note or "")
+
 # --- CUSUM change point: stable 8 weeks, then 4 weeks of worsening -------------
 cp = detect(
     [0.300 + 0.002 * (i % 2) for i in range(8)] + [0.30 + 0.02 * k for k in range(1, 5)],
@@ -815,6 +846,8 @@ with tempfile.TemporaryDirectory() as tmp:
 
     html_doc = render_html(report)
     assert "<!doctype html>" in html_doc and "查看依据" in html_doc
+    _pdf = render_pdf(report)
+    assert _pdf.startswith(b"%PDF") and len(_pdf) > 500, "C4 PDF must be a real PDF"
     blob = report.model_dump_json() + html_doc
     for word in DIAGNOSTIC_WORDS:
         assert word not in blob, f"diagnostic word leaked into the family report: {word}"
@@ -874,6 +907,40 @@ with tempfile.TemporaryDirectory() as tmp:
     assert _adv.sections[4].counts[0].value == "本月内做一次认知评估", (
         "reject/capture rows must not raise or mask the weekly advice tier"
     )
+
+# Full duration coverage drops the redundant "(n 次)"; a sub-minute round must
+# not read as "did not go out".
+with tempfile.TemporaryDirectory() as tmp:
+    st_out = Store(Path(tmp))
+    t_out = int(time.time() * 1000)
+    st_out.record("dev-out", "geofence_events",
+                  {"id": "o1", "at": t_out - 3 * 86_400_000, "kind": "exit", "distanceM": 500.0})
+    st_out.record("dev-out", "geofence_events",
+                  {"id": "i1", "at": t_out - 3 * 86_400_000 + 1_800_000, "kind": "enter",
+                   "distanceM": 10.0, "minutesAway": 30.0})
+    st_out.record("dev-out", "geofence_events",
+                  {"id": "o2", "at": t_out - 2 * 86_400_000, "kind": "exit", "distanceM": 300.0})
+    st_out.record("dev-out", "geofence_events",
+                  {"id": "i2", "at": t_out - 2 * 86_400_000 + 1_200_000, "kind": "enter",
+                   "distanceM": 10.0, "minutesAway": 20.0})
+    _out_counts = {c.label: c.value for c in next(
+        s for s in build_weekly_report("dev-out", st_out, now=t_out).sections
+        if s.key == "activity").counts}
+    assert _out_counts["外出次数"] == "2 次"
+    assert _out_counts["外出时长"] == "50 分钟", "full coverage must drop the redundant count"
+
+with tempfile.TemporaryDirectory() as tmp:
+    st_zero = Store(Path(tmp))
+    t_zero = int(time.time() * 1000)
+    st_zero.record("dev-zero", "geofence_events",
+                   {"id": "z1", "at": t_zero - 86_400_000, "kind": "exit", "distanceM": 20.0})
+    st_zero.record("dev-zero", "geofence_events",
+                   {"id": "z2", "at": t_zero - 86_400_000 + 20_000, "kind": "enter",
+                    "distanceM": 5.0, "minutesAway": 0.0})
+    _zero_counts = {c.label: c.value for c in next(
+        s for s in build_weekly_report("dev-zero", st_zero, now=t_zero).sections
+        if s.key == "activity").counts}
+    assert _zero_counts["外出时长"] == "不足 1 分钟", "a sub-minute trip is not 0"
 
 # --- k-anonymity gate (DPIA D.3) ---------------------------------------------
 _small = (
@@ -1075,6 +1142,150 @@ with tempfile.TemporaryDirectory() as tmp:
     assert len(rows) == 2 and all(r["alert"] is True for r in rows), (
         "one row per outing; the silent start is replaced by the escalation"
     )
+
+# --- contacts: family-managed callable list, SOS contact untouched ------------
+_contact = Contact(id="c1", name="陳小明", relation="儿子", phone="+852 9000 0000")
+assert _contact.phone == "+85290000000", "phone formatting is normalised before validation"
+for _bad_contacts in (
+    {"contacts": [{"id": f"c{i}", "name": "x", "phone": "123456"} for i in range(6)]},
+    {"contacts": [{"id": "c", "name": "x", "phone": "not-a-phone"}]},
+    {"contacts": [{"id": "c", "name": "x", "phone": "123456"},
+                  {"id": "c", "name": "y", "phone": "123456"}]},
+):
+    try:
+        ContactsRequest(**_bad_contacts)
+    except Exception:
+        pass
+    else:
+        raise AssertionError(f"invalid contacts accepted: {_bad_contacts}")
+
+with tempfile.TemporaryDirectory() as tmp:
+    st = Store(Path(tmp))
+    import auragba.api.caregiver_routes as caregiver_routes  # noqa: E402
+
+    _real_cg_store = caregiver_routes.store
+    _real_rel = caregiver_routes.family_relations
+    _real_role = caregiver_routes.require_role
+    caregiver_routes.store = st
+    caregiver_routes.family_relations = lambda p: [{"seniorDeviceId": "dev-contact"}]
+    caregiver_routes.require_role = lambda p, role: p
+    try:
+        saved = caregiver_routes.put_contacts(
+            ContactsRequest(contacts=[_contact]),
+            principal=SimpleNamespace(account_id="fam-c"),
+        )
+    finally:
+        caregiver_routes.store = _real_cg_store
+        caregiver_routes.family_relations = _real_rel
+        caregiver_routes.require_role = _real_role
+    assert saved[0].phone == "+85290000000"
+    _card = st.get_doc("dev-contact", "health_card")
+    assert _card["contacts"][0]["name"] == "陳小明"
+    assert _card["emergencyContact"]["name"], "the SOS escalation contact must remain"
+
+# --- governance: health-card write/delete, unbind, account delete, economics ---
+with tempfile.TemporaryDirectory() as tmp:
+    st = Store(Path(tmp))
+    import auragba.api.caregiver_routes as caregiver_routes  # noqa: E402
+
+    _real = (caregiver_routes.store, caregiver_routes.family_relations,
+             caregiver_routes.require_role, caregiver_routes.audit_log,
+             caregiver_routes.auth_store)
+    caregiver_routes.store = st
+    caregiver_routes.family_relations = lambda p: [{"seniorDeviceId": "dev-hc"}]
+    caregiver_routes.require_role = lambda p, role: p
+    caregiver_routes.audit_log = SimpleNamespace(append=lambda **kw: None)
+    _fake_auth = SimpleNamespace(removed=[], remove_relation=lambda f, d: _fake_auth.removed.append((f, d)) or True)
+    caregiver_routes.auth_store = _fake_auth
+    try:
+        _who = SimpleNamespace(account_id="fam-hc")
+        _saved = caregiver_routes.put_health_card(
+            HealthCardUpdate(name="陳阿婆", age=79, allergies=["青霉素"]), principal=_who
+        )
+        assert _saved.name == "陳阿婆" and _saved.age == 79 and _saved.allergies == ["青霉素"]
+        assert st.get_doc("dev-hc", "health_card")["name"] == "陳阿婆"
+        caregiver_routes.revoke_pairing("dev-hc", principal=_who)
+        assert _fake_auth.removed == [("fam-hc", "dev-hc")]
+        caregiver_routes.delete_health_card(principal=_who)
+        assert st.get_doc("dev-hc", "health_card") is None
+        import auragba.api.contract_routes as contract_routes  # noqa: E402
+
+        _real_contract = contract_routes.store
+        contract_routes.store = st
+        try:
+            _blank = contract_routes.get_health_card("dev-hc")
+        finally:
+            contract_routes.store = _real_contract
+        assert _blank.name == "未填写", "a deleted card must not be re-seeded with demo data"
+        assert st.get_doc("dev-hc", "health_card") is None
+    finally:
+        (caregiver_routes.store, caregiver_routes.family_relations,
+         caregiver_routes.require_role, caregiver_routes.audit_log,
+         caregiver_routes.auth_store) = _real
+
+# Account deletion erases the account row and the senior's device store.
+from auragba.auth_store import AuthStore  # noqa: E402
+import auragba.api.auth_routes as auth_routes  # noqa: E402
+
+with tempfile.TemporaryDirectory() as tmp:
+    _auth = AuthStore(Path(tmp) / "auth.sqlite3")
+    _acct = _auth.create_account("senior", "dev-del")
+    assert _auth.delete_account(_acct["id"])["role"] == "senior"
+    assert _auth.get_account(_acct["id"]) is None
+    del _auth
+    gc.collect()  # release SQLite handles before TemporaryDirectory cleanup on Windows
+
+    _store = Store(Path(tmp))
+    _store.record("dev-del", "telemetry",
+                  {"id": "t-del", "name": "checkin", "at": 1, "locale": "zh-CN"})
+    _real_del = (auth_routes.store, auth_routes.auth_store, auth_routes.audit_log)
+    auth_routes.store = _store
+    auth_routes.auth_store = SimpleNamespace(
+        delete_account=lambda _id: {"role": "senior", "deviceId": "dev-del"}
+    )
+    auth_routes.audit_log = SimpleNamespace(append=lambda **kw: None)
+    try:
+        auth_routes.delete_me(SimpleNamespace(account_id="acct-del", role="senior", device_id="dev-del"))
+    finally:
+        (auth_routes.store, auth_routes.auth_store, auth_routes.audit_log) = _real_del
+    assert _store.history("dev-del", "telemetry") == [], "account delete must erase device data"
+    del _store
+    gc.collect()
+
+# Economics must ignore capture-only rows and rejected samples.
+import auragba.api.insight_routes as insight_routes  # noqa: E402
+
+with tempfile.TemporaryDirectory() as tmp:
+    _eco = Store(Path(tmp))
+    _now_eco = int(time.time() * 1000)
+    _eco.record("dev-eco", "screening_results",
+                {"at": _now_eco - 3_000, "id": "ok", "riskIndex": 0.6, "riskBand": "elevated"})
+    _eco.record("dev-eco", "screening_results",
+                {"at": _now_eco - 2_000, "id": "capture", "riskBand": "low",
+                 "insufficientStreams": True})
+    _eco.record("dev-eco", "screening_results",
+                {"at": _now_eco - 1_000, "id": "reject", "riskIndex": 0.9,
+                 "riskBand": "elevated", "quality": "reject"})
+    _real_eco = insight_routes.store
+    insight_routes.store = _eco
+    try:
+        _ledger = insight_routes.get_economics("dev-eco")
+    finally:
+        insight_routes.store = _real_eco
+    assert _ledger["screeningCount"] == 1, "only usable scored screenings count"
+
+# Community caregiver is paged even when no family is bound.
+import auragba.notify as notify_mod  # noqa: E402
+
+_community_calls: list[tuple[str, str]] = []
+_real_notify = (notify_mod.auth_store, notify_mod._community)
+notify_mod.auth_store = SimpleNamespace(family_accounts_for_device=lambda d: [])
+notify_mod._community = lambda device, kind: _community_calls.append((device, kind))
+try:
+    _notified = notify_mod.dispatch("dev-community", "sos", {})
+finally:
+    notify_mod.auth_store, notify_mod._community = _real_notify
+assert _notified == [] and _community_calls == [("dev-community", "sos")]
 
 # --- interaction trend: latest closed day vs the senior's own median ----------
 with tempfile.TemporaryDirectory() as tmp:

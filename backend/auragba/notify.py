@@ -29,14 +29,34 @@ logger = logging.getLogger("auragba.notify")
 def dispatch(device_id: str, kind: str, payload: dict[str, Any]) -> list[str]:
     """-> family account ids the event was queued for (possibly empty)."""
     families = auth_store.family_accounts_for_device(device_id)
-    if not families:
+    if families:
+        notify_families(device_id, kind, payload)  # durable outbox rows
+        logger.info("已通知家属 %d 人（kind=%s, device=%s）", len(families), kind, device_id)
+        _webhook(device_id, kind, len(families))
+    else:
         logger.info("notify %s: no family bound to %s", kind, device_id)
-        return []
-
-    notify_families(device_id, kind, payload)  # durable outbox rows
-    logger.info("已通知家属 %d 人（kind=%s, device=%s）", len(families), kind, device_id)
-    _webhook(device_id, kind, len(families))
+    # C5: the community caregiver is paged for urgent events even when no family
+    # is bound — an unpaired senior must not be left with an alert nobody receives.
+    if kind in ("sos", "reminder", "geofence"):
+        _community(device_id, kind)
     return families
+
+
+def _community(device_id: str, kind: str) -> None:
+    url = settings.community_webhook
+    logger.info("已通知社区照顾员（demo, kind=%s, device=%s）", kind, device_id)
+    if not url:
+        return
+    try:
+        import httpx
+
+        httpx.post(
+            url,
+            json={"kind": kind, "deviceId": device_id, "role": "community"},
+            timeout=3.0,
+        )
+    except Exception as exc:
+        logger.warning("community webhook failed (kind=%s): %s", kind, type(exc).__name__)
 
 
 def _webhook(device_id: str, kind: str, recipients: int) -> None:

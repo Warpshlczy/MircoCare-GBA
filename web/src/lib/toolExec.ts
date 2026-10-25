@@ -83,7 +83,7 @@ export interface ToolRunnerDeps {
    * contact. Empty array means "we know nobody", which is a refusal, not a
    * licence to dial whatever the model named.
    */
-  contacts?: () => Promise<{ name: string; phone: string }[]>;
+  contacts?: () => Promise<{ name: string; phone: string; relation?: string | null }[]>;
   /** open the dialler with the number prefilled; the senior still presses call */
   dial?: (phone: string) => Promise<boolean>;
   /** metres from home, or null when there is no home point / no fix yet */
@@ -132,6 +132,8 @@ interface Copy {
   noContact: string;
   /** the senior named someone we do not have: refuse, never guess */
   strangerContact: (name: string) => string;
+  /** two people share that name — say so, never claim they are unknown */
+  ambiguousContact: (name: string, relations: string[]) => string;
   /** the dialler refused to open */
   dialFailed: string;
   /** the dialler is open, prefilled — the senior still presses call */
@@ -183,6 +185,10 @@ const COPY: Record<Locale, Copy> = {
     alarmFailed: "我設唔到鬧鐘，你睇下手機有冇閂咗鬧鐘權限。",
     noContact: "我部機未有屋企人嘅電話，你叫屋企人設定一次。",
     strangerContact: (n) => `我冇${clip(n, 6)}嘅電話，你叫屋企人幫你打。`,
+    ambiguousContact: (n, rel) =>
+      rel.length > 0
+        ? `有兩個${clip(n, 6)}：${rel.map((r) => clip(r, 4)).join("同")}，你講係邊個？`
+        : `有兩個${clip(n, 6)}，你講清楚係邊個？`,
     dialFailed: "我開唔到撥號，你睇下手機。",
     called: (n) => `好，撥咗${clip(n, 6)}嘅電話，你按綠色個掣。`,
     noHome: "我未知你屋企喺邊，你叫屋企人設定一次。",
@@ -224,6 +230,10 @@ const COPY: Record<Locale, Copy> = {
     alarmFailed: "我設唔到鬧鐘，你睇下手機有冇閂咗鬧鐘權限。",
     noContact: "我部機未有屋企人嘅電話，你叫屋企人設定一次。",
     strangerContact: (n) => `我冇${clip(n, 6)}嘅電話，你叫屋企人幫你打。`,
+    ambiguousContact: (n, rel) =>
+      rel.length > 0
+        ? `有兩個${clip(n, 6)}：${rel.map((r) => clip(r, 4)).join("同")}，你講係邊個？`
+        : `有兩個${clip(n, 6)}，你講清楚係邊個？`,
     dialFailed: "我開唔到撥號，你睇下手機。",
     called: (n) => `好，撥咗${clip(n, 6)}嘅電話，你按綠色個掣。`,
     noHome: "我未知你屋企喺邊，你叫屋企人設定一次。",
@@ -265,6 +275,10 @@ const COPY: Record<Locale, Copy> = {
     alarmFailed: "我设不了闹钟，你看看手机是不是关了闹钟权限。",
     noContact: "我这里还没有家里人的电话，你让家里人设一次。",
     strangerContact: (n) => `我没有${clip(n, 6)}的电话，你让家里人帮你打。`,
+    ambiguousContact: (n, rel) =>
+      rel.length > 0
+        ? `有两个${clip(n, 6)}：${rel.map((r) => clip(r, 4)).join("和")}，你说的是哪个？`
+        : `有两个${clip(n, 6)}，你说清楚是哪个？`,
     dialFailed: "我打不开拨号，你看看手机。",
     called: (n) => `好，拨了${clip(n, 6)}的电话，你按绿色的按钮。`,
     noHome: "我还不知道你家在哪，你让家里人设一次。",
@@ -527,9 +541,15 @@ export function createToolRunner(deps: ToolRunnerDeps): ToolRunner {
       return q.length >= 2 && (n.includes(q) || q.includes(n));
     });
 
-    if (matches.length !== 1) {
-      // Zero matches = a stranger. More than one = we would be picking for him.
+    if (matches.length === 0) {
+      // A stranger: the number never comes from the model, so we cannot help.
       return { ok: false, message: copy.strangerContact(said) };
+    }
+    if (matches.length > 1) {
+      // Two people share the name. Say who they are and stop — guessing here is
+      // how a call reaches the wrong person, and that cannot be taken back.
+      const relations = matches.map((c) => (c.relation ?? "").trim()).filter((r) => r.length > 0);
+      return { ok: false, message: copy.ambiguousContact(said, relations) };
     }
 
     try {

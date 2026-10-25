@@ -20,12 +20,12 @@ same `StreamScore` contract.
 from __future__ import annotations
 
 import math
-import time
 from dataclasses import dataclass
 from typing import Any
 
 from ..contract import BiomarkerContribution, StreamScore
 from ..store import Store
+from ..timeutil import day_key
 
 DAY_MS = 86_400_000
 _BIAS = -0.30
@@ -56,7 +56,7 @@ _FEATURES: tuple[_Feature, ...] = (
 
 
 def _day(ms: int) -> str:
-    return time.strftime("%Y-%m-%d", time.localtime(ms / 1000))
+    return day_key(ms)
 
 
 def neutral_score() -> float:

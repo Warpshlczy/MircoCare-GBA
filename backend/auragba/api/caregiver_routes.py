@@ -6,15 +6,21 @@ import time
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from ..audit import audit_log
 from ..auth import Principal, current_principal, family_relations, require_role
+from ..auth_store import auth_store
+from ..config import ENGINE_VERSION, FEATURE_SET_VERSION, FUSION_VERSION
+from ..contract import Contact, ContactsRequest, HealthCard, HealthCardUpdate
 from ..notifications import notify_families
+from ..privacy import input_digest
 from ..store import store
+from ..timeutil import day_key
 
 DAY_MS = 86_400_000
 
 
 def _day(ms: int) -> str:
-    return time.strftime("%Y-%m-%d", time.localtime(ms / 1000))
+    return day_key(ms)
 
 
 def interaction_trend(store: object, device_id: str, now_ms: int | None = None) -> dict | None:
@@ -113,6 +119,97 @@ def overview(
             if row.get("familyAccountId") == principal.account_id
         ][-30:],
     }
+
+
+@router.post("/contacts", response_model=list[Contact])
+def put_contacts(
+    req: ContactsRequest,
+    senior_device_id: str | None = None,
+    principal: Principal = Depends(current_principal),
+) -> list[Contact]:
+    """Replace the callable contact list for one bound senior (family only).
+
+    The senior app must not edit this list: deleting one's own emergency contacts
+    is not recoverable on the device. `emergencyContact` (the SOS escalation
+    chain) is deliberately left untouched — daily calls and emergency paging are
+    different jobs.
+    """
+    device = linked_device(principal, senior_device_id)
+    now = int(time.time() * 1000)
+    card = store.get_doc(device, "health_card")
+    if not card:
+        from .contract_routes import _DEMO_CARD
+
+        card = {**_DEMO_CARD, "id": f"hc-{device}", "updatedAt": now}
+    card["contacts"] = [c.model_dump() for c in req.contacts]
+    card["updatedAt"] = now
+    store.set_doc(device, "health_card", card)
+    return req.contacts
+
+
+@router.put("/health-card", response_model=HealthCard)
+def put_health_card(
+    req: HealthCardUpdate,
+    senior_device_id: str | None = None,
+    principal: Principal = Depends(current_principal),
+) -> HealthCard:
+    """Family edits the health card (name/age/allergies/meds/SOS contact).
+
+    `contacts` is deliberately not part of this payload: the callable list has
+    its own endpoint, and SOS escalation must stay independent of it.
+    """
+    device = linked_device(principal, senior_device_id)
+    now = int(time.time() * 1000)
+    card = store.get_doc(device, "health_card")
+    if not card:
+        from .contract_routes import _DEMO_CARD
+
+        card = {**_DEMO_CARD, "id": f"hc-{device}", "updatedAt": now}
+    card.update(req.model_dump(exclude_unset=True, exclude_none=True))
+    card["updatedAt"] = now
+    store.set_doc(device, "health_card", card)
+    store.delete_doc(device, "health_card_deleted")
+    return HealthCard(**card)
+
+
+@router.delete("/health-card", status_code=204)
+def delete_health_card(
+    senior_device_id: str | None = None,
+    principal: Principal = Depends(current_principal),
+) -> None:
+    """Erase the family-entered health card (and its callable contacts)."""
+    device = linked_device(principal, senior_device_id)
+    deleted = store.delete_doc(device, "health_card")
+    store.set_doc(device, "health_card_deleted", {"at": int(time.time() * 1000)})
+    audit_log.append(
+        kind="health_card_delete",
+        device_id=device,
+        engine_version=ENGINE_VERSION,
+        feature_set_version=FEATURE_SET_VERSION,
+        fusion_version=FUSION_VERSION,
+        input_digest=input_digest(device, "health-card"),
+        output={"deleted": deleted},
+    )
+
+
+@router.delete("/pairing/{senior_device_id}", status_code=204)
+def revoke_pairing(
+    senior_device_id: str,
+    principal: Principal = Depends(current_principal),
+) -> None:
+    """Revoke one family account's access to one senior device."""
+    device = linked_device(principal, senior_device_id)
+    if not auth_store.remove_relation(principal.account_id, device):
+        raise HTTPException(status_code=404, detail="pairing not found")
+    audit_log.append(
+        kind="pairing_revoke",
+        device_id=device,
+        engine_version=ENGINE_VERSION,
+        feature_set_version=FEATURE_SET_VERSION,
+        fusion_version=FUSION_VERSION,
+        input_digest=input_digest(principal.account_id, device),
+        output={"revoked": True},
+    )
 
 
 @router.post("/sos/{sos_id}/ack")

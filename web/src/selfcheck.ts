@@ -102,6 +102,7 @@ import {
   MAX_BACKFILL_DAYS,
 } from "./lib/behaviour.ts";
 import { makeSender, behaviourBody, telemetryBatch } from "./lib/outboxRunner.ts";
+import { dialableContacts, splitDisplayName } from "./lib/contactStore.ts";
 import type { OutboxTransport } from "./lib/outboxRunner.ts";
 import {
   runTurn,
@@ -2631,6 +2632,67 @@ assert.equal(magnitude(3, 4, 0), 5);
 
   const planned = await runTurn("記住買藥", depsFor({ reply: "", calls: [{ name: "create_task", args: { text: "買藥" } }] }));
   assert.equal(planned.understood, true, "有工具计划就算听懂了");
+}
+
+
+// --- dialable contacts: a display label is not a name ------------------------
+{
+  // The seeded card says "陳小明（儿子）", and the matcher accepts a name that
+  // CONTAINS the spoken words — so without splitting, "打畀儿子" would dial.
+  assert.deepEqual(splitDisplayName("陳小明（儿子）"), { name: "陳小明", relation: "儿子" });
+  assert.deepEqual(splitDisplayName("陳小明(儿子)"), { name: "陳小明", relation: "儿子" });
+  assert.deepEqual(splitDisplayName("  陳小明  "), { name: "陳小明", relation: null });
+  assert.deepEqual(splitDisplayName("（冇名）"), { name: "（冇名）", relation: null }, "nothing to split against");
+
+  // Family list first; the SOS contact is appended unless it is the same number.
+  const merged = dialableContacts(
+    { name: "陳小明（儿子）", phone: "+852 9000 0000" },
+    [{ id: "c1", name: "陳大文", phone: "+852 6123 4567" }]
+  );
+  assert.equal(merged.length, 2);
+  assert.equal(merged[0].name, "陳大文");
+  assert.equal(merged[1].name, "陳小明");
+  assert.equal(merged[1].relation, "儿子", "the label survives as a relation, which is all it is");
+
+  // Same person in both fields -> ONE row. Two rows would make the name match
+  // ambiguous, turning "打畀阿明" into a refusal.
+  const dedup = dialableContacts(
+    { name: "陳小明", phone: "+85290000000" },
+    [{ id: "c1", name: "陳小明", phone: "+852 9000 0000" }]
+  );
+  assert.equal(dedup.length, 1);
+
+  // Rows without a name or without a usable number cannot be dialled.
+  assert.deepEqual(dialableContacts(null, [{ id: "x", name: "  ", phone: "+85261234567" }]), []);
+  assert.deepEqual(dialableContacts(null, [{ id: "y", name: "阿明", phone: "" }]), []);
+  assert.deepEqual(dialableContacts(null, [{ id: "z", name: "阿明", phone: "12" }]), [], "2 digits is not a phone");
+  // Nothing known -> nobody dialable. The executor then refuses instead of guessing.
+  assert.deepEqual(dialableContacts(null, null), []);
+  assert.deepEqual(dialableContacts({ name: "", phone: "" }, []), []);
+
+  // Two people share a name: the executor must say WHO, not "I don't know him"
+  // (that would be a lie) and must not pick one.
+  const NOW = new Date(2026, 9, 25, 10, 0, 0).getTime();
+  const rang: string[] = [];
+  const twins = [
+    { name: "陳小明", phone: "+85261110000", relation: "大仔" },
+    { name: "陳小明", phone: "+85262220000", relation: "細仔" },
+  ];
+  const ambiguous = await createToolRunner({
+    locale: "zh-HK",
+    now: NOW,
+    tasks: [],
+    saveTask: async () => {},
+    contacts: async () => twins,
+    dial: async (p: string) => {
+      rang.push(p);
+      return true;
+    },
+  }).run({ name: "call_contact", risk: "confirm", args: { name: "陳小明" }, say: "" });
+  assert.equal(ambiguous.ok, false, "two people with one name is not a licence to pick");
+  assert.equal(rang.length, 0, "and nothing is dialled");
+  assert.equal((ambiguous.message ?? "").includes("大仔"), true, "the senior hears who the two are");
+  assert.equal((ambiguous.message ?? "").includes("細仔"), true);
 }
 
 console.log("selfcheck: OK");

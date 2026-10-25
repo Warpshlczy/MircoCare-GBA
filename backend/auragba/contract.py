@@ -7,9 +7,10 @@ permissive (`extra="allow"`) so frontend payloads that add fields never 422.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 Locale = Literal["zh-HK", "zh-MO", "zh-CN"]
 # Mirrors `Intent` in web/src/lib/types.ts. The six agent-layer intents
@@ -78,7 +79,14 @@ class SosEvent(_Base):
 
 class GeofenceEvent(_Base):
     """Crossing the home fence. A safety event, not a daily rollup — the time
-    point matters, so it is stored per event id (outbox replay is idempotent)."""
+    point matters, so it is stored per event id (outbox replay is idempotent).
+
+    `at` is the attribution time: an `exit` keeps the DEPARTURE timestamp even
+    when the same id is escalated to `alert=true` at the 60-minute mark, so a
+    crossing around midnight stays in the day it started. `distanceM` is the
+    distance at REPORT time, so an escalation row may be farther than the
+    departure row; client copy must say "距离家 X", never "离家时 X".
+    """
 
     id: str
     at: int
@@ -122,6 +130,39 @@ class EmergencyContact(_Base):
     phone: str
 
 
+class Contact(_Base):
+    """A person the senior may dial. Only family-added contacts are callable.
+
+    `relation` is for disambiguation ("大女阿明"), never a substitute for the
+    name. Phone numbers are normalised before validation, and only the dialer is
+    opened by the client — the backend never places a call.
+    """
+
+    id: str = Field(min_length=1, max_length=64)
+    name: str = Field(min_length=1, max_length=40)
+    relation: str | None = Field(default=None, max_length=20)
+    phone: str = Field(pattern=r"^\+?[0-9]{5,15}$")
+
+    @field_validator("phone", mode="before")
+    @classmethod
+    def _clean_phone(cls, value: Any) -> str:
+        # Accept the way families actually type numbers: spaces, dashes, brackets.
+        return re.sub(r"[\s\-()]", "", str(value))
+
+
+class ContactsRequest(_Base):
+    # Hard cap: a longer list makes "打畀阿明" collide more, and every collision
+    # costs the senior a follow-up question.
+    contacts: list[Contact] = Field(default_factory=list, max_length=5)
+
+    @model_validator(mode="after")
+    def _unique_ids(self) -> "ContactsRequest":
+        ids = [c.id for c in self.contacts]
+        if len(ids) != len(set(ids)):
+            raise ValueError("contact ids must be unique")
+        return self
+
+
 class HealthCard(_Base):
     id: str
     name: str
@@ -131,7 +172,23 @@ class HealthCard(_Base):
     chronicConditions: list[str] = Field(default_factory=list)
     medications: list[str] = Field(default_factory=list)
     emergencyContact: EmergencyContact
+    # Family-managed callable contacts. Kept separate from `emergencyContact`,
+    # which is the SOS escalation chain — who answers a fall must not depend on
+    # whom the senior last called for a chat.
+    contacts: list[Contact] = Field(default_factory=list, max_length=5)
     updatedAt: int
+
+
+class HealthCardUpdate(_Base):
+    """Family-editable health-card fields. `contacts` is a separate endpoint."""
+
+    name: str | None = Field(default=None, min_length=1, max_length=40)
+    age: int | None = Field(default=None, ge=0, le=120)
+    bloodType: str | None = Field(default=None, max_length=8)
+    allergies: list[str] | None = Field(default=None, max_length=20)
+    chronicConditions: list[str] | None = Field(default=None, max_length=20)
+    medications: list[str] | None = Field(default=None, max_length=30)
+    emergencyContact: EmergencyContact | None = None
 
 
 class TelemetryEvent(_Base):

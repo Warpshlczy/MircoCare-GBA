@@ -23,6 +23,7 @@ from ..contract import (
     AssistantChatRequest,
     BehaviourDailyEnvelope,
     ConversationTurn,
+    EmergencyContact,
     GaitWindow,
     GeofenceEvent,
     HealthCard,
@@ -172,6 +173,13 @@ def get_health_card(dev: str = Depends(device_id)) -> HealthCard:
     """Cross-border medication / health card. Versioned via `updatedAt`."""
     stored = store.get_doc(dev, "health_card")
     if not stored:
+        # A family deletion must not be resurrected by the demo seed on the next
+        # read; return a blank card instead of re-creating fake data.
+        if store.get_doc(dev, "health_card_deleted") is not None:
+            return HealthCard(
+                id=f"hc-{dev}", name="未填写", age=0, bloodType="—",
+                emergencyContact=EmergencyContact(name="未设置", phone=""), updatedAt=0,
+            )
         stored = {**_DEMO_CARD, "id": f"hc-{dev}", "updatedAt": int(time.time() * 1000)}
         store.set_doc(dev, "health_card", stored)
     return HealthCard(**stored)

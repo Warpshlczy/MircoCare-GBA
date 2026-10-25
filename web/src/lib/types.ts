@@ -150,6 +150,16 @@ export interface GeofenceEvent {
   alert: boolean;
 }
 
+export interface Contact {
+  id: string;
+  /** the spoken name only — never a display label like "陳小明（儿子）" */
+  name: string;
+  /** "大女" — for disambiguation only, never a substitute for the name */
+  relation?: string | null;
+  /** E.164-ish: digits with an optional leading + (validated server-side) */
+  phone: string;
+}
+
 export interface HealthCard {
   id: string;
   name: string;
@@ -158,7 +168,18 @@ export interface HealthCard {
   allergies: string[];
   chronicConditions: string[];
   medications: string[];
+  /**
+   * The SOS escalation contact. Kept separate from `contacts` on purpose: daily
+   * calls and emergency paging are different jobs, and merging them would make
+   * "will the family be alerted?" depend on who he rang today.
+   */
   emergencyContact: { name: string; phone: string };
+  /**
+   * People the senior may dial by name (contract.py `Contact`, ≤5). Written ONLY
+   * by the family via POST /caregiver/contacts — deleting one's own emergency
+   * contacts is not recoverable on the device.
+   */
+  contacts?: Contact[];
   updatedAt: number;
 }
 

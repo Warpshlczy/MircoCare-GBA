@@ -35,6 +35,16 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_opt_float(name: str) -> float | None:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 def _env_bool(name: str, default: bool) -> bool:
     raw = os.getenv(name)
     if raw is None:
@@ -48,6 +58,9 @@ class Settings:
 
     privacy_mode: str = os.getenv("AURA_PRIVACY_MODE", "extract-and-burn")
     baseline_days: int = _env_int("AURA_BASELINE_DAYS", 14)
+    # Day keys must match the device's calendar day; a UTC server would otherwise
+    # look up a different `behaviour:<day>` key.
+    timezone: str = os.getenv("AURA_TIMEZONE", "Asia/Hong_Kong")
     # Trend slope and CUSUM need a longer window than the Z reference; the weekly
     # report speaks about "the last 4 weeks", so that is the default.
     trend_days: int = _env_int("AURA_TREND_DAYS", 28)
@@ -66,6 +79,10 @@ class Settings:
     fusion3_w_behavior: float = _env_float("AURA_FUSION3_W_BEHAVIOR", 0.20)
     risk_watch: float = _env_float("AURA_RISK_WATCH", 0.409)
     risk_elevated: float = _env_float("AURA_RISK_ELEVATED", 0.521)
+    # Deployment prevalence used ONLY for PPV/NPV communication. Empty means no
+    # PPV number is ever printed; when set, reports must label it as an assumption,
+    # never as a measured property of the model.
+    deploy_prevalence: float | None = _env_opt_float("AURA_DEPLOY_PREVALENCE")
     data_dir: Path = field(
         default_factory=lambda: Path(
             os.getenv("AURA_DATA_DIR", str(Path(__file__).resolve().parents[1] / ".data"))
@@ -114,6 +131,9 @@ class Settings:
 
     # --- Notification provider seam (demo: webhook + log) -------------------
     notify_webhook: str = os.getenv("AURA_NOTIFY_WEBHOOK", "")
+    # C5 requires the community caregiver to be paged alongside the family.
+    # Empty = log-only demo recipient (no extra account/credential needed).
+    community_webhook: str = os.getenv("AURA_COMMUNITY_WEBHOOK", "")
 
     # --- Conversation memory at rest (C5) -----------------------------------
     # AES-GCM key material; the server refuses to start without ≥32 characters.
@@ -162,6 +182,17 @@ def validate_runtime(s: Settings = settings) -> None:
             "AURA_REGULATORY_CLAIM_LEVEL must be 'observation' or 'triage_support'; "
             "diagnostic claims require regulatory clearance this build does not have"
         )
+    if s.deploy_prevalence is not None and not 0.0 < s.deploy_prevalence < 1.0:
+        raise RuntimeError(
+            "AURA_DEPLOY_PREVALENCE must be between 0 and 1 (e.g. 0.10); "
+            "leave it empty to suppress all PPV numbers"
+        )
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    try:
+        ZoneInfo(s.timezone)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise RuntimeError(f"AURA_TIMEZONE is not a valid IANA zone: {s.timezone}") from exc
 
 
 # Sampling rate the acoustic front-end works at (16 kHz mono, telephony-grade).

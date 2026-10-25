@@ -25,6 +25,8 @@ from sklearn.model_selection import LeaveOneOut, StratifiedKFold
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
+from confound import report as confound_report
+
 BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE))  # 让脚本可 import auragba
 
@@ -91,8 +93,15 @@ def build_dataset():
         feats["y"] = int(r["label"] in ("AD", "MCI"))
         feats["label"] = r["label"]
         feats["uuid"] = r["uuid"]
+        # 人口学只用于混淆审计，不进入语义模型的输入特征
+        feats["age"] = r.get("age")
+        feats["education"] = r.get("education")
+        feats["sex"] = r.get("sex")
         rows.append(feats)
-    df = pd.DataFrame(rows).fillna(0.0)
+    df = pd.DataFrame(rows)
+    for col in FEATURE_COLS:
+        if col in df:
+            df[col] = df[col].fillna(0.0)
     print(f"可用样本: {len(df)} 人 (AD={sum(df.label=='AD')}, MCI={sum(df.label=='MCI')}, "
           f"CTRL={sum(df.label=='CTRL')})")
     return df
@@ -140,6 +149,7 @@ def main():
     df = build_dataset()
     X, y = df[FEATURE_COLS].astype(float), df["y"].values
     metrics = evaluate(X, y)
+    confound = confound_report(df, y, make_model, metrics["cv5_auc_mean"])
 
     final = make_model()
     final.fit(X, y)  # DataFrame 入参 -> 自动记录 feature_names_in_
@@ -162,6 +172,7 @@ def main():
         "task": "AD|MCI vs CTRL, linguistic stream only",
         "n_subjects": int(len(df)), "features": FEATURE_COLS,
         "metrics": metrics,
+        "demographic_baseline": confound,
         "coefficients": {k: round(float(v), 3) for k, v in coefs.items()},
         "ctrl_score_quantiles": thresholds,
         "pos_score_median": round(float(np.median(pos_scores)), 3),
