@@ -811,7 +811,8 @@ with tempfile.TemporaryDirectory() as tmp:
               {"at": now_ms - 2_300_000, "id": "scr-analyze-1", "riskIndex": 0.9,
                "riskBand": "elevated", "quality": "reject"})
     st.record("dev-rep", "telemetry",
-              {"id": "t1", "name": "daily_checkin", "at": now_ms - 3_600_000, "locale": "zh-CN"})
+              {"id": "t1", "name": "proactive", "at": now_ms - 3_600_000, "locale": "zh-CN",
+               "props": {"kind": "greeting", "trigger": "open"}})
     st.record("dev-rep", "telemetry",
               {"id": "t2", "name": "interview_answer", "at": now_ms - 3_500_000, "locale": "zh-CN",
                "props": {"questionId": 3, "answerLen": 12}})
@@ -859,6 +860,9 @@ with tempfile.TemporaryDirectory() as tmp:
     assert any(
         c.label == "完成访谈" and c.value == "1 次" for c in talk_section.counts
     ), "interview_end counts once; interview_answer must not double-count"
+    assert any(
+        c.label == "主动开口" and c.value == "1 次" for c in talk_section.counts
+    ), "A's `proactive` telemetry must feed the talk section (the old names are gone)"
     activity_section = next(s for s in report.sections if s.key == "activity")
     assert "代理指标" in activity_section.note
     assert any(
@@ -868,6 +872,25 @@ with tempfile.TemporaryDirectory() as tmp:
     _activity_counts = {c.label: c.value for c in activity_section.counts}
     assert _activity_counts["外出次数"] == "3 次", "every exit counts, alerted or not"
     assert _activity_counts["外出时长"] == "45 分钟（1 次）", "minutesAway lives on enter, not exit"
+
+    # Zero usable screening -> no advice, not a fabricated "low / continue observing".
+    st.record("dev-nodata", "screening_results",
+              {"at": now_ms - 3_000_000, "id": "cap-1", "source": "screening_session",
+               "riskBand": "low", "insufficientStreams": True, "quality": "good"})
+    _nodata = build_weekly_report("dev-nodata", st, now=now_ms)
+    _nodata_advice = next(s for s in _nodata.sections if s.key == "advice")
+    assert _nodata_advice.available is False, "no usable screening means no advice tier"
+    assert "暂不给出建议" in _nodata_advice.summary
+    assert any(c.value == "样本不足" for c in _nodata_advice.counts)
+
+    # A real low band must still produce the normal tier (the new branch must not
+    # swallow usable data).
+    st.record("dev-low", "screening_results",
+              {"at": now_ms - 3_000_000, "id": "low-1", "riskIndex": 0.2,
+               "riskBand": "low", "quality": "good", "insufficientStreams": False})
+    _low = build_weekly_report("dev-low", st, now=now_ms)
+    _low_advice = next(s for s in _low.sections if s.key == "advice")
+    assert _low_advice.available and "继续观察" in _low_advice.summary
 
     import auragba.reports.weekly as weekly_mod  # noqa: E402
 
