@@ -47,7 +47,26 @@ export function isQuestion(text: string): boolean {
   const s = (text ?? "").trim();
   if (!s) return false;
   if (/[?？]\s*$/.test(s)) return true;
-  return ["点算", "點算", "怎么办", "怎麼辦", "为什么", "為什麼", "点解", "點解", "可唔可以", "能不能", "点样", "點樣"].some((w) =>
-    s.includes(w)
-  );
+  // Cantonese/Mandarin yes-no questions end in 吗/呢/嘛 even without a mark.
+  // Missing this is how 「能听到我说话吗」used to fall into the todo path.
+  if (/(吗|嗎|呢|嘛)\s*$/.test(s)) return true;
+  return [
+    "点算",
+    "點算",
+    "怎么办",
+    "怎麼辦",
+    "为什么",
+    "為什麼",
+    "点解",
+    "點解",
+    "可唔可以",
+    "能不能",
+    "可不可以",
+    "点样",
+    "點樣",
+    "怎么样",
+    "怎麼樣",
+    "怎样",
+    "怎樣",
+  ].some((w) => s.includes(w));
 }

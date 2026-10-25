@@ -13,7 +13,7 @@
 // regression against the behaviour the app already had.
 
 import { localCardsFor } from "./cards.ts";
-import { parseIntent } from "./intent.ts";
+import { isQuestion, parseIntent } from "./intent.ts";
 import { fitUtterance } from "./speech.ts";
 import { planCalls, planLocal, refuseReason } from "./toolrun.ts";
 import { TOOLS } from "./tools.ts";
@@ -286,6 +286,57 @@ export function outOfScopeRequest(utterance: string): boolean {
   return OUT_OF_SCOPE.some((re) => re.test(text));
 }
 
+// ---------------------------------------------------------------------------
+// Talking TO the assistant is not a task.
+//
+// 「能听到我说话吗」used to reach the offline todo fallback and answer
+// 「好，幫你記低咗」 — a question about whether the device can hear was filed as
+// a chore. These patterns are deliberately narrow (the assistant's own hearing /
+// presence / identity), so a real request that merely contains 你 or 聽 is not
+// swallowed.
+// ---------------------------------------------------------------------------
+
+const SOCIAL: { re: RegExp; reply: Record<Locale, string> }[] = [
+  {
+    re: /(?:你|妳).{0,4}(?:聽|听)(?:得)?(?:到|見|见|明)|(?:能|可以|可否).{0,3}(?:聽|听)(?:得)?(?:到|見|见).{0,4}我/,
+    reply: {
+      "zh-HK": "我聽到，你慢慢講。",
+      "zh-MO": "我聽到，你慢慢講。",
+      "zh-CN": "我听到了，您慢慢说。",
+    },
+  },
+  {
+    re: /(?:你|妳).{0,2}(?:喺|在)(?:唔|不)?(?:喺|在)度|你在吗|你還喺度/,
+    reply: {
+      "zh-HK": "我喺度，你講。",
+      "zh-MO": "我喺度，你講。",
+      "zh-CN": "我在，您说。",
+    },
+  },
+  {
+    re: /你(?:係|是)(?:咪|不是)?(?:人|機械|机械|機械人|机器人|ai|AI)|你叫咩名|你叫什么/,
+    reply: {
+      "zh-HK": "我係憶伴，陪你講嘢嘅。",
+      "zh-MO": "我係憶伴，陪你講嘢嘅。",
+      "zh-CN": "我是忆伴，陪您说话的。",
+    },
+  },
+];
+
+/** A direct answer to "can you hear me / are you there / who are you", or null. */
+export function socialReply(utterance: string, locale: Locale): string | null {
+  const text = utterance ?? "";
+  for (const s of SOCIAL) {
+    if (s.re.test(text)) return s.reply[locale] ?? s.reply["zh-HK"];
+  }
+  return null;
+}
+
+/** "提醒我…" / "記住…" turn a question INTO an action; nothing else does. */
+const REMEMBER_CUE = /(記住|记住|記得|记得|提醒|提我|叫我|幫我記|帮我记)/;
+/** Tools that CREATE something. For a plain question they are never right. */
+const MUTATING_CALLS = new Set(["create_task", "log_medication", "compose_card", "defer_task"]);
+
 /**
  * 连续第几次"没听懂"之后不再要求他重说，而是给他一个人。
  *
@@ -348,6 +399,14 @@ export async function runTurn(utterance: string, deps: AgentDeps): Promise<TurnO
     return { ...emptyOutcome(), handled: true, refused: true, reply: refuse };
   }
 
+  // 1b. "Can you hear me?" is a question about the assistant, not a chore.
+  //     Answer it here so it can never reach the tool planner or the todo
+  //     fallback ("好，幫你記低咗" was the reported failure).
+  const social = socialReply(text, deps.locale);
+  if (social) {
+    return { ...emptyOutcome(), handled: true, reply: social };
+  }
+
   // 2. Local tool intent first: "我食咗藥" reports a dose and must WRITE a
   // record, not render the medication checklist card. Only when no tool can
   // act do we fall back to the local card for the same utterance.
@@ -385,19 +444,31 @@ export async function runTurn(utterance: string, deps: AgentDeps): Promise<TurnO
 
   const modelCalls = res?.calls ?? [];
   const modelCards = res?.cards ?? [];
+  // A plain QUESTION must not create anything. The model (and the mock) reach
+  // for `create_task` as a catch-all, which is how 「能听到我说话吗」became
+  // 「幫你記住咗」. Drop mutating calls unless he actually asked to remember.
+  const askOnly = isQuestion(text) && !REMEMBER_CUE.test(text);
+  const cleanModelCalls = askOnly ? modelCalls.filter((c) => !MUTATING_CALLS.has(c.name)) : modelCalls;
+
   // A medication REPORT is deterministic: "我食咗藥" must write a record.
   // The backend mock (and any planner that has not learned the tool yet) still
   // answers `create_task`, which would turn a taken dose into a chore and never
   // reach `records`. The device plan wins unless the model itself chose
   // `log_medication` — then the model's richer args (name/note) are kept.
   const medReport = localCalls.some((c) => c.name === "log_medication");
-  const modelLoggedMed = modelCalls.some((c) => c.name === "log_medication");
+  const modelLoggedMed = cleanModelCalls.some((c) => c.name === "log_medication");
   const calls =
     medReport && !modelLoggedMed
       ? localCalls
-      : modelCalls.length > 0 || modelCards.length > 0
-        ? modelCalls
+      : cleanModelCalls.length > 0 || modelCards.length > 0
+        ? cleanModelCalls
         : localCalls;
+
+  // Everything the model proposed was a mutation on a plain question, and it
+  // said nothing useful: hand the turn back so A's chat path can answer it.
+  if (askOnly && cleanModelCalls.length === 0 && !(res?.reply ?? "").trim() && modelCards.length === 0) {
+    return emptyOutcome();
+  }
 
   if (!res && calls.length === 0) {
     // No answer from the model AND nothing this device can plan: not ours.

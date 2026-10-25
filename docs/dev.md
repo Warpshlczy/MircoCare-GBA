@@ -543,7 +543,7 @@ mv public/live2d/model.manifest.json /tmp/ && npm run build; mv /tmp/model.manif
 | 1 | 长句被吞 / 半句没声 | `audio.ts#speak` 改为按 `spokenSegments()` 分段串行合成，段间 `SEGMENT_GAP_MS=250ms`；内容零改动（`join("")` == 原文） | selfcheck：分段不丢字、段数封顶、无空段 |
 | 2 | Chromium cancel 竞态 | 只在确实有声音时 `cancel()`，并隔一个 macrotask（120ms）再 `speak()`；旧世代回调一律丢弃 | 连续 3 句播报，每句完整 |
 | 3 | 旧句的 `finish()` 把新轮次打回 idle | 模块级 `speakGen` + `activeFinish`：新 `speak()` 先 resolve 旧句（barge-in 语义），`cancelSpeech()` 同步失效旧回调 | 播报中触发下一次播报，状态不闪回 idle |
-| 4 | 老人无法打断 | 朗读期间用 `SPEAK_WAKE_NAMES`（排除「忆伴」防自唤醒）重新武装唤醒词；命中即静音、短应答「我喺度，你講。」、立刻聆听 | 播报中说「小忆」→ 立刻停、听到回应、进入聆听 |
+| 4 | 老人无法打断 | **朗读期间不重新武装唤醒词**（真机：小米 ASR 在 TTS 起播时重启会抢走音频通路，导致「有时有声有时没声」）。打断改为按大按钮「講嘢」/「求助」：`onTalk()` 内部 `interrupt()` 立即静音。名字打断留给 B 的原生 AEC 识别器 | 播报中按「講嘢」→ 立刻静音并进入聆听 |
 | 5 | 唤醒词一次失败后永久失效 | `startWakeWord` 的 `onerror` 只在 `not-allowed / service-not-allowed / audio-capture` 时停；`no-speech / aborted / network` 400ms 后重启；补同音词（小艺/小意/小易/晓忆） | 静默一轮后仍能唤醒 |
 | 6 | 工具面板无屏幕入口（#1 P0） | 主屏常驻「常用」按钮 → `openTools()` | 失语长者不发声也能打开打给家人/健康卡/拍照/筛查 |
 | 7 | 字幕 2 行只装 13–16 字（#1 P0） | `.caption` 改 4 行 / 38px / 全宽（大字档 5 行 / 48px） | 34 字长句完整可见 |
@@ -554,6 +554,8 @@ mv public/live2d/model.manifest.json /tmp/ && npm run build; mv /tmp/model.manif
 | 12 | 家属端今日记录与删号（#2/#7） | 家属端展示 `recordsToday.kinds.med`（缺省显示「暂无上报」，不写 0）；新增「删除账号」：`flushOutboxOnce → wipeLocalData → deleteAccount` | 删号后本机 11 个 store 清空、`deviceId` 保留；未上报时不显示 0 |
 | 13 | 真机神经童声从未加载（2026-10-25 真机回归） | sherpa-onnx **2.0.0** 的 `OfflineTtsModelConfig` 把 Matcha/Kokoro/ZipVoice/Kitten/Pocket/Supertonic 都改成非空 Kotlin 参数，传 `null` 抛 `NullPointerException: parameter matcha`，两份模型都加载失败、静默回退系统引擎。改用无参构造 + `setVits/setNumThreads/setDebug/setProvider` | 真机日志 `neural model ready dir=tts/yue sr=22050`，随后 `resolve ok=true`，不再出现 `creating TextToSpeech` |
 | 14 | 真机连不上本机后端（2026-10-25 联调） | Capacitor 默认 `androidScheme=https`，`http://localhost:8000` 属混合内容被拦。真机联调用 `CAP_ANDROID_SCHEME=http npx cap sync android`（origin 变 `http://localhost`），并让 `AURA_CORS_ORIGINS` 含 `http://localhost`；`adb reverse tcp:8000` 提供链路 | 后端日志出现 `POST /gait/windows 204`、`POST /auth/pairing-code 200`；发布包仍用默认 https |
+| 15 | 问句被当成待办（2026-10-25 用户实测） | `agent.ts#socialReply` 先答「能不能听到/你在吗/你是谁」；`runTurn` 对**不含「提醒/记住」的问句**丢弃模型给的 `create_task`/`log_medication`/`compose_card`，交回闲聊路径；`page.tsx` 兜底也不再为问句建待办；`intent.ts#isQuestion` 补「吗/嗎/呢/嘛」结尾与「怎么样」 | 「能听到我说话吗」→「我聽到，你慢慢講。」零工具零卡片；「可唔可以提醒我食藥？」仍建任务 |
+| 16 | TTS 偶发没声（2026-10-25 用户实测） | ①朗读期间不再重启唤醒识别器（音频通路冲突）；②每段独立看门狗：某段 6–12s 无回调只跳过该段并继续下一段，不再整句放弃（`tts_segment_timeout`）；③整句 guard 只作最终兜底（+8s/段） | 连续播 3 句每句完整；单段引擎失声时后续段仍会播出 |
 
 > **T3-Y 承接句暂缓**：它会改变轮次语义（主句后追加一句并自动开麦），与本次「叫名字才打断/接手」的模型冲突，且必须真机验证节奏。等分段播放真机验收通过后再决定是否启用；T3-Z（`replyFollowup` 契约字段）继续不动。
 >

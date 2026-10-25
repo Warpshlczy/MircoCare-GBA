@@ -133,6 +133,7 @@ import {
   isLlmReady,
   composeReply,
   outOfScopeRequest,
+  socialReply,
   CONFUSED_ESCALATE_AFTER,
   MAX_RECENT_TURNS,
 } from "./lib/agent.ts";
@@ -1172,8 +1173,50 @@ assert.equal(magnitude(3, 4, 0), 5);
         }),
       })
     );
-    assert.equal(richer.steps[0]?.name, "log_medication");
-    assert.equal(richer.steps[0]?.args.name, "降壓藥");
+    // A question about the assistant is answered, never filed as a chore.
+    for (const text of ["能听到我说话吗", "你听得明吗", "你在吗"]) {
+      assert.ok(socialReply(text, "zh-HK"), `social reply expected: ${text}`);
+    }
+    assert.equal(socialReply("我食咗藥", "zh-HK"), null, "a report is not small talk");
+    assert.equal(socialReply("帮我把药盒放好", "zh-HK"), null, "a real request must not be swallowed");
+
+    const heard = await runTurn("能听到我说话吗", baseDeps());
+    assert.equal(heard.handled, true);
+    assert.equal(heard.executed.length, 0, "no tool ran");
+    assert.equal(heard.cards.length, 0, "no todo card");
+    assert.equal(
+      /記低|記住|记住|记下/.test(heard.reply),
+      false,
+      `must not claim it was recorded: ${heard.reply}`
+    );
+    assert.ok(spokenLength(heard.reply) <= SPEECH_BUDGET, `reply too long: ${heard.reply}`);
+
+    // The model reaching for create_task on a plain question is ignored.
+    const questionMock = await runTurn(
+      "今天天气怎么样",
+      baseDeps({
+        requestTurn: async () => ({
+          reply: "",
+          calls: [{ name: "create_task", args: { text: "今天天气怎么样" } }],
+          cards: [],
+        }),
+      })
+    );
+    assert.equal(questionMock.handled, false, "hand back for the chat path");
+    assert.equal(questionMock.executed.length, 0);
+
+    // …but an explicit "remind me" question may still create a task.
+    const remindAsk = await runTurn(
+      "可唔可以提醒我食藥？",
+      baseDeps({
+        requestTurn: async () => ({
+          reply: "",
+          calls: [{ name: "create_task", args: { text: "食藥" } }],
+          cards: [],
+        }),
+      })
+    );
+    assert.deepEqual(remindAsk.steps.map((s) => s.name), ["create_task"]);
   }
 
   // refusal short-circuits even when a backend is available

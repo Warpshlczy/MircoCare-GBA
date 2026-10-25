@@ -5,7 +5,7 @@ import { FRAMES_PER_CHAR, VISEME_FRAME_MS, visemeFromText } from "./viseme";
 import { bridge, nativeAvailable } from "./native";
 import type { VoicePreset, VoiceProfile } from "./native";
 import { transcribeAudio } from "./api";
-import { SEGMENT_GAP_MS, spokenSegments } from "./speech";
+import { SEGMENT_GAP_MS, spokenLength, spokenSegments } from "./speech";
 import { track } from "./analytics";
 import type { Locale } from "./types";
 
@@ -161,6 +161,8 @@ export function speak(
     let timer: ReturnType<typeof setInterval> | null = null;
     let guard: ReturnType<typeof setTimeout> | null = null;
     let gap: number | null = null;
+    /** Per-segment watchdog: an engine that never answers must not eat the line. */
+    let segGuard: number | null = null;
     let done = false;
     let index = 0;
 
@@ -181,16 +183,17 @@ export function speak(
       stopMouth();
       if (guard !== null) clearTimeout(guard);
       if (gap !== null) window.clearTimeout(gap);
+      if (segGuard !== null) window.clearTimeout(segGuard);
       if (activeFinish === finish) activeFinish = null;
       if (speakGen === my) speakingNow = false;
       resolve();
     };
     activeFinish = finish;
 
-    // Some Android engines never fire `onend` for long utterances; without this
-    // guard the assistant would stay "speaking" and the senior would be locked
-    // out. Segment count and gaps are part of the budget now.
-    const budget = frames.length * frameMs * 2 + 4000 + segments.length * (SEGMENT_GAP_MS + 900);
+    // Absolute cap for the WHOLE line (a safety net, not the normal path).
+    // Individual segments have their own watchdog; this one only guarantees the
+    // app can never stay "speaking" forever.
+    const budget = frames.length * frameMs * 2 + 4000 + segments.length * (SEGMENT_GAP_MS + 8000);
     guard = setTimeout(finish, budget);
 
     const webSpeak = (segment: string, next: () => void) => {
@@ -235,14 +238,32 @@ export function speak(
         return;
       }
       const segment = segments[index++];
+      /** Exactly one advance per segment, whichever fires first. */
+      let advanced = false;
       const afterSegment = () => {
-        if (!alive()) return;
+        if (advanced || !alive()) return;
+        advanced = true;
+        if (segGuard !== null) {
+          window.clearTimeout(segGuard);
+          segGuard = null;
+        }
         if (index >= segments.length) {
           finish();
           return;
         }
         gap = window.setTimeout(playNext, SEGMENT_GAP_MS);
       };
+      // A silent engine (no voice installed, onDone never delivered) must not
+      // take the rest of the sentence with it: skip THIS segment and continue.
+      segGuard = window.setTimeout(
+        () => {
+          if (!alive() || advanced) return;
+          track("tts_segment_timeout", locale as Locale, { chars: spokenLength(segment) });
+          stopMouth();
+          afterSegment();
+        },
+        Math.max(6000, spokenLength(segment) * 700 + 5000)
+      );
 
       const native = bridge();
       if (!native) {

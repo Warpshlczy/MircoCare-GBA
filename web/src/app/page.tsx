@@ -12,7 +12,7 @@ import { ScreeningOverlay } from "@/components/ScreeningOverlay";
 import { FollowupSheet } from "@/components/FollowupSheet";
 import { useReminder } from "@/hooks/useReminder";
 import { useGaitMonitor, flushGaitUploads } from "@/hooks/useGaitMonitor";
-import { useWakeWord, SPEAK_WAKE_NAMES } from "@/hooks/useWakeWord";
+import { useWakeWord } from "@/hooks/useWakeWord";
 import { useAgentBridge } from "@/hooks/useAgentBridge";
 import {
   cancelSpeech,
@@ -623,7 +623,11 @@ export default function Page() {
     if (!next.length) {
       mode = "local";
       next = localCardsFor(intent, locale, { reminders: reminder.items, now });
-      if (!next.length && utterance.trim()) next = [todoCardFromUtterance(utterance, locale, now)];
+      // A QUESTION is never filed as a chore: with the model unavailable this
+      // was 「能听到我说话吗」→「好，幫你記低咗」. Ask him to say it again instead.
+      if (!next.length && utterance.trim() && !isQuestion(utterance)) {
+        next = [todoCardFromUtterance(utterance, locale, now)];
+      }
     }
     pushCards(next);
     track("card_shown", locale, { intent, mode });
@@ -953,19 +957,16 @@ export default function Page() {
   useEffect(() => () => clearMeter(), [clearMeter]);
 
   /**
-   * Requirement #1/#3: while the digital human is talking, the senior must be
-   * able to stop him by calling his name again.
+   * NOTE (2026-10-25 真机回归): the wake listener is deliberately NOT re-armed
+   * while the assistant is speaking.
    *
-   * The wake listener is normally stopped at the start of a turn (the mic goes
-   * to the answer recognizer), so a long reply used to be uninterruptible. Here
-   * it is re-armed for the duration of `speaking`, with the narrower name set:
-   * 「忆伴」 is excluded because the reply itself contains it, and a recognizer
-   * that hears the speaker would wake itself in a loop.
+   * It used to be, so the senior could barge in by name. On this handset the
+   * wake-word recognizer (Xiaomi ASR) restarts exactly when TTS starts and takes
+   * the audio path with it — speech became intermittent ("有时有有时无"). Sound
+   * reliability wins: during a reply, use the big 講嘢 / 求助 buttons to take
+   * over (onTalk() already cancels speech). Name-based barge-in needs a native
+   * recognizer with echo cancellation (B), not a second WebView recognizer.
    */
-  useEffect(() => {
-    if (state !== "speaking" || blockedRef.current) return;
-    wakeSleep(SPEAK_WAKE_NAMES);
-  }, [state, wakeSleep]);
 
   // Coming back to the foreground (e.g. the senior unlocks the phone) asks the
   // planner; the cooldown keeps trivial app switches from re-greeting.
