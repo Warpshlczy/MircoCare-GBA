@@ -1175,6 +1175,9 @@ assert.equal(magnitude(3, 4, 0), 5);
         }),
       })
     );
+    assert.equal(richer.steps[0]?.name, "log_medication", "the model's own choice is kept");
+    assert.equal(richer.steps[0]?.args.name, "降壓藥", "and its richer args are not thrown away");
+
     // A question about the assistant is answered, never filed as a chore.
     for (const text of ["能听到我说话吗", "你听得明吗", "你在吗"]) {
       assert.ok(socialReply(text, "zh-HK"), `social reply expected: ${text}`);
@@ -1206,6 +1209,51 @@ assert.equal(magnitude(3, 4, 0), 5);
     );
     assert.equal(questionMock.handled, false, "hand back for the chat path");
     assert.equal(questionMock.executed.length, 0);
+
+    // A question must not TICK a chore either. `complete_task` writes straight
+    // into C's completion rate and tells the family he did something he did not.
+    // The pair is the proof: the SAME model call is planned for a statement and
+    // dropped for the question, so it is the question rule doing the work.
+    const tickStatement = await runTurn(
+      "件衫洗咗",
+      baseDeps({
+        canRun: () => true,
+        requestTurn: async () => ({
+          reply: "",
+          calls: [{ name: "complete_task", args: { query: "件衫" } }],
+          cards: [],
+        }),
+      })
+    );
+    assert.deepEqual(
+      tickStatement.steps.map((s) => s.name),
+      ["complete_task"],
+      "a statement may complete a chore"
+    );
+    const tickMock = await runTurn(
+      "件衫洗咗未呢",
+      baseDeps({
+        canRun: () => true,
+        requestTurn: async () => ({
+          reply: "",
+          calls: [{ name: "complete_task", args: { query: "件衫" } }],
+          cards: [],
+        }),
+      })
+    );
+    assert.equal(tickMock.executed.length, 0, "a question never ticks a chore");
+    assert.deepEqual(tickMock.steps.map((s) => s.name), [], "the same call is dropped when asked as a question");
+
+    // …but a compound utterance that also asks for something local is SERVED:
+    // 「你喺唔喺度」must not swallow the route request behind it.
+    const compound = await runTurn("你喺唔喺度，帶我去街市", baseDeps({ canRun: () => true }));
+    assert.deepEqual(
+      compound.steps.map((s) => s.name),
+      ["plan_route"],
+      "a local tool outranks the social shortcut"
+    );
+    // The same sentence with nothing plannable is still answered as small talk.
+    assert.equal((await runTurn("你喺唔喺度", baseDeps())).reply, "我喺度，你講。");
 
     // …but an explicit "remind me" question may still create a task.
     const remindAsk = await runTurn(

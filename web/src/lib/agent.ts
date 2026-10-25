@@ -352,8 +352,24 @@ export function socialReply(utterance: string, locale: Locale): string | null {
 
 /** "提醒我…" / "記住…" turn a question INTO an action; nothing else does. */
 const REMEMBER_CUE = /(記住|记住|記得|记得|提醒|提我|叫我|幫我記|帮我记)/;
-/** Tools that CREATE something. For a plain question they are never right. */
-const MUTATING_CALLS = new Set(["create_task", "log_medication", "compose_card", "defer_task"]);
+/**
+ * Tools that CHANGE state. For a plain question they are never right.
+ *
+ * `complete_task` belongs here even though A's original list stopped at the four
+ * "create" tools: a question must not TICK A CHORE either. 「我食咗藥未呀」 is
+ * filtered out of `log_medication` upstream (toolrun.ts#NOT_A_REPORT), but the
+ * model can still answer it with `complete_task` — and a wrong tick does not
+ * just corrupt C's completion rate, it tells the family he did something he did
+ * not. `set_alarm`/`call_contact` are deliberately NOT here: 「可唔可以打畀阿明」
+ * is a real request phrased as a question.
+ */
+const MUTATING_CALLS = new Set([
+  "create_task",
+  "complete_task",
+  "log_medication",
+  "compose_card",
+  "defer_task",
+]);
 
 /**
  * 连续第几次"没听懂"之后不再要求他重说，而是给他一个人。
@@ -429,7 +445,12 @@ export async function runTurn(utterance: string, deps: AgentDeps): Promise<TurnO
   // 1b. "Can you hear me?" is a question about the assistant, not a chore.
   //     Answer it here so it can never reach the tool planner or the todo
   //     fallback ("好，幫你記低咗" was the reported failure).
-  const social = socialReply(text, deps.locale);
+  //
+  //     A local tool claims the turn FIRST: 「你喺唔喺度，帶我去街市」is two
+  //     things at once, and answering only 「我喺度，你講。」 would swallow the
+  //     route he actually asked for. Same precedence rule as `outOfScopeRequest`
+  //     above — the narrower rule must never outrank a request we can serve.
+  const social = planLocal(text).length > 0 ? null : socialReply(text, deps.locale);
   if (social) {
     return { ...emptyOutcome(), handled: true, reply: social };
   }
