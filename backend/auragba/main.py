@@ -77,11 +77,24 @@ def root() -> dict:
             "POST /behaviour/daily", "POST /task/events", "POST /geofence/events",
             "POST /medication/plan (configurable)", "POST /reminders/escalate",
         ],
-        "auth": ["POST /auth/register", "POST /auth/pairing-code", "POST /auth/pair"],
-        "insight": ["POST /screening/analyze", "GET /baseline/me", "GET /economics/me", "GET /audit/screening"],
+        "auth": [
+            "POST /auth/register", "GET /auth/me", "DELETE /auth/me",
+            "POST /auth/pairing-code", "POST /auth/pair",
+        ],
+        "insight": [
+            "POST /screening/analyze", "POST /asr/transcribe",
+            "GET /baseline/me", "GET /economics/me", "GET /audit/screening", "GET /health",
+        ],
+        "caregiver": [
+            "GET /caregiver/overview", "POST /caregiver/contacts",
+            "PUT /caregiver/health-card", "DELETE /caregiver/health-card",
+            "DELETE /caregiver/pairing/{senior_device_id}",
+            "POST /caregiver/sos/{sos_id}/ack",
+        ],
         "reports": [
             "GET /reports/weekly/me", "GET /reports/weekly/me.html",
-            "POST /reports/weekly/send",
+            "GET /reports/weekly/me.pdf", "POST /reports/weekly/send",
             "GET /caregiver/reports/weekly", "GET /caregiver/reports/weekly.html",
+            "GET /caregiver/reports/weekly.pdf",
         ],
     }

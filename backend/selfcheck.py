@@ -1038,6 +1038,10 @@ with tempfile.TemporaryDirectory() as tmp:
     for i in range(3):
         log.append(kind="screening", device_id="dev-x", engine_version="e", feature_set_version="f",
                    fusion_version="u", input_digest=f"d{i}", output={"riskIndex": 0.1 * i})
+    log.append(kind="screening", device_id="dev-y", engine_version="e", feature_set_version="f",
+               fusion_version="u", input_digest="dy", output={"riskIndex": 0.3})
+    assert [r["deviceId"] for r in log.records(10, device_id="dev-y")] == ["dev-y"]
+    assert len(log.records(10, device_id="dev-x")) == 3, "audit reads must be device-scoped"
     assert log.verify() is True
     lines = (Path(tmp) / "audit.jsonl").read_text().splitlines()
     lines[1] = lines[1].replace('"riskIndex": 0.1', '"riskIndex": 9.9')
@@ -1336,6 +1340,7 @@ with tempfile.TemporaryDirectory() as tmp:
 # Account deletion erases the account row and the senior's device store.
 from auragba.auth_store import AuthStore  # noqa: E402
 import auragba.api.auth_routes as auth_routes  # noqa: E402
+from fastapi import Response  # noqa: E402
 
 with tempfile.TemporaryDirectory() as tmp:
     _auth = AuthStore(Path(tmp) / "auth.sqlite3")
@@ -1354,10 +1359,17 @@ with tempfile.TemporaryDirectory() as tmp:
         delete_account=lambda _id: {"role": "senior", "deviceId": "dev-del"}
     )
     auth_routes.audit_log = SimpleNamespace(append=lambda **kw: None)
+    _del_response = Response()
     try:
-        auth_routes.delete_me(SimpleNamespace(account_id="acct-del", role="senior", device_id="dev-del"))
+        auth_routes.delete_me(
+            response=_del_response,
+            principal=SimpleNamespace(account_id="acct-del", role="senior", device_id="dev-del"),
+        )
     finally:
         (auth_routes.store, auth_routes.auth_store, auth_routes.audit_log) = _real_del
+    assert "aura_session" in (_del_response.headers.get("set-cookie") or ""), (
+        "deleting the account must clear the session cookie"
+    )
     assert _store.history("dev-del", "telemetry") == [], "account delete must erase device data"
     del _store
     gc.collect()

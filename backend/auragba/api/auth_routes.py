@@ -81,12 +81,18 @@ def pair(
 
 
 @router.delete("/me", status_code=204)
-def delete_me(principal: Principal = Depends(current_principal)) -> None:
+def delete_me(
+    response: Response,
+    principal: Principal = Depends(current_principal),
+) -> None:
     """Erase this account, its pairings, and (for a senior) the device store.
 
     The signed cookie/token becomes invalid as soon as the account row is gone;
-    the caller must register again to use the app. Audit records only digests.
+    the caller must register again to use the app. The cookie is cleared too, so
+    the browser does not keep a credential that can only answer 401. Audit
+    records only digests.
     """
+    response.delete_cookie("aura_session", path="/")
     deleted = auth_store.delete_account(principal.account_id)
     if deleted is None:
         raise HTTPException(status_code=404, detail="account not found")

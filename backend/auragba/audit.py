@@ -79,11 +79,20 @@ class AuditLog:
                 fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
             return {"seq": rec["seq"], "hash": rec["hash"]}
 
-    def records(self, limit: int = 50) -> list[dict[str, Any]]:
+    def records(self, limit: int = 50, device_id: str | None = None) -> list[dict[str, Any]]:
+        """Last `limit` records, optionally scoped to one pseudonymous device.
+
+        Scope filtering happens BEFORE the tail slice: filtering a global tail
+        would return an empty page for a device whose records are older than the
+        last N rows of other devices.
+        """
         if not self._path.exists():
             return []
         lines = [ln for ln in self._path.read_text("utf-8").splitlines() if ln.strip()]
-        return [json.loads(ln) for ln in lines[-limit:]]
+        rows = [json.loads(ln) for ln in lines]
+        if device_id is not None:
+            rows = [row for row in rows if row.get("deviceId") == device_id]
+        return rows[-limit:]
 
     def verify(self) -> bool:
         """Recompute the hash chain; False if any record was altered/removed."""

@@ -12,8 +12,8 @@
 | 体动 | `DeviceMotionEvent`（加速度 + 陀螺） | 平台决定（约 20–50 Hz） | 仅 HTTPS，5s 窗口聚合 | 步数、步频、`cv`、跌倒三阶段 | `GaitWindow` 摘要 | A | ✅ |
 | 位置 | GPS / 网络定位（仅前台） | 按需（≥60s） | 仅 HTTPS | 距离、围栏判定 | 越界事件 + 粗略距离 | B | ✅（`/geofence/events`） |
 | 交互行为 | App 事件 / 任务卡 | 事件驱动 | 每日 1 条汇总 | 计数、确认延迟、完成率、延后次数 | `BehaviourDaily` | B | ✅（`/behaviour/daily`） |
-| 昼夜节律 | `ACTION_SCREEN_ON` / `ACTION_USER_PRESENT` / 充电广播 | 事件驱动 | 每日 1 条 | 首末活跃、夜间觉醒、充电时段 | `CircadianDaily` | B | ⏳ W4 |
-| 数字能力 | 前台应用切换、点击失败、首触延迟 | 事件驱动（仅计数） | 每日 1 条 | `appSwitchCount` / `opFailRate` / `firstTouchDelayMs` | `DigitalSkillDaily` | B | ⏳ W4（默认不申请权限，整条 `null`） |
+| 昼夜节律 | `ACTION_SCREEN_ON` / `ACTION_USER_PRESENT` / 充电广播 | 事件驱动 | 每日 1 条 | 首末活跃、夜间觉醒、充电时段 | `CircadianDaily` | B | 本期未交付（B 确认）；C 按 `null` 跳过、不补 0 |
+| 数字能力 | 前台应用切换、点击失败、首触延迟 | 事件驱动（仅计数） | 每日 1 条 | `appSwitchCount` / `opFailRate` / `firstTouchDelayMs` | `DigitalSkillDaily` | B | 本期未交付（B 确认）；整条 `null`，不参与风险分 |
 | 听力代理 | 系统媒体音量 / TTS 调节 | 事件驱动 | 每日 1 条 | 音量档位、是否被反复调高 | `HearingProxyDaily` | A | ⏳ |
 | 视觉偏好 | 系统字号 / 显示大小 / 高对比 | 首次 + 变更 | 首次 + 变更时 | 偏好枚举 | 偏好枚举 | A | ⏳ |
 | 影像 | 后置摄像头 | 单帧（按压式） | **不上传** | 本地展示 | 无 | A | ✅ |
