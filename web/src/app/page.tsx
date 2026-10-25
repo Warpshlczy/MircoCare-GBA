@@ -1242,12 +1242,12 @@ export default function Page() {
         <p className="text-center text-2xl text-aura-deep hc:text-white">{t(locale, "wakeHint")}</p>
         <div
           aria-live="polite"
-          className="flex w-full items-center justify-between gap-3 rounded-2xl bg-white px-5 py-4 hc:border hc:border-white hc:bg-black"
+          className="flex w-full flex-wrap items-center justify-center gap-x-6 gap-y-1 rounded-2xl bg-white px-5 py-4 hc:border hc:border-white hc:bg-black"
         >
-          <span className="text-2xl font-bold text-aura-deep hc:text-white">
+          <span className="whitespace-nowrap text-2xl font-bold text-aura-deep hc:text-white">
             {`💊 ${medLoggedToday ? t(locale, "medTodayDone") : t(locale, "medTodayNone")}`}
           </span>
-          <span className="text-2xl font-bold text-aura-deep hc:text-white">
+          <span className="whitespace-nowrap text-2xl font-bold text-aura-deep hc:text-white">
             {`✅ ${t(locale, "tasksOpenCount").replace("{n}", `${openCount}`)}`}
           </span>
         </div>

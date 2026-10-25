@@ -552,6 +552,8 @@ mv public/live2d/model.manifest.json /tmp/ && npm run build; mv /tmp/model.manif
 | 10 | 吃药上报被 mock 规划器改成建任务（#7） | `runTurn`：本地计划含 `log_medication` 且模型没选它时，**以本地计划为准**；模型选了 `log_medication` 则保留其 `name/note` | selfcheck：mock 返回 `create_task` → 实际执行 `log_medication`；模型给药名时药名保留 |
 | 11 | 小组件「今日記錄」行与深链（#8） | `homeWidgetPayload(..., todayLog)` 第 5 参；`onForeground` 先 `planOpen(e.open)` 再 `planForeground(reason)`，`kind === "records"` → 直接展示记录卡（不开麦） | 点 widget 记录行 → 只出「今日記錄」卡；不阻塞原有 widget 点击听话 |
 | 12 | 家属端今日记录与删号（#2/#7） | 家属端展示 `recordsToday.kinds.med`（缺省显示「暂无上报」，不写 0）；新增「删除账号」：`flushOutboxOnce → wipeLocalData → deleteAccount` | 删号后本机 11 个 store 清空、`deviceId` 保留；未上报时不显示 0 |
+| 13 | 真机神经童声从未加载（2026-10-25 真机回归） | sherpa-onnx **2.0.0** 的 `OfflineTtsModelConfig` 把 Matcha/Kokoro/ZipVoice/Kitten/Pocket/Supertonic 都改成非空 Kotlin 参数，传 `null` 抛 `NullPointerException: parameter matcha`，两份模型都加载失败、静默回退系统引擎。改用无参构造 + `setVits/setNumThreads/setDebug/setProvider` | 真机日志 `neural model ready dir=tts/yue sr=22050`，随后 `resolve ok=true`，不再出现 `creating TextToSpeech` |
+| 14 | 真机连不上本机后端（2026-10-25 联调） | Capacitor 默认 `androidScheme=https`，`http://localhost:8000` 属混合内容被拦。真机联调用 `CAP_ANDROID_SCHEME=http npx cap sync android`（origin 变 `http://localhost`），并让 `AURA_CORS_ORIGINS` 含 `http://localhost`；`adb reverse tcp:8000` 提供链路 | 后端日志出现 `POST /gait/windows 204`、`POST /auth/pairing-code 200`；发布包仍用默认 https |
 
 > **T3-Y 承接句暂缓**：它会改变轮次语义（主句后追加一句并自动开麦），与本次「叫名字才打断/接手」的模型冲突，且必须真机验证节奏。等分段播放真机验收通过后再决定是否启用；T3-Z（`replyFollowup` 契约字段）继续不动。
 >
