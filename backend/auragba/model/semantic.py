@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 
@@ -46,7 +47,7 @@ _clf_loaded = False
 
 @dataclass
 class _Loaded:
-    model: object | None = None
+    model: Any | None = None
     feature_order: list[str] | None = None
     error: str | None = None
 

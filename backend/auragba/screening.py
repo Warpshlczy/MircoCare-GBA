@@ -176,7 +176,7 @@ def run_screening(
         engineVersion=ENGINE_VERSION,
         featureSetVersion=FEATURE_SET_VERSION,
         notForDiagnosis=True,
-        audit={"seq": -1, "hash": ""},
+        audit=AuditRef(seq=-1, hash=""),
     )
 
     ref = audit.append(

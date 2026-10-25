@@ -61,7 +61,7 @@ def load_scores() -> pd.DataFrame:
             vals.append(np.nan if p == "?" else float(p))
         if len(vals) < 9:
             continue
-        rec = {"pid": int(parts[0])}
+        rec: dict[str, float | None] = {"pid": int(parts[0])}
         for k in range(8):
             rec[f"task{k+1}_score"] = vals[k]
         rec["tasks_sum"] = vals[8]

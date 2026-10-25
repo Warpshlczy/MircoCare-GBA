@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+# The self-check deliberately submits invalid payloads (to assert rejection) and
+# swaps collaborators (to simulate failures). Type checkers flag those by design;
+# the assertions below are the real contract. Keep the suppression local to this
+# harness instead of weakening the production package's checks.
+# mypy: disable-error-code="arg-type,assignment,attr-defined,misc,list-item,call-overload,call-arg,union-attr,return-value,type-var,operator,index,has-type,no-redef,func-returns-value"
 """Runnable self-check — `python3 selfcheck.py` (no test framework, no fixtures).
 
 The single check left behind by the ponytail rule: it fails loudly if the

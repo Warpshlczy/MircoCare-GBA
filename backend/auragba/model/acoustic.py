@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 
@@ -56,7 +57,7 @@ _booster_loaded = False
 
 @dataclass
 class _Loaded:
-    model: object | None = None
+    model: Any | None = None
     feature_order: list[str] = field(default_factory=list)
     error: str | None = None
 
@@ -75,17 +76,17 @@ def _load_booster() -> _Loaded | None:
     try:
         import lightgbm as lgb  # type: ignore
 
-        model = lgb.Booster(model_file=_MODEL_PATH)
-        _booster = _Loaded(model=model, feature_order=list(model.feature_name()))
+        lgb_model = lgb.Booster(model_file=_MODEL_PATH)
+        _booster = _Loaded(model=lgb_model, feature_order=list(lgb_model.feature_name()))
         return _booster
     except Exception as exc:
         last_error = f"{type(exc).__name__}: {exc}"
     try:
         import xgboost as xgb  # type: ignore
 
-        model = xgb.Booster()
-        model.load_model(_MODEL_PATH)
-        _booster = _Loaded(model=model, feature_order=list(model.feature_names or []))
+        xgb_model = xgb.Booster()
+        xgb_model.load_model(_MODEL_PATH)
+        _booster = _Loaded(model=xgb_model, feature_order=list(xgb_model.feature_names or []))
         return _booster
     except Exception as exc:
         last_error = f"{type(exc).__name__}: {exc}"
@@ -146,10 +147,13 @@ def _booster_contributions(loaded: _Loaded, row: "np.ndarray") -> list[Biomarker
     """真模型也要可解释：用 SHAP(pred_contrib) 作为本次预测的逐项贡献，
     gain 重要性作为该特征的权重（两者都来自同一个 Booster）。"""
     names = loaded.feature_order
+    model = loaded.model
+    if model is None:
+        return []
     try:
-        raw = loaded.model.predict(row, pred_contrib=True)  # shape (1, n_features + 1)
+        raw = model.predict(row, pred_contrib=True)  # shape (1, n_features + 1)
         shap = np.asarray(raw).ravel()[: len(names)]
-        gains = np.asarray(loaded.model.feature_importance(importance_type="gain"), dtype=float)
+        gains = np.asarray(model.feature_importance(importance_type="gain"), dtype=np.float64)
         gain_norm = gains / gains.sum() if gains.sum() else np.zeros_like(gains)
     except Exception:
         return []

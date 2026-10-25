@@ -8,6 +8,7 @@ result is validated again in ``service.py``.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 
 from ..contract import AgentIntentRequest, AgentTurnRequest, MedicationPlanRequest
 
@@ -164,7 +165,7 @@ CHAT_SYSTEM = """你是「忆伴」，一位温和、简短、口语化的长者
 """
 
 
-def chat_messages(locale: str, turns: list[tuple[str, str]]) -> list[dict[str, str]]:
+def chat_messages(locale: str, turns: Sequence[tuple[str, str]]) -> list[dict[str, str]]:
     """`turns` is (role, text), oldest first, already scrubbed by the caller.
 
     Assistant turns are kept: a model that only sees a wall of user messages

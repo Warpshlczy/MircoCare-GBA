@@ -92,7 +92,11 @@ def _is_number(value: Any) -> bool:
 
 
 def _centre_and_scale(feature: _Feature, history: list[dict[str, float | None]]) -> tuple[float, float, bool]:
-    values = sorted(float(h[feature.key]) for h in history if _is_number(h.get(feature.key)))
+    values = sorted(
+        float(value)
+        for h in history
+        if (value := h.get(feature.key)) is not None and _is_number(value)
+    )
     if len(values) < _MIN_PERSONAL_SAMPLES:
         return feature.norm_median, feature.min_scale, False
     median = values[len(values) // 2] if len(values) % 2 else (values[len(values) // 2 - 1] + values[len(values) // 2]) / 2

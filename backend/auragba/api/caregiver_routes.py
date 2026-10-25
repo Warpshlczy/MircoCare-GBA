@@ -11,9 +11,8 @@ from ..auth import Principal, current_principal, family_relations, require_role
 from ..auth_store import auth_store
 from ..config import ENGINE_VERSION, FEATURE_SET_VERSION, FUSION_VERSION
 from ..contract import Contact, ContactsRequest, HealthCard, HealthCardUpdate
-from ..notifications import notify_families
 from ..privacy import input_digest
-from ..store import store
+from ..store import Store, store
 from ..timeutil import day_key
 
 DAY_MS = 86_400_000
@@ -25,7 +24,7 @@ def _day(ms: int) -> str:
     return day_key(ms)
 
 
-def records_today(store: object, device_id: str, now_ms: int | None = None) -> dict:
+def records_today(store: Store, device_id: str, now_ms: int | None = None) -> dict:
     """Today's coarse on-device record counts for the family screen.
 
     Only kinds the device actually reported appear: an absent kind means "not
@@ -42,7 +41,7 @@ def records_today(store: object, device_id: str, now_ms: int | None = None) -> d
     return {"day": day, "kinds": kinds}
 
 
-def interaction_trend(store: object, device_id: str, now_ms: int | None = None) -> dict | None:
+def interaction_trend(store: Store, device_id: str, now_ms: int | None = None) -> dict | None:
     """Today's interaction count vs the senior's own recent median.
 
     B uploads only CLOSED days, so `today` below means "the latest closed day",
