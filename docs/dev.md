@@ -560,7 +560,7 @@ mv public/live2d/model.manifest.json /tmp/ && npm run build; mv /tmp/model.manif
 | 18 | 问句被当成待办（2026-10-25 用户实测） | `agent.ts#socialReply` 先答「能不能听到/你在吗/你是谁」；`runTurn` 对**不含「提醒/记住」的问句**丢弃模型给的 `create_task`/`log_medication`/`compose_card`，交回闲聊路径；`page.tsx` 兜底也不再为问句建待办；`intent.ts#isQuestion` 补「吗/嗎/呢/嘛」结尾与「怎么样」 | 「能听到我说话吗」→「我聽到，你慢慢講。」零工具零卡片；「可唔可以提醒我食藥？」仍建任务 |
 | 19 | TTS 偶发没声（2026-10-25 用户实测） | ①朗读期间不再重启唤醒识别器（音频通路冲突）；②每段独立看门狗：某段 6–12s 无回调只跳过该段并继续下一段，不再整句放弃（`tts_segment_timeout`）；③整句 guard 只作最终兜底（+8s/段） | 连续播 3 句每句完整；单段引擎失声时后续段仍会播出 |
 
-> **T3-Y 承接句暂缓**：它会改变轮次语义（主句后追加一句并自动开麦），与本次「叫名字才打断/接手」的模型冲突，且必须真机验证节奏。等分段播放真机验收通过后再决定是否启用；T3-Z（`replyFollowup` 契约字段）继续不动。
+> **T3-Y 承接句暂缓**：它会改变轮次语义（主句后追加一句并自动开麦），与「按按钮才接手」的模型冲突，且必须真机验证节奏。等分段播放真机验收通过后再决定是否启用；T3-Z（`replyFollowup` 契约字段）继续不动。
 >
 > **`spokenSegments()` 落地位置**：B 的 `38a8763` 已合入 main，A 侧临时实现已丢弃，统一使用 `lib/speech.ts` 中 B 的版本（`spokenSegments(text, opts)`）；`audio.ts` 只调用不带 opts 的默认形态。
 
