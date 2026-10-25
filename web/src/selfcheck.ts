@@ -2366,6 +2366,43 @@ assert.equal(magnitude(3, 4, 0), 5);
   assert.equal(JSON.stringify(second).includes("降壓"), false);
 }
 
+// --- cross-repo contract drift (the bug that cost us a demo) ----------------
+// `CardKind` lived twice — 5 values in backend/auragba/contract.py, 8 in
+// types.ts — so any card kind B invented would make FastAPI's response
+// validation 500 at the worst possible moment. The two lists are hand-copied by
+// three people; this is the assertion that makes drift fail HERE instead of in
+// front of a judge. Same for `Intent`.
+{
+  const contractPy = readFileSync(
+    new URL("../../backend/auragba/contract.py", import.meta.url),
+    "utf8"
+  ).replace(/#[^\n]*/g, ""); // comments carry example strings — never values
+  const typesTs = readFileSync(new URL("./lib/types.ts", import.meta.url), "utf8").replace(
+    /\/\/[^\n]*/g, "" // the union's own comments contain a ';' that ends the match early
+  );
+
+  const pyLiteral = (name: string): string[] => {
+    const m = new RegExp(`^${name} = Literal\\[([\\s\\S]*?)^\\]`, "m").exec(contractPy);
+    return m ? [...m[1].matchAll(/"([^"]+)"/g)].map((x) => x[1]) : [];
+  };
+  const tsUnion = (name: string): string[] => {
+    const m = new RegExp(`export type ${name} =([\\s\\S]*?);`).exec(typesTs);
+    return m ? [...m[1].matchAll(/"([^"]+)"/g)].map((x) => x[1]) : [];
+  };
+
+  for (const name of ["CardKind", "Intent"]) {
+    const py = pyLiteral(name).sort();
+    const ts = tsUnion(name).sort();
+    assert.ok(py.length > 0, `backend ${name} not found — did contract.py move?`);
+    assert.ok(ts.length > 0, `web ${name} not found — did types.ts move?`);
+    assert.deepEqual(
+      ts,
+      py,
+      `${name} drifted: web=${ts.join(",")} backend=${py.join(",")}`
+    );
+  }
+}
+
 // --- outbox senders: every queued kind must have a route ---------------------
 {
   const seen: string[] = [];
@@ -3326,6 +3363,28 @@ assert.equal(magnitude(3, 4, 0), 5);
     !/backend already does for/.test(types),
     "the stale 'backend already does for gait' claim must stay out of types.ts"
   );
+
+  // Account deletion must also clear the device (C's issue #3 ②). Two things
+  // are load-bearing: localStorage["auragba.deviceId"] SURVIVES (dev.md §1.3
+  // froze it — a new id means a new baseline and a family re-pair), and the
+  // caller drains `outbox` BEFORE DELETE /auth/me (a replayed payload would
+  // 401 forever once the old token is revoked).
+  const dbsrc = readFileSync(new URL("./lib/db.ts", import.meta.url), "utf8");
+  const wipe = /export async function wipeLocalData\([\s\S]*?\n\}/.exec(dbsrc);
+  assert.ok(wipe, "db.ts must export wipeLocalData (the server-side account is gone)");
+  assert.ok(
+    /db\.transaction\(STORES, "readwrite"\)/.test(wipe[0]) && /\.clear\(\)/.test(wipe[0]),
+    "the wipe clears every store in ONE transaction — no half-wiped state to read"
+  );
+  assert.ok(
+    !/deviceId|localStorage/.test(wipe[0]),
+    "wipeLocalData must not touch the frozen deviceId (clearing it = a new baseline)"
+  );
+  const storeList = /const STORES: Store\[\] = \[([\s\S]*?)\];/.exec(dbsrc);
+  assert.ok(storeList, "the STORES list is the single source of truth");
+  const storeNames = [...storeList[1].matchAll(/"([a-z_]+)"/g)].map((m) => m[1]);
+  assert.equal(storeNames.length, 11, `11 stores must be wiped, found ${storeNames.length}`);
+  assert.ok(storeNames.includes("outbox"), "outbox is wiped too (drained BEFORE the API call)");
 }
 
 console.log("selfcheck: OK");
