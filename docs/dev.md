@@ -25,7 +25,7 @@
 | 路径 | 归属 | 其他两人的正确做法 |
 |---|---|---|
 | `web/src/app/page.tsx` | **A 独占** | B 只通过 A 预埋的 `useAgentBridge()` 接缝接入；C 不碰前端 |
-| `web/src/components/Avatar.tsx`、`lib/viseme.ts`、`lib/proactive.ts`、`lib/interview.ts`、`lib/audio.ts`、`lib/i18n.ts` | A | B/C 只读 |
+| `web/src/components/Avatar.tsx`、`lib/viseme.ts`、`lib/proactive.ts`、`lib/interview.ts`、`lib/audio.ts`、`lib/speech.ts`、`lib/i18n.ts` | A | B/C 只读 |
 | `web/src/lib/tools.ts`、`lib/toolrun.ts`、`lib/geofence.ts`、`lib/activity.ts`、`lib/agent.ts`、`hooks/useAgentBridge.ts` | B | A 只调用其导出，不改内部 |
 | `web/src/lib/native.ts`、`web/android/**` | **B** | A 提需求给 B，不改 Java/原生契约实现 |
 | `web/src/lib/intent.ts`、`lib/cards.ts`、`lib/db.ts`、`lib/api.ts`、`lib/types.ts` | **B**（契约）/ C（后端对接）协商 | 改类型必须三人同步，先改 `types.ts` 再改实现 |
@@ -295,6 +295,8 @@ grep -rl "auragba" backend --include=*.py --include=*.txt --include=*.md | \
 ### 2.3.1 数字人模型挂载契约（**已接入 Kei 示例模型**）
 
 > 目标：**运行时与模型都在仓库里，代码照跑、答辩不白屏**；整目录约 2 MB。原始导入的 36 MB 素材（含 13 MB×2 的语音 wav 与第二个模型）**没有提交**——口型由 TTS 驱动，模型自带语音与字幕不同步，只会抢占喇叭。
+>
+> **协作约定（2026-10-25）**：改动他人所有文件（`page.tsx` / `android/**` / `backend/**` / `types.ts`）前，先在 Issue 或群里告知对应负责人并等确认。当天两次并行推送都靠 merge 收场，靠约定比靠运气稳。`speak()` 同时牵涉 A（文案与调用）与 B（原生桥回调），改这一侧前先互相确认。
 
 **① 为什么不 `npm install pixi.js pixi-live2d-display`**（相对第一版的关键调整）
 
@@ -956,7 +958,7 @@ cd android && ./gradlew assembleDebug
 | C-2 | 行为流（服药/任务/步态/交互频率） | `model/behavior.py`、`screening.py` |
 | C-3 | 个人基线升级（robust Z + 最小样本 + 趋势斜率） | `baseline.py` |
 | C-4 | 变化点检测（CPD）与趋缓告警 | `changepoint.py` |
-| C-5 | LLM Agent `/agent/turn` + `/assistant/chat` + `/medication/plan` | `api/agent_routes.py`、`nlp/prompts.py` |
+| C-5 | LLM Agent `/agent/turn` + `/assistant/chat` + `/medication/plan` | `api/contract_routes.py`、`llm/prompts.py` |
 | C-6 | 家属周报（PDF/HTML + 推送） | `reports/weekly.py`、`api/report_routes.py` |
 | C-7 | SOS 真实通知链路 | `api/contract_routes.py#post_sos`、`notify.py` |
 | C-8 | 会话记忆治理（加密 + TTL + 撤回） | `privacy.py`、`store.py` |
@@ -974,8 +976,8 @@ cd android && ./gradlew assembleDebug
 | `changepoint.py` | 新增 | 简化 CUSUM：`S+ = max(0, S+ + (x - μ - k))`，`k=0.5σ`、`h=4σ` |
 | [screening.py](https://github.com/Warpshlczy/MircoCare-GBA/blob/main/backend/auragba/screening.py) | 扩展 | 接入 behavior 流与 CPD；结果新增 `behaviorStream`、`changepoints`、`quality` |
 | `model/acoustic.py` / `semantic.py` | 保持 | 已训练产物路径不变；仅补 `contributions` 的稳定排序 |
-| `api/agent_routes.py` | 新增 | 3 个 LLM 端点真实现（替换 501） |
-| `nlp/prompts.py` | 新增 | 系统提示：**不诊断、不荐药、异常引导 SOS**；输出严格 JSON schema |
+| `api/contract_routes.py` | 修改 | 3 个 LLM 端点真实现（替换 501），与契约路由同文件 |
+| `llm/prompts.py` | 新增 | 系统提示：**不诊断、不荐药、异常引导 SOS**；输出严格 JSON schema |
 | `reports/weekly.py` | 新增 | 周报生成：趋势、依从性、交互次数、建议（含「建议预约认知评估」的阈值条件） |
 | `api/report_routes.py` | 新增 | `GET /reports/weekly/me`、`POST /reports/weekly/send` |
 | `notify.py` | 新增 | SMS/推送抽象（demo 用 webhook + 日志；生产接 Twilio/FCM） |
@@ -1187,6 +1189,8 @@ cd web && node src/selfcheck.ts && cd ../backend && python selfcheck.py
 | 影像 | 后置摄像头 | 单帧（按压式） | **不上传** | 本地展示 | 无 | A |
 
 > 说明：新增 4 个「缺」通道全部是**低频、事件驱动、仅计数**，不引入常驻采样。昼夜节律与听力/视觉偏好**无需任何新权限**（系统广播 / `matchMedia`）；数字能力在 `PACKAGE_USAGE_STATS` 未授予时**整条 `null`**，绝不引导用户去开启（见 §3.6）。「如厕/失禁」**不在任何通道内**——见 §1.8 的产品边界行。
+>
+> **B8 状态（2026-10-25）**：`CircadianDaily` / `DigitalSkillDaily` 本期未交付（B 确认，避免硬赶产出假数据）。C 按 `null` 跳过、不补 0，周报与 `docs/evidence/02-design-fmea.md` 标注「本期无数据」，这两项不参与风险分。
 
 ### A.2 模型架构
 

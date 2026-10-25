@@ -105,9 +105,11 @@ def run_screening(
     started = time.time()
     result_id = f"scr-{int(started * 1000)}-{uuid.uuid4().hex[:6]}"
 
-    # extract-and-burn: hold audio only in a mutable buffer we can zero out.
+    # extract-and-burn: decode from the SAME mutable buffer that `purge` zeroes.
+    # The caller's immutable `bytes` cannot be overwritten in Python, so this is
+    # best-effort (no copy is left holding the waveform).
     buffer = bytearray(data) if settings.burn_audio else None
-    audio: AudioData = load_audio(data, filename)
+    audio: AudioData = load_audio(buffer if buffer is not None else data, filename)
     frames_db = frame_rms_db(audio.samples, audio.sample_rate)
     vad = energy_vad(frames_db)
     hop_s = 0.010

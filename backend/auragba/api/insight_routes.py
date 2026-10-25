@@ -165,13 +165,19 @@ def get_economics(dev: str = Depends(device_id)) -> dict:
 
 
 @router.get("/audit/screening")
-def get_audit(limit: int = 50) -> dict:
-    """SaMD audit trail + chain-integrity check (tamper-evident)."""
+def get_audit(limit: int = 50, dev: str = Depends(device_id)) -> dict:
+    """SaMD audit trail + chain-integrity check (tamper-evident).
+
+    Requires a signed session and returns only this device's records: audit rows
+    carry pseudonymous device ids and screening metadata for every user, which
+    must not be enumerable cross-device.
+    """
+    limit = max(1, min(int(limit), 200))
     return {
         "integrityOk": audit_log.verify(),
         "engineVersion": ENGINE_VERSION,
         "featureSetVersion": FEATURE_SET_VERSION,
-        "records": audit_log.records(limit),
+        "records": audit_log.records(limit, device_id=dev),
     }
 
 

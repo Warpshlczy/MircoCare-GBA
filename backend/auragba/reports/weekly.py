@@ -74,7 +74,7 @@ _TEXTS: dict[str, dict[str, Any]] = {
             "delta": "{diff:+d} 较上周",
             "minutesLabel": "语音筛查时长",
             "minutesValue": "{minutes} 分钟",
-            "checkins": "主动签到",
+            "proactiveOpens": "主动开口",
             "interviews": "完成访谈",
             "timesValue": "{n} 次",
         },
@@ -144,6 +144,10 @@ _TEXTS: dict[str, dict[str, Any]] = {
                 "watch": "本期出现 watch 分层或持续偏移",
                 "low": "本期分层为 low，且没有持续偏移",
             },
+            "noData": "本期还没有可用的筛查结果，暂不给出建议。",
+            "noDataTier": "样本不足",
+            "noDataTrigger": "本期无可用筛查结果",
+            "noDataNote": "有了可用样本后，这里才会出现「继续观察 / 本月内做一次认知评估 / 尽快就医」的档位。",
         },
         "privacy": {
             "title": "数据与隐私",
@@ -203,7 +207,7 @@ _TEXTS: dict[str, dict[str, Any]] = {
             "delta": "{diff:+d} 較上週",
             "minutesLabel": "語音篩查時長",
             "minutesValue": "{minutes} 分鐘",
-            "checkins": "主動簽到",
+            "proactiveOpens": "主動開口",
             "interviews": "完成訪談",
             "timesValue": "{n} 次",
         },
@@ -273,6 +277,10 @@ _TEXTS: dict[str, dict[str, Any]] = {
                 "watch": "本期出現 watch 分層或持續偏移",
                 "low": "本期分層為 low，且沒有持續偏移",
             },
+            "noData": "本期還沒有可用的篩查結果，暫不給出建議。",
+            "noDataTier": "樣本不足",
+            "noDataTrigger": "本期無可用篩查結果",
+            "noDataNote": "有可用樣本後，這裡才會出現「繼續觀察 / 本月內做一次認知評估 / 盡快就醫」的檔位。",
         },
         "privacy": {
             "title": "數據與隱私",
@@ -328,7 +336,7 @@ def _talk_section(
     turns: list[dict[str, Any]],
     prev_turns: list[dict[str, Any]],
     sessions: list[dict[str, Any]],
-    checkins: list[dict[str, Any]],
+    proactive_opens: list[dict[str, Any]],
     interviews: list[dict[str, Any]],
     t: dict[str, Any],
 ) -> ReportSection:
@@ -350,7 +358,7 @@ def _talk_section(
                 delta=copy["delta"].format(diff=diff),
             ),
             ReportCount(label=copy["minutesLabel"], value=copy["minutesValue"].format(minutes=minutes)),
-            ReportCount(label=copy["checkins"], value=copy["timesValue"].format(n=len(checkins))),
+            ReportCount(label=copy["proactiveOpens"], value=copy["timesValue"].format(n=len(proactive_opens))),
             ReportCount(label=copy["interviews"], value=copy["timesValue"].format(n=len(interviews))),
         ],
     )
@@ -601,13 +609,26 @@ def _advice_section(
     # A capture-only or rejected row must not become the week's advice — and a
     # late low row must not hide an earlier elevated one. Aggregate the worst
     # usable band across the period.
-    bands = {
-        r["riskBand"]
-        for r in results
+    usable = [
+        r for r in results
         if r.get("riskBand") in ("low", "watch", "elevated")
         and r.get("quality") != "reject"
         and r.get("insufficientStreams") is not True
-    }
+    ]
+    if not usable and not sustained:
+        # No usable screening at all: "low" would be a conclusion from zero data.
+        return ReportSection(
+            key="advice",
+            title=copy["title"],
+            summary=copy["noData"],
+            counts=[
+                ReportCount(label=copy["tierLabel"], value=copy["noDataTier"]),
+                ReportCount(label=copy["triggerLabel"], value=copy["noDataTrigger"]),
+            ],
+            available=False,
+            note=copy["noDataNote"],
+        )
+    bands = {r["riskBand"] for r in usable}
     if "elevated" in bands:
         tier, trigger = copy["tiers"]["elevated"], copy["triggers"]["elevated"]
     elif "watch" in bands or sustained:
@@ -664,7 +685,10 @@ def build_weekly_report(
 
     sessions = _between(store.history(device_id, "screening_sessions"), start, end)
     telemetry = _between(store.history(device_id, "telemetry"), start, end)
-    checkins = [e for e in telemetry if e.get("name") in ("daily_checkin", "proactive_greeting")]
+    # A emits `proactive` with {kind, trigger} for every assistant-initiated line
+    # (greeting / silence / interview / reminder). The old `daily_checkin` and
+    # `proactive_greeting` names no longer exist, so reading them showed 0 forever.
+    proactive_opens = [e for e in telemetry if e.get("name") == "proactive"]
 
     change, sustained = _change_section(device_id, store, end=end, t=t)
 
@@ -681,7 +705,7 @@ def build_weekly_report(
     interviews = [e for e in telemetry if e.get("name") == "interview_end"]
 
     sections = [
-        _talk_section(turns, prev_turns, sessions, checkins, interviews, t),
+        _talk_section(turns, prev_turns, sessions, proactive_opens, interviews, t),
         change,
         _tasks_section(escalations, behaviour, t),
         _activity_section(gait, falls, behaviour, geofence, t),

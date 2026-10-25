@@ -23,7 +23,6 @@ from ..contract import (
     AssistantChatRequest,
     BehaviourDailyEnvelope,
     ConversationTurn,
-    EmergencyContact,
     GaitWindow,
     GeofenceEvent,
     HealthCard,
@@ -64,8 +63,30 @@ _DEMO_CARD = {
     "allergies": ["青霉素"],
     "chronicConditions": ["高血压", "2 型糖尿病"],
     "medications": ["氨氯地平", "二甲双胍"],
-    "emergencyContact": {"name": "陳小明（儿子）", "phone": "+852 9000 0000"},
+    # Demo seed only: the phone MUST stay empty. A dialable fake number would be
+    # pre-filled by the client's SOS fallback and dialled in a live demo; an empty
+    # number makes the senior hear "未有屋企人嘅電話，叫屋企人設定一次".
+    "emergencyContact": {"name": "陳小明", "phone": ""},
 }
+
+
+def _blank_card(device: str) -> dict:
+    """A non-fabricated card for a device whose family erased the demo card.
+
+    Re-seeding the demo identities after an explicit deletion would put a fake
+    name/phone back on the caregiver screen. Callers add `updatedAt` themselves.
+    """
+    return {
+        "id": f"hc-{device}",
+        "name": "未填写",
+        "age": 0,
+        "bloodType": "—",
+        "allergies": [],
+        "chronicConditions": [],
+        "medications": [],
+        "emergencyContact": {"name": "未设置", "phone": ""},
+        "contacts": [],
+    }
 
 
 def _llm_blank(route: str) -> HTTPException:
@@ -75,10 +96,18 @@ def _llm_blank(route: str) -> HTTPException:
 
 @router.post("/gait/windows", status_code=204)
 def post_gait_window(w: GaitWindow, dev: str = Depends(device_id)) -> None:
-    """Derived gait features only — never raw accelerometer streams."""
+    """Derived gait features only — never raw accelerometer streams.
+
+    The client's outbox is at-least-once, so a replay must not append a second
+    window (or a second fall marker): the weekly step/fall counts would double.
+    """
+    marker = f"gait_window:{w.id}"
+    if store.get_doc(dev, marker) is not None:
+        return
     store.record(dev, "gait", w.model_dump())
     if w.fall:  # a fall is a safety signal — keep a coarse marker for trends
-        store.record(dev, "gait_falls", {"at": w.endedAt, "reason": w.fallReason})
+        store.record(dev, "gait_falls", {"id": w.id, "at": w.endedAt, "reason": w.fallReason})
+    store.set_doc(dev, marker, {"at": w.endedAt, "fall": w.fall})
 
 
 @router.post("/screening/sessions", status_code=204)
@@ -176,10 +205,7 @@ def get_health_card(dev: str = Depends(device_id)) -> HealthCard:
         # A family deletion must not be resurrected by the demo seed on the next
         # read; return a blank card instead of re-creating fake data.
         if store.get_doc(dev, "health_card_deleted") is not None:
-            return HealthCard(
-                id=f"hc-{dev}", name="未填写", age=0, bloodType="—",
-                emergencyContact=EmergencyContact(name="未设置", phone=""), updatedAt=0,
-            )
+            return HealthCard(**{**_blank_card(dev), "updatedAt": 0})
         stored = {**_DEMO_CARD, "id": f"hc-{dev}", "updatedAt": int(time.time() * 1000)}
         store.set_doc(dev, "health_card", stored)
     return HealthCard(**stored)
@@ -214,11 +240,18 @@ def post_conversation_memory(turn: ConversationTurn, dev: str = Depends(device_i
     AAD bound to (device, turn id), kept for `AURA_CONVERSATION_TTL_DAYS`, and can
     be withdrawn through `DELETE /conversation/turns/{id}`.
     """
+    marker = f"conversation_turn:{turn.id}"
+    if store.get_doc(dev, marker) is not None:
+        # At-least-once replay: a second row would inflate the weekly turn count.
+        # The marker survives revocation, so a replayed pre-revocation turn cannot
+        # be re-inserted after `DELETE /conversation/turns/{id}`.
+        return
     store.record(
         dev,
         "conversation",
         {**turn.model_dump(), "text": encrypt_text(dev, turn.id, turn.text), "enc": "aes-gcm-v1"},
     )
+    store.set_doc(dev, marker, {"at": turn.at, "role": turn.role})
 
 
 @router.delete("/conversation/turns/{turn_id}", status_code=204)
@@ -267,8 +300,14 @@ def post_reminder_escalation(e: ReminderEscalation, dev: str = Depends(device_id
     it later. We never claim in the senior UI that a message was actually
     delivered, only that the escalation was recorded.
     """
+    marker = f"reminder_escalation:{e.id}"
+    if store.get_doc(dev, marker) is not None:
+        # A replay must not page the family twice or double the weekly
+        # "reminder timed out" count.
+        return
     store.record(dev, "reminder_escalations", e.model_dump())
     notify_dispatch(dev, "reminder", e.model_dump())
+    store.set_doc(dev, marker, {"at": e.at, "kind": e.kind})
 
 
 @router.post("/task/events", status_code=204)

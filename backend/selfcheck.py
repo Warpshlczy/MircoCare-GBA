@@ -42,9 +42,9 @@ from auragba.changepoint import detect  # noqa: E402
 from auragba.config import settings, validate_runtime  # noqa: E402
 from auragba.contract import (  # noqa: E402
     AgentCard, AgentIntentRequest, AgentTool, AgentTurnRequest, AssistantChatRequest,
-    BehaviourDaily, BehaviourDailyEnvelope, Contact, ContactsRequest, GeofenceEvent,
-    HealthCardUpdate, ScreeningSession, SosEvent, StreamScore, TaskEvent, TelemetryEvent,
-    ToolCall,
+    BehaviourDaily, BehaviourDailyEnvelope, Contact, ContactsRequest, ConversationTurn,
+    GaitWindow, GeofenceEvent, HealthCardUpdate, ReminderEscalation, ScreeningSession,
+    SosEvent, StreamScore, TaskEvent, TelemetryEvent, ToolCall,
 )
 from auragba.crypto import decrypt_text, encrypt_text  # noqa: E402
 from auragba.economics import estimate as economics  # noqa: E402
@@ -811,7 +811,8 @@ with tempfile.TemporaryDirectory() as tmp:
               {"at": now_ms - 2_300_000, "id": "scr-analyze-1", "riskIndex": 0.9,
                "riskBand": "elevated", "quality": "reject"})
     st.record("dev-rep", "telemetry",
-              {"id": "t1", "name": "daily_checkin", "at": now_ms - 3_600_000, "locale": "zh-CN"})
+              {"id": "t1", "name": "proactive", "at": now_ms - 3_600_000, "locale": "zh-CN",
+               "props": {"kind": "greeting", "trigger": "open"}})
     st.record("dev-rep", "telemetry",
               {"id": "t2", "name": "interview_answer", "at": now_ms - 3_500_000, "locale": "zh-CN",
                "props": {"questionId": 3, "answerLen": 12}})
@@ -859,6 +860,9 @@ with tempfile.TemporaryDirectory() as tmp:
     assert any(
         c.label == "完成访谈" and c.value == "1 次" for c in talk_section.counts
     ), "interview_end counts once; interview_answer must not double-count"
+    assert any(
+        c.label == "主动开口" and c.value == "1 次" for c in talk_section.counts
+    ), "A's `proactive` telemetry must feed the talk section (the old names are gone)"
     activity_section = next(s for s in report.sections if s.key == "activity")
     assert "代理指标" in activity_section.note
     assert any(
@@ -868,6 +872,25 @@ with tempfile.TemporaryDirectory() as tmp:
     _activity_counts = {c.label: c.value for c in activity_section.counts}
     assert _activity_counts["外出次数"] == "3 次", "every exit counts, alerted or not"
     assert _activity_counts["外出时长"] == "45 分钟（1 次）", "minutesAway lives on enter, not exit"
+
+    # Zero usable screening -> no advice, not a fabricated "low / continue observing".
+    st.record("dev-nodata", "screening_results",
+              {"at": now_ms - 3_000_000, "id": "cap-1", "source": "screening_session",
+               "riskBand": "low", "insufficientStreams": True, "quality": "good"})
+    _nodata = build_weekly_report("dev-nodata", st, now=now_ms)
+    _nodata_advice = next(s for s in _nodata.sections if s.key == "advice")
+    assert _nodata_advice.available is False, "no usable screening means no advice tier"
+    assert "暂不给出建议" in _nodata_advice.summary
+    assert any(c.value == "样本不足" for c in _nodata_advice.counts)
+
+    # A real low band must still produce the normal tier (the new branch must not
+    # swallow usable data).
+    st.record("dev-low", "screening_results",
+              {"at": now_ms - 3_000_000, "id": "low-1", "riskIndex": 0.2,
+               "riskBand": "low", "quality": "good", "insufficientStreams": False})
+    _low = build_weekly_report("dev-low", st, now=now_ms)
+    _low_advice = next(s for s in _low.sections if s.key == "advice")
+    assert _low_advice.available and "继续观察" in _low_advice.summary
 
     import auragba.reports.weekly as weekly_mod  # noqa: E402
 
@@ -977,6 +1000,10 @@ assert pseudonymize("abc") == pseudonymize("abc") and pseudonymize("abc") != pse
 scrubbed = scrub_props({"intent": "weather", "mode": "agent", "note": "联络我 a@b.com 或者 91234567", "phone": "91234567"})
 assert "phone" not in scrubbed and "note" not in scrubbed, "PII / free text must be dropped"
 assert "a@b.com" not in str(scrubbed)
+# A's interview_answer sends `textLen`: the numeric count must survive, while a
+# string under the same key is still free text and must be dropped.
+assert scrub_props({"textLen": 12, "answerLen": 8}) == {"textLen": 12, "answerLen": 8}
+assert "textLen" not in scrub_props({"textLen": "我今日唔舒服"})
 buf = bytearray(b"secret-audio")
 assert purge(buf) and set(buf) == {0}, "extract-and-burn must zero the buffer"
 
@@ -1011,6 +1038,10 @@ with tempfile.TemporaryDirectory() as tmp:
     for i in range(3):
         log.append(kind="screening", device_id="dev-x", engine_version="e", feature_set_version="f",
                    fusion_version="u", input_digest=f"d{i}", output={"riskIndex": 0.1 * i})
+    log.append(kind="screening", device_id="dev-y", engine_version="e", feature_set_version="f",
+               fusion_version="u", input_digest="dy", output={"riskIndex": 0.3})
+    assert [r["deviceId"] for r in log.records(10, device_id="dev-y")] == ["dev-y"]
+    assert len(log.records(10, device_id="dev-x")) == 3, "audit reads must be device-scoped"
     assert log.verify() is True
     lines = (Path(tmp) / "audit.jsonl").read_text().splitlines()
     lines[1] = lines[1].replace('"riskIndex": 0.1', '"riskIndex": 9.9')
@@ -1183,6 +1214,44 @@ with tempfile.TemporaryDirectory() as tmp:
     assert _card["contacts"][0]["name"] == "陳小明"
     assert _card["emergencyContact"]["name"], "the SOS escalation contact must remain"
 
+# --- at-least-once replay: gait / conversation / reminder escalation -----------
+with tempfile.TemporaryDirectory() as tmp:
+    st = Store(Path(tmp))
+    import auragba.api.contract_routes as contract_routes  # noqa: E402
+
+    _real = (contract_routes.store, contract_routes.notify_dispatch)
+    _notified: list[tuple] = []
+    contract_routes.store = st
+    contract_routes.notify_dispatch = lambda *a, **k: _notified.append(a) or []
+    try:
+        _gait = GaitWindow(
+            id="gw-replay", startedAt=1, endedAt=2, steps=10,
+            cadence=100.0, cv=0.1, fall=True, fallReason="impact",
+        )
+        contract_routes.post_gait_window(_gait, "dev-replay")
+        contract_routes.post_gait_window(_gait, "dev-replay")
+        assert len(st.history("dev-replay", "gait")) == 1, "gait replay must not append"
+        assert len(st.history("dev-replay", "gait_falls")) == 1, "fall replay must not append"
+
+        _turn = ConversationTurn(
+            id="turn-replay", at=3, role="user", text="我今日好攰", locale="zh-CN",
+        )
+        contract_routes.post_conversation_memory(_turn, "dev-replay")
+        contract_routes.post_conversation_memory(_turn, "dev-replay")
+        assert len(st.history("dev-replay", "conversation")) == 1, "conversation replay must not append"
+        # A revoked turn keeps its marker, so a late replay cannot re-insert it.
+        assert st.delete_by_id("dev-replay", "conversation", _turn.id)
+        contract_routes.post_conversation_memory(_turn, "dev-replay")
+        assert st.history("dev-replay", "conversation") == [], "revoked turn must stay revoked"
+
+        _esc = ReminderEscalation(id="rem-replay", at=4, locale="zh-CN")
+        contract_routes.post_reminder_escalation(_esc, "dev-replay")
+        contract_routes.post_reminder_escalation(_esc, "dev-replay")
+        assert len(st.history("dev-replay", "reminder_escalations")) == 1, "escalation replay must not append"
+        assert len(_notified) == 1, "escalation replay must not page the family twice"
+    finally:
+        contract_routes.store, contract_routes.notify_dispatch = _real
+
 # --- governance: health-card write/delete, unbind, account delete, economics ---
 with tempfile.TemporaryDirectory() as tmp:
     st = Store(Path(tmp))
@@ -1218,14 +1287,60 @@ with tempfile.TemporaryDirectory() as tmp:
             contract_routes.store = _real_contract
         assert _blank.name == "未填写", "a deleted card must not be re-seeded with demo data"
         assert st.get_doc("dev-hc", "health_card") is None
+
+        # Editing contacts/fields after a deletion must start from an EMPTY card,
+        # not from the demo identities.
+        caregiver_routes.put_contacts(ContactsRequest(contacts=[_contact]), principal=_who)
+        _after = st.get_doc("dev-hc", "health_card")
+        assert _after["name"] == "未填写" and _after["allergies"] == []
+        assert _after["medications"] == [] and _after["emergencyContact"]["phone"] == ""
+        assert _after["contacts"][0]["name"] == "陳小明"
+        caregiver_routes.put_health_card(HealthCardUpdate(name="李婆婆"), principal=_who)
+        _edited = st.get_doc("dev-hc", "health_card")
+        assert _edited["name"] == "李婆婆"
+        assert _edited["allergies"] == [] and _edited["emergencyContact"]["phone"] == ""
     finally:
         (caregiver_routes.store, caregiver_routes.family_relations,
          caregiver_routes.require_role, caregiver_routes.audit_log,
          caregiver_routes.auth_store) = _real
 
+# --- caregiver notifications: scoped to the senior currently viewed -----------
+with tempfile.TemporaryDirectory() as tmp:
+    st = Store(Path(tmp))
+    import auragba.api.caregiver_routes as caregiver_routes  # noqa: E402
+
+    _real = (caregiver_routes.store, caregiver_routes.family_relations,
+             caregiver_routes.require_role)
+    caregiver_routes.store = st
+    caregiver_routes.family_relations = lambda p: [
+        {"seniorDeviceId": "dev-a"}, {"seniorDeviceId": "dev-b"}
+    ]
+    caregiver_routes.require_role = lambda p, role: p
+    try:
+        for _id, _dev, _fam in (
+            ("n1", "dev-a", "fam-a"),
+            ("n2", "dev-b", "fam-a"),
+            ("n3", "dev-a", "fam-other"),
+        ):
+            st.record("__system__", "notification_outbox",
+                      {"id": _id, "familyAccountId": _fam,
+                       "seniorDeviceId": _dev, "kind": "sos"})
+        _ov = caregiver_routes.overview(principal=SimpleNamespace(account_id="fam-a"))
+        assert [n["id"] for n in _ov["notifications"]] == ["n1"], (
+            "only the currently viewed senior's notifications may be returned"
+        )
+        _ov_b = caregiver_routes.overview(
+            senior_device_id="dev-b", principal=SimpleNamespace(account_id="fam-a")
+        )
+        assert [n["id"] for n in _ov_b["notifications"]] == ["n2"]
+    finally:
+        (caregiver_routes.store, caregiver_routes.family_relations,
+         caregiver_routes.require_role) = _real
+
 # Account deletion erases the account row and the senior's device store.
 from auragba.auth_store import AuthStore  # noqa: E402
 import auragba.api.auth_routes as auth_routes  # noqa: E402
+from fastapi import Response  # noqa: E402
 
 with tempfile.TemporaryDirectory() as tmp:
     _auth = AuthStore(Path(tmp) / "auth.sqlite3")
@@ -1244,10 +1359,17 @@ with tempfile.TemporaryDirectory() as tmp:
         delete_account=lambda _id: {"role": "senior", "deviceId": "dev-del"}
     )
     auth_routes.audit_log = SimpleNamespace(append=lambda **kw: None)
+    _del_response = Response()
     try:
-        auth_routes.delete_me(SimpleNamespace(account_id="acct-del", role="senior", device_id="dev-del"))
+        auth_routes.delete_me(
+            response=_del_response,
+            principal=SimpleNamespace(account_id="acct-del", role="senior", device_id="dev-del"),
+        )
     finally:
         (auth_routes.store, auth_routes.auth_store, auth_routes.audit_log) = _real_del
+    assert "aura_session" in (_del_response.headers.get("set-cookie") or ""), (
+        "deleting the account must clear the session cookie"
+    )
     assert _store.history("dev-del", "telemetry") == [], "account delete must erase device data"
     del _store
     gc.collect()
