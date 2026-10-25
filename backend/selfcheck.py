@@ -1000,6 +1000,10 @@ assert pseudonymize("abc") == pseudonymize("abc") and pseudonymize("abc") != pse
 scrubbed = scrub_props({"intent": "weather", "mode": "agent", "note": "联络我 a@b.com 或者 91234567", "phone": "91234567"})
 assert "phone" not in scrubbed and "note" not in scrubbed, "PII / free text must be dropped"
 assert "a@b.com" not in str(scrubbed)
+# A's interview_answer sends `textLen`: the numeric count must survive, while a
+# string under the same key is still free text and must be dropped.
+assert scrub_props({"textLen": 12, "answerLen": 8}) == {"textLen": 12, "answerLen": 8}
+assert "textLen" not in scrub_props({"textLen": "我今日唔舒服"})
 buf = bytearray(b"secret-audio")
 assert purge(buf) and set(buf) == {0}, "extract-and-burn must zero the buffer"
 
@@ -1295,6 +1299,39 @@ with tempfile.TemporaryDirectory() as tmp:
         (caregiver_routes.store, caregiver_routes.family_relations,
          caregiver_routes.require_role, caregiver_routes.audit_log,
          caregiver_routes.auth_store) = _real
+
+# --- caregiver notifications: scoped to the senior currently viewed -----------
+with tempfile.TemporaryDirectory() as tmp:
+    st = Store(Path(tmp))
+    import auragba.api.caregiver_routes as caregiver_routes  # noqa: E402
+
+    _real = (caregiver_routes.store, caregiver_routes.family_relations,
+             caregiver_routes.require_role)
+    caregiver_routes.store = st
+    caregiver_routes.family_relations = lambda p: [
+        {"seniorDeviceId": "dev-a"}, {"seniorDeviceId": "dev-b"}
+    ]
+    caregiver_routes.require_role = lambda p, role: p
+    try:
+        for _id, _dev, _fam in (
+            ("n1", "dev-a", "fam-a"),
+            ("n2", "dev-b", "fam-a"),
+            ("n3", "dev-a", "fam-other"),
+        ):
+            st.record("__system__", "notification_outbox",
+                      {"id": _id, "familyAccountId": _fam,
+                       "seniorDeviceId": _dev, "kind": "sos"})
+        _ov = caregiver_routes.overview(principal=SimpleNamespace(account_id="fam-a"))
+        assert [n["id"] for n in _ov["notifications"]] == ["n1"], (
+            "only the currently viewed senior's notifications may be returned"
+        )
+        _ov_b = caregiver_routes.overview(
+            senior_device_id="dev-b", principal=SimpleNamespace(account_id="fam-a")
+        )
+        assert [n["id"] for n in _ov_b["notifications"]] == ["n2"]
+    finally:
+        (caregiver_routes.store, caregiver_routes.family_relations,
+         caregiver_routes.require_role) = _real
 
 # Account deletion erases the account row and the senior's device store.
 from auragba.auth_store import AuthStore  # noqa: E402

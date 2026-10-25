@@ -128,9 +128,13 @@ def overview(
         "screeningSessions": store.history(device, "screening_sessions")[-30:],
         "activityTrend": store.history(device, "gait")[-30:],
         "alerts": alerts[-30:],
+        # Also scope to the senior currently being viewed: after
+        # `DELETE /caregiver/pairing/{device}` this account must stop seeing that
+        # senior's queued notifications even if it still has another pairing.
         "notifications": [
             row for row in store.history("__system__", "notification_outbox")
             if row.get("familyAccountId") == principal.account_id
+            and row.get("seniorDeviceId") == device
         ][-30:],
     }
 

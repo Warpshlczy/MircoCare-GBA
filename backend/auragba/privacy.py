@@ -29,6 +29,10 @@ _PII_PATTERNS: tuple[re.Pattern[str], ...] = (
 )
 # props keys that smell like free text / identifiers — dropped outright.
 _FORBIDDEN_KEY_HINTS = ("text", "utterance", "transcript", "name", "phone", "email", "idcard")
+# Exact counters whose name would otherwise trip the generic "text" hint
+# (A's `interview_answer` sends `textLen`). Only a NUMBER is allowed here; a
+# string under the same key is still treated as free text and dropped.
+_COARSE_NUMERIC_KEYS = frozenset({"textlen", "answerlen"})
 _MAX_PROP_STR = 32  # coarse values only; anything longer is redacted
 
 
@@ -56,6 +60,10 @@ def scrub_props(props: dict[str, Any] | None) -> dict[str, Any]:
     clean: dict[str, Any] = {}
     for key, value in props.items():
         k = str(key)
+        if k.lower() in _COARSE_NUMERIC_KEYS:
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                clean[k] = value
+            continue
         if any(hint in k.lower() for hint in _FORBIDDEN_KEY_HINTS):
             continue
         if isinstance(value, bool) or isinstance(value, (int, float)):
