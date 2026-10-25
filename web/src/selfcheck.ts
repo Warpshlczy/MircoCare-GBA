@@ -1326,7 +1326,7 @@ assert.equal(magnitude(3, 4, 0), 5);
   });
 
   const one = homeWidgetRecord([rec({})], nowMs);
-  assert.equal(one?.text, "💊 09:00 食藥", "icon + local HH:MM + title");
+  assert.equal(one?.text, "✓ 💊 09:00 食藥", "done marker + icon + local HH:MM + title");
   assert.equal(one?.at, nowMs - 6 * 3600_000);
 
   // A medication record outranks a chore tick, even when the tick is newer:
@@ -1335,7 +1335,7 @@ assert.equal(magnitude(3, 4, 0), 5);
     [rec({ id: "a", kind: "card", title: "倒垃圾", at: nowMs - 60_000 }), rec({ id: "b" })],
     nowMs
   );
-  assert.equal(mixed?.text, "💊 09:00 食藥", "med beats a newer chore tick");
+  assert.equal(mixed?.text, "✓ 💊 09:00 食藥", "med beats a newer chore tick");
 
   // Yesterday's dose must NOT appear as today's.
   assert.equal(
@@ -1348,12 +1348,12 @@ assert.equal(magnitude(3, 4, 0), 5);
 
   // The record takes one of the three slots — the SOS button must stay on screen.
   const withRec = homeWidgetPayload([], many, nowMs, "忆伴", [rec({})]);
-  assert.equal(withRec.record?.text, "💊 09:00 食藥");
+  assert.equal(withRec.record?.text, "✓ 💊 09:00 食藥");
   assert.equal(withRec.items.length, 2, "record row displaces the third item");
 
   // Long titles are clipped by code point, never mid-emoji.
   const long = homeWidgetRecord([rec({ title: "食降壓藥同埋糖尿藥" })], nowMs);
-  assert.equal(Array.from(long?.text ?? "").length, "💊 09:00 食降壓藥同".length);
+  assert.equal(Array.from(long?.text ?? "").length, "✓ 💊 09:00 食降壓藥".length);
 
   // --- alarm reconcile (issue #8 §2) ---------------------------------------
   const due = nowMs + 3 * 3600_000;
