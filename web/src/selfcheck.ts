@@ -94,7 +94,14 @@ import {
 } from "./lib/behaviour.ts";
 import { makeSender, behaviourBody, telemetryBatch } from "./lib/outboxRunner.ts";
 import type { OutboxTransport } from "./lib/outboxRunner.ts";
-import { runTurn, appendTurn, isLlmReady, composeReply, MAX_RECENT_TURNS } from "./lib/agent.ts";
+import {
+  runTurn,
+  appendTurn,
+  isLlmReady,
+  composeReply,
+  CONFUSED_ESCALATE_AFTER,
+  MAX_RECENT_TURNS,
+} from "./lib/agent.ts";
 import {
   spokenLength,
   splitSentences,
@@ -2405,6 +2412,64 @@ assert.equal(magnitude(3, 4, 0), 5);
     spokenLength(strangerLong.message ?? "") <= SPEECH_BUDGET,
     `念错名字也超预算：${strangerLong.message}`
   );
+}
+
+// --- 听不懂的出口：第三次不再要求他重说（B, P0） ---------------------------
+//
+// 一次听不清不该变成一次"社交退缩"。连续 CONFUSED_ESCALATE_AFTER 轮我们没听懂，
+// 就换成"叫屋企人帮"——出口必须是人，不是无限重试。
+{
+  const base = {
+    doneLines: [] as string[],
+    failLines: [] as string[],
+    executed: [] as { name: string; ok: boolean; message?: string }[],
+    skipped: [] as { name: string; reason: "declined" | "no_executor" | "invalid" }[],
+    plannerReply: "",
+    hadSteps: false,
+    locale: "zh-HK" as const,
+  };
+  // 第一、二次听不懂：仍然是"再说一次"
+  for (const streak of [0, CONFUSED_ESCALATE_AFTER - 1]) {
+    const line = composeReply({ ...base, confusedStreak: streak });
+    assert.ok(spokenLength(line) <= SPEECH_BUDGET, `重试提示超预算：${line}`);
+    assert.ok(!line.includes("屋企人幫你"), `第 ${streak + 1} 次听不懂不该已经推给人：${line}`);
+  }
+  // 第三次：给出口
+  for (const locale of ["zh-HK", "zh-CN", "zh-MO"] as const) {
+    const line = composeReply({ ...base, locale, confusedStreak: CONFUSED_ESCALATE_AFTER });
+    assert.ok(line.includes("屋企人") || line.includes("家里人"), `${locale} 的出口必须指向人：${line}`);
+    assert.ok(spokenLength(line) <= SPEECH_BUDGET, `${locale} 的出口超预算：${line}`);
+    // 出口不许用急救词：老人会把任何能叫来人的词当口头禅，那会变成假 SOS
+    for (const bad of ["救命", "999", "120", "sos", "SOS"]) {
+      assert.ok(!line.includes(bad), `${locale} 的出口不得包含急救词「${bad}」：${line}`);
+    }
+  }
+
+  // runTurn 必须如实上报"这一轮没听懂"，桥才可能累计
+  const depsFor = (res: { reply?: string; calls?: unknown[]; cards?: unknown[] }, streak = 0) =>
+    ({
+      locale: "zh-HK" as const,
+      now: Date.now(),
+      reminders: [],
+      tasks: [],
+      requestTurn: async () => res,
+      confusedStreak: streak,
+    }) as unknown as AgentDeps;
+
+  const blank = await runTurn("唔知呀", depsFor({ reply: "", calls: [], cards: [] }));
+  assert.equal(blank.handled, true);
+  assert.equal(blank.understood, false, "什么都没规划出来 = 没听懂");
+  assert.ok(blank.reply.length > 0, "没听懂也要有话说");
+
+  const stuck = await runTurn("唔知呀", depsFor({ reply: "", calls: [], cards: [] }, CONFUSED_ESCALATE_AFTER));
+  assert.ok(stuck.reply.includes("屋企人"), "第二次没听懂之后要给出口");
+
+  const answered = await runTurn("今日好唔好", depsFor({ reply: "幾好呀。", calls: [], cards: [] }));
+  assert.equal(answered.understood, true, "有回答就算听懂了");
+  assert.equal(answered.reply, "幾好呀。");
+
+  const planned = await runTurn("記住買藥", depsFor({ reply: "", calls: [{ name: "create_task", args: { text: "買藥" } }] }));
+  assert.equal(planned.understood, true, "有工具计划就算听懂了");
 }
 
 console.log("selfcheck: OK");

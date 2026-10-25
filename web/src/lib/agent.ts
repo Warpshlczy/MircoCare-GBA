@@ -99,6 +99,11 @@ export interface AgentDeps {
   runTool?: (step: PlannedStep) => Promise<ToolExecResult>;
   /** spoken yes/no; resolves false on decline or silence. */
   confirm?: (question: string) => Promise<boolean>;
+  /**
+   * How many turns in a row already failed to be understood (0 on a good day).
+   * The bridge owns this counter; the turn itself only decides what to say.
+   */
+  confusedStreak?: number;
 }
 
 export interface ExecutedCall {
@@ -118,6 +123,11 @@ export interface TurnOutcome {
   /** false = not ours; the caller keeps its existing path. */
   handled: boolean;
   refused: boolean;
+  /**
+   * false = 这一轮我们其实没听懂（既没规划出工具、也没给卡片、也没回答）。
+   * 桥用它累计"连续听不懂"的次数，到 `CONFUSED_ESCALATE_AFTER` 就换出口。
+   */
+  understood: boolean;
   reply: string;
   cards: AgentCard[];
   steps: PlannedStep[];
@@ -201,8 +211,36 @@ const COPY: Record<Locale, { refusedFallback: string[]; notWired: string[]; fail
 
 const pick = (pool: string[]): string => pool[Math.floor(Math.random() * pool.length)];
 
+/**
+ * 连续第几次"没听懂"之后不再要求他重说，而是给他一个人。
+ *
+ * 为什么要这条界线：`nothing` 池里三句都是"你再说一次"。第一次是提示，
+ * 第三次就是**推卸**——认知退化的长者不会在第三次突然想明白该怎么说，他会
+ * 停下来不再说话。而那之后的两天里，我们的行为流只会看到"互动变少"，把他
+ * 的技术失败记成社交退缩，然后去关怀、去告警。一次听不清不该变成一次误判。
+ *
+ * 出口必须是人，不是重试。也不给"救命"之类的急救词——老人会把任何能叫来人的
+ * 词当口头禅用，那会把假 SOS 变成日常。这里给的是最朴素的那一句：叫屋企人帮。
+ */
+export const CONFUSED_ESCALATE_AFTER = 2;
+
+const ESCAPE: Record<Locale, string> = {
+  "zh-HK": "我聽唔明，你叫屋企人幫你啦。",
+  "zh-MO": "我聽唔明，你叫屋企人幫你啦。",
+  "zh-CN": "我没听明白，您让家里人帮您吧。",
+};
+
 function emptyOutcome(): TurnOutcome {
-  return { handled: false, refused: false, reply: "", cards: [], steps: [], executed: [], skipped: [] };
+  return {
+    handled: false,
+    refused: false,
+    understood: true,
+    reply: "",
+    cards: [],
+    steps: [],
+    executed: [],
+    skipped: [],
+  };
 }
 
 function buildTurnRequest(utterance: string, deps: AgentDeps): AgentTurnRequest {
@@ -316,11 +354,19 @@ export async function runTurn(utterance: string, deps: AgentDeps): Promise<TurnO
     plannerReply: res.reply ?? "",
     hadSteps: plan.steps.length > 0,
     locale: deps.locale,
+    confusedStreak: deps.confusedStreak,
   });
+
+  // "Did we actually understand him?" — a tool plan, a card or a real answer
+  // all mean yes. Nothing at all means the turn went nowhere; the bridge counts
+  // those, because two in a row is when the app should stop asking him to repeat.
+  const understood =
+    plan.steps.length > 0 || (res.cards ?? []).length > 0 || (res.reply ?? "").trim().length > 0;
 
   return {
     handled: true,
     refused: false,
+    understood,
     reply,
     cards: res.cards ?? [],
     steps: plan.steps,
@@ -340,6 +386,8 @@ export interface ReplyParts {
   plannerReply: string;
   hadSteps: boolean;
   locale: Locale;
+  /** 这一轮之前已经连续几次没听懂（0 = 第一句就听不懂） */
+  confusedStreak?: number;
 }
 
 /**
@@ -355,7 +403,8 @@ export interface ReplyParts {
  *   ④ 会做但这台机没接 → 说实话。绝不念规划器的"好，我幫你做咗"。
  *   ⑤ 规划器只是聊天 / 只推卡 → 用它那句，压成一句。
  *   ⑥ 有计划但一句都没说成 → 沉默（卡片会解释）。
- *   ⑦ 完全没有计划 → "我未聽得明"，这就是 `nothing`。
+ *   ⑦ 完全没有计划 → "我未聽得明"，这就是 `nothing`；但如果他上一轮也没被听懂
+ *      （`confusedStreak`），就不再要求他重说，直接给出口：叫屋企人帮。
  */
 export function composeReply(p: ReplyParts): string {
   const copy = COPY[p.locale];
@@ -366,5 +415,6 @@ export function composeReply(p: ReplyParts): string {
   if (p.skipped.some((s) => s.reason === "no_executor")) return pick(copy.notWired);
   if (p.plannerReply) return fitUtterance(p.plannerReply);
   if (p.hadSteps) return "";
+  if ((p.confusedStreak ?? 0) >= CONFUSED_ESCALATE_AFTER) return ESCAPE[p.locale];
   return pick(copy.nothing);
 }

@@ -83,6 +83,11 @@ export function useAgentBridge(deps: AgentBridgeDeps): AgentBridge {
   const tasksRef = useRef(tasks);
   tasksRef.current = tasks;
   const turnsRef = useRef<RecentTurn[]>([]);
+  /**
+   * 连续几轮我们其实没听懂。第二轮之后不再要求他重说，改为给出口
+   * （`agent.ts#CONFUSED_ESCALATE_AFTER`）。任何一轮听懂了就归零。
+   */
+  const confusedRef = useRef(0);
   /** mirrored into a ref so handleUtterance's empty dep list stays correct */
   const llmRef = useRef(false);
   llmRef.current = llmReady;
@@ -251,9 +256,15 @@ export function useAgentBridge(deps: AgentBridgeDeps): AgentBridge {
         canRun: runner.canRun,
         runTool: runner.run,
         confirm: d.onConfirm,
+        confusedStreak: confusedRef.current,
       });
 
       if (!out.handled) return false;
+
+      // A turn the app could not follow counts towards the escape hatch. It is
+      // reset by any understood turn, so the counter is "how long has he been
+      // stuck", not "how many times in his life".
+      confusedRef.current = out.understood ? 0 : confusedRef.current + 1;
 
       // Record the pair only now: we know both halves of it.
       let next = appendTurn(history, { role: "user", text });
