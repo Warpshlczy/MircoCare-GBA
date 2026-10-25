@@ -61,7 +61,16 @@ import type { InterviewHistory, InterviewState } from "./lib/interview.ts";
 import { visemeFromText, FRAMES_PER_CHAR, VISEME_FRAME_MS } from "./lib/viseme.ts";
 import { parseManifest } from "./lib/live2d.ts";
 import { nextDueAt } from "./lib/datetime.ts";
-import { homeWidgetPayload, onForeground, FOREGROUND_REASONS } from "./lib/native.ts";
+import {
+  homeWidgetPayload,
+  homeWidgetRecord,
+  armedOnceFromRecords,
+  reconcileOnceAlarm,
+  onForeground,
+  FOREGROUND_REASONS,
+  withDefaults,
+  WIDGET_OPEN_TARGETS,
+} from "./lib/native.ts";
 import { haversineM, inCircle, observe, shouldAlert, markAlerted, formatDistance, stepFence, fenceQueueId, FENCE_POLICY } from "./lib/geofence.ts";
 import {
   backoffMs,
@@ -162,7 +171,7 @@ import {
   PAIN_WORDS,
 } from "./lib/care.ts";
 import type { CareSignal, InteractionTrend } from "./lib/care.ts";
-import { planForeground, shouldRaiseSos, SOS_EVENT, SOS_DEBOUNCE_MS } from "./lib/foreground.ts";
+import { planForeground, planOpen, shouldRaiseSos, SOS_EVENT, SOS_DEBOUNCE_MS } from "./lib/foreground.ts";
 import {
   TOOLS,
   confirmToolNames,
@@ -199,6 +208,37 @@ assert.equal(magnitude(3, 4, 0), 5);
   const hits = seq.map((s) => det.push(s)).filter((r) => r.fall);
   assert.equal(hits.length, 1, "fall should fire exactly once");
   assert.equal(hits[0].reason, "free-fall+impact");
+}
+
+// --- fall detector: a stalled/throttled sensor cannot confirm a fall --------
+// Issue #8 §3.2. Two samples 1.5 s apart prove nothing: without a sample floor
+// the detector would confirm on a single reading after a gap and page the family
+// for a phone that was simply put down.
+{
+  const det = createFallDetector();
+  const at = (t: number, az: number) => ({ t, ax: 0, ay: 0, az, gx: 0.1, gy: 0.1, gz: 0.1 });
+  let fired = false;
+  // Real free-fall + impact, then the sensor goes quiet at ~1 Hz.
+  const seq = [
+    at(0, G),
+    at(300, 2),
+    at(500, 45),
+    ...Array.from({ length: 6 }, (_, i) => at(600 + i * 1000, G)), // 1 Hz: gaps of 1000ms
+  ];
+  for (const s of seq) if (det.push(s).fall) fired = true;
+  assert.equal(fired, false, "a 1 Hz sensor is unobserved time, not stillness");
+
+  // The same shape at the ~20 Hz a foreground WebView really gets does fire.
+  const ok = createFallDetector();
+  let fired2 = false;
+  const dense = [
+    at(0, G),
+    at(300, 2),
+    at(500, 45),
+    ...Array.from({ length: 40 }, (_, i) => at(600 + i * 50, G)), // 20 Hz
+  ];
+  for (const s of dense) if (ok.push(s).fall) fired2 = true;
+  assert.equal(fired2, true, "20 Hz stillness confirms the fall");
 }
 
 // --- fall detector: a light knock / dropped phone stays silent ---------------
@@ -1255,7 +1295,8 @@ assert.equal(magnitude(3, 4, 0), 5);
   assert.ok(FOREGROUND_REASONS.includes("widget"));
   assert.ok(FOREGROUND_REASONS.includes("alarm"));
 
-  // Widget payload: at most 4 rows, done flag preserved, title overridable.
+  // Widget payload: the layout has exactly 3 item rows, so the payload must
+  // never promise a 4th (the old 4 was silently dropped by HomeWidgetProvider).
   const many: ReminderItem[] = Array.from({ length: 6 }, (_, i) => ({
     id: `r${i}`,
     kind: "med",
@@ -1266,15 +1307,150 @@ assert.equal(magnitude(3, 4, 0), 5);
     createdAt: 1,
   }));
   const wp = homeWidgetPayload([], many, 7, "忆伴");
-  assert.equal(wp.items.length, 4, "widget shows at most 4 rows");
+  assert.equal(wp.items.length, 3, "widget shows at most 3 rows");
   assert.equal(wp.items[0].done, true);
   assert.equal(wp.title, "忆伴");
   assert.equal(wp.topCard, undefined, "no cards -> no top card");
+  assert.equal(wp.record, undefined, "no records -> no record row");
+
+  // --- the "already done today" row (issue #8 §1) ---------------------------
+  const nowMs = new Date(2026, 9, 25, 15, 0, 0).getTime();
+  const rec = (over: Partial<RecordEntry>): RecordEntry => ({
+    id: "rec-1",
+    kind: "med",
+    title: "食藥",
+    at: nowMs - 6 * 3600_000, // 09:00 local
+    day: "2026-10-25",
+    source: "reminder",
+    ...over,
+  });
+
+  const one = homeWidgetRecord([rec({})], nowMs);
+  assert.equal(one?.text, "💊 09:00 食藥", "icon + local HH:MM + title");
+  assert.equal(one?.at, nowMs - 6 * 3600_000);
+
+  // A medication record outranks a chore tick, even when the tick is newer:
+  // "did I take my pill?" is the question this row exists to answer.
+  const mixed = homeWidgetRecord(
+    [rec({ id: "a", kind: "card", title: "倒垃圾", at: nowMs - 60_000 }), rec({ id: "b" })],
+    nowMs
+  );
+  assert.equal(mixed?.text, "💊 09:00 食藥", "med beats a newer chore tick");
+
+  // Yesterday's dose must NOT appear as today's.
+  assert.equal(
+    homeWidgetRecord([rec({ at: nowMs - 30 * 3600_000, day: "2026-10-24" })], nowMs),
+    null,
+    "yesterday's record is not today's"
+  );
+  // A future-dated row (clock skew) is not "already done".
+  assert.equal(homeWidgetRecord([rec({ at: nowMs + 6 * 3600_000 })], nowMs), null);
+
+  // The record takes one of the three slots — the SOS button must stay on screen.
+  const withRec = homeWidgetPayload([], many, nowMs, "忆伴", [rec({})]);
+  assert.equal(withRec.record?.text, "💊 09:00 食藥");
+  assert.equal(withRec.items.length, 2, "record row displaces the third item");
+
+  // Long titles are clipped by code point, never mid-emoji.
+  const long = homeWidgetRecord([rec({ title: "食降壓藥同埋糖尿藥" })], nowMs);
+  assert.equal(Array.from(long?.text ?? "").length, "💊 09:00 食降壓藥同".length);
+
+  // --- alarm reconcile (issue #8 §2) ---------------------------------------
+  const due = nowMs + 3 * 3600_000;
+  const alarmRow = rec({ id: `rec-alarm-${due}`, kind: "alarm", title: "覆診", at: nowMs, dueAt: due });
+  assert.equal(armedOnceFromRecords([alarmRow], nowMs)?.dueAt, due, "dueAt is the ring time");
+
+  // Legacy row written before `dueAt` existed: the epoch is in the id.
+  const legacy = rec({ id: `rec-alarm-${due}`, kind: "alarm", title: "覆診", at: nowMs, dueAt: undefined });
+  assert.equal(armedOnceFromRecords([legacy], nowMs)?.dueAt, due, "old id format still reconciles");
+
+  // A past alarm is not "armed".
+  assert.equal(
+    armedOnceFromRecords([rec({ id: "rec-alarm-1", kind: "alarm", dueAt: nowMs - 1000 })], nowMs),
+    null
+  );
+
+  assert.equal(
+    reconcileOnceAlarm({ dueAt: due, label: "覆診" }, null, nowMs).action,
+    "arm",
+    "record but no OS alarm -> re-arm (the process died in between)"
+  );
+  assert.equal(
+    reconcileOnceAlarm({ dueAt: due, label: "覆診" }, { at: due, label: "覆診" }, nowMs).action,
+    "ok"
+  );
+  assert.equal(
+    reconcileOnceAlarm({ dueAt: due, label: "覆診" }, { at: due + 60_000, label: "" }, nowMs).action,
+    "arm",
+    "drifted time -> re-arm at the record's time"
+  );
+  assert.equal(
+    reconcileOnceAlarm(null, { at: due, label: "覆診" }, nowMs).action,
+    "unknown",
+    "NEVER cancel a live alarm just because its record is gone (pruning is not a change of mind)"
+  );
+  assert.equal(
+    reconcileOnceAlarm(null, { at: nowMs - 1000, label: "覆診" }, nowMs).action,
+    "cancel",
+    "a fired alarm still registered would make the read-back lie"
+  );
 
   // Outside a browser the foreground subscription must be a harmless no-op.
   const off = onForeground(() => {});
   assert.equal(typeof off, "function");
   off();
+
+  // The deep-link allow-list is CLOSED (MainActivity is showWhenLocked).
+  assert.deepEqual([...WIDGET_OPEN_TARGETS], ["record"]);
+
+  // --- bridge defaults must FORWARD, not stub (regression: set_alarm) -------
+  // A hard `false` default made every real-device alarm fail while the native
+  // scheduler sat unused; the senior heard "設唔到鬧鐘" and the pill was missed.
+  const called: string[] = [];
+  const fake = withDefaults({
+    scheduleOnce: async (at, label) => {
+      called.push(`once:${at}:${label}`);
+      return true;
+    },
+    cancelOnce: async () => {
+      called.push("cancelOnce");
+    },
+    getScheduledAlarms: async () => ({
+      daily: { hour: 8, minute: 0, exact: true },
+      once: { at: 123, label: "覆診" },
+    }),
+    consumePendingReason: async () => ({ reason: "widget", at: 5, open: "record" }),
+  });
+  assert.equal(await fake.scheduleOnce(999, "覆診"), true, "scheduleOnce forwards to the shell");
+  await fake.cancelOnce();
+  assert.deepEqual(called, ["once:999:覆診", "cancelOnce"]);
+  assert.deepEqual(await fake.getScheduledAlarms(), {
+    daily: { hour: 8, minute: 0, exact: true },
+    once: { at: 123, label: "覆診" },
+  });
+  // Cold-start delivery carries the deep link, and only a known target.
+  assert.equal((await fake.consumePendingReason())?.open, "record");
+
+  // A bare browser bridge: no shell, no lying.
+  const bare = withDefaults({});
+  assert.equal(await bare.scheduleOnce(1, "x"), false, "no shell -> honest false");
+  assert.deepEqual(await bare.getScheduledAlarms(), { daily: null, once: null });
+
+  // A hostile/older payload can still carry anything at runtime (the intent
+  // extra is an input from outside the app), so the guard is tested by lying
+  // to the type system on purpose.
+  const badOpen = withDefaults({
+    consumePendingReason: async () => ({
+      reason: "widget",
+      at: 5,
+      open: "settings" as unknown as "record",
+    }),
+  });
+  assert.equal(
+    (await badOpen.consumePendingReason())?.open,
+    undefined,
+    "an unknown deep-link target is dropped, not routed"
+  );
 }
 
 // --- task events + behaviour rollup (B, wired to C's /task/events) ------------
@@ -1968,6 +2144,15 @@ assert.equal(magnitude(3, 4, 0), 5);
   assert.equal(planForeground("reminder", "zh-HK").kind, "refresh");
   assert.equal(planForeground("notification", "zh-HK").kind, "refresh");
   assert.equal(planForeground("widget", "zh-CN").kind, "listen");
+
+  // The widget's record row asks to SEE today's list. If it fell through to
+  // `planForeground("widget")` it would open the mic — the wrong answer to
+  // "did I take my pill?", and the senior would have to speak a second time.
+  assert.deepEqual(planOpen("record"), { kind: "records" });
+  assert.equal(planOpen(undefined), null, "no target -> the reason table decides");
+  // Unknown targets cannot reach here (native.ts drops them), but planOpen must
+  // still be total: a future target without a plan is not a crash.
+  assert.equal(planOpen("settings" as unknown as "record"), null);
 
   // The lock-screen SOS hot zone is pressable from a pocket.
   const now = 1_000_000;

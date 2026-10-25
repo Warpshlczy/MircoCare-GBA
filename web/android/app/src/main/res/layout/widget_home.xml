@@ -4,6 +4,18 @@
   "SOS button" is a TextView with a click PendingIntent rather than a Button —
   it keeps the same visual weight without pulling in a Material theme.
 
+  LAYOUT CONTRACT (why the rows live inside a weighted box):
+
+  The text block is title + record + 3 items ≈ 135dp at 13-14sp. A 2-cell row on
+  a 5-column launcher is only ~110dp tall, so with `wrap_content` children the
+  LinearLayout overflows and Android clips from the BOTTOM — which is exactly
+  where the SOS button sits. In other words the default placement silently hid
+  the emergency button behind the widget's own padding.
+
+  So: the text rows get `height=0dp, weight=1` (they shrink and ellipsize) and
+  SOS keeps a fixed 48dp (Android's minimum touch target). Whatever the launcher
+  grants, the thing that can save a life is never the thing that gets clipped.
+
   Row 3 is GONE by default; HomeWidgetProvider toggles visibility per item count.
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
@@ -11,7 +23,7 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
-    android:padding="12dp"
+    android:padding="10dp"
     android:background="#0F172A">
 
     <TextView
@@ -25,48 +37,73 @@
         android:maxLines="1"
         android:ellipsize="end" />
 
-    <TextView
-        android:id="@+id/widget_item_1"
+    <!-- Shrinkable text area: absorbs every height deficit. -->
+    <LinearLayout
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="4dp"
-        android:textColor="#CBD5E1"
-        android:textSize="13sp"
-        android:maxLines="1"
-        android:ellipsize="end"
-        android:visibility="gone" />
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:orientation="vertical"
+        android:paddingTop="2dp">
 
-    <TextView
-        android:id="@+id/widget_item_2"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="2dp"
-        android:textColor="#CBD5E1"
-        android:textSize="13sp"
-        android:maxLines="1"
-        android:ellipsize="end"
-        android:visibility="gone" />
+        <TextView
+            android:id="@+id/widget_record"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:background="#1E293B"
+            android:paddingStart="6dp"
+            android:paddingEnd="6dp"
+            android:paddingTop="2dp"
+            android:paddingBottom="2dp"
+            android:textColor="#E2E8F0"
+            android:textSize="13sp"
+            android:maxLines="1"
+            android:ellipsize="end"
+            android:visibility="gone" />
 
-    <TextView
-        android:id="@+id/widget_item_3"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="2dp"
-        android:textColor="#CBD5E1"
-        android:textSize="13sp"
-        android:maxLines="1"
-        android:ellipsize="end"
-        android:visibility="gone" />
+        <TextView
+            android:id="@+id/widget_item_1"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="3dp"
+            android:textColor="#CBD5E1"
+            android:textSize="13sp"
+            android:maxLines="1"
+            android:ellipsize="end"
+            android:visibility="gone" />
+
+        <TextView
+            android:id="@+id/widget_item_2"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:textColor="#CBD5E1"
+            android:textSize="13sp"
+            android:maxLines="1"
+            android:ellipsize="end"
+            android:visibility="gone" />
+
+        <TextView
+            android:id="@+id/widget_item_3"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:textColor="#CBD5E1"
+            android:textSize="13sp"
+            android:maxLines="1"
+            android:ellipsize="end"
+            android:visibility="gone" />
+    </LinearLayout>
 
     <TextView
         android:id="@+id/widget_sos"
         android:layout_width="match_parent"
-        android:layout_height="40dp"
-        android:layout_marginTop="8dp"
+        android:layout_height="48dp"
+        android:layout_marginTop="6dp"
         android:background="#DC2626"
         android:gravity="center"
         android:text="@string/widget_sos"
         android:textColor="#FFFFFF"
-        android:textSize="16sp"
+        android:textSize="17sp"
         android:textStyle="bold" />
 </LinearLayout>

@@ -7,6 +7,8 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.os.Build;
 
+import com.getcapacitor.JSObject;
+
 import java.util.Calendar;
 
 /**
@@ -174,6 +176,34 @@ final class AlarmScheduler {
 
     static boolean wasExact(Context ctx) {
         return prefs(ctx).getBoolean(KEY_EXACT, false);
+    }
+
+    /**
+     * Read-back for the JS reconcile pass, or null when nothing is armed.
+     *
+     * These read the same prefs {@link #rescheduleFromPrefs} uses, so they report
+     * what this process believes the OS holds. A PendingIntent cannot be queried
+     * for its trigger time on any API level, so the prefs ARE the record — which
+     * is exactly why they must be written only after a successful set() call.
+     */
+    static JSObject readDaily(Context ctx) {
+        SharedPreferences p = prefs(ctx);
+        if (!p.contains(KEY_HOUR)) return null;
+        JSObject o = new JSObject();
+        o.put("hour", p.getInt(KEY_HOUR, 8));
+        o.put("minute", p.getInt(KEY_MINUTE, 0));
+        o.put("exact", p.getBoolean(KEY_EXACT, false));
+        return o;
+    }
+
+    static JSObject readOnce(Context ctx) {
+        SharedPreferences p = prefs(ctx);
+        long at = p.getLong(KEY_ONCE_AT, 0L);
+        if (at <= 0L) return null;
+        JSObject o = new JSObject();
+        o.put("at", at);
+        o.put("label", p.getString(KEY_ONCE_LABEL, ""));
+        return o;
     }
 
     private static SharedPreferences prefs(Context ctx) {

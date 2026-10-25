@@ -13,13 +13,20 @@
 // Every method degrades to a safe value when the shell is older/missing, so
 // callers never need to feature-detect individually.
 
-import type { AgentCard, CircadianDaily, ReminderItem } from "./types";
+import type { AgentCard, CircadianDaily, RecordEntry, ReminderItem } from "./types";
 
 export interface HomeWidgetPayload {
   updatedAt: number;
   title: string;
   items: { text: string; done: boolean }[];
   topCard?: { kind: string; headline: string };
+  /**
+   * The last thing he *already did* today ("💊 08:12 食藥"). Rendered as its own
+   * tappable row above the pending items, because "what is left to do" and
+   * "what I have done" are two different questions for a forgetful person —
+   * seeing the tick is what stops him taking a second dose.
+   */
+  record?: { text: string; at: number };
 }
 
 /** Why the app was brought forward — decides what the assistant says first. */
@@ -33,6 +40,55 @@ export const FOREGROUND_REASONS: readonly ForegroundReason[] = [
   "boot",
 ] as const;
 
+/**
+ * A short-lived deep link carried alongside the reason: "open this for me".
+ * `record` = the "今日記錄" card (the widget's record row). Deliberately a
+ * closed set — an intent extra that names an arbitrary screen is an attack
+ * surface on a locked phone (MainActivity is `showWhenLocked`).
+ */
+export type WidgetOpenTarget = "record";
+
+export const WIDGET_OPEN_TARGETS: readonly WidgetOpenTarget[] = ["record"] as const;
+
+const OPEN_TARGET_SET: ReadonlySet<string> = new Set<string>(WIDGET_OPEN_TARGETS);
+
+/**
+ * Validates the deep-link extra. An unknown value is DROPPED rather than passed
+ * through: the shell's intent extras are an input from outside the app, and a
+ * string that reaches a router unchecked is how a locked phone gets navigated
+ * to a screen nobody chose.
+ */
+function asOpenTarget(v: unknown): WidgetOpenTarget | undefined {
+  return typeof v === "string" && OPEN_TARGET_SET.has(v) ? (v as WidgetOpenTarget) : undefined;
+}
+
+/** One normaliser for the raw plugin shape: absent keys become `null`. */
+function normalizeAlarms(
+  r: { daily?: { hour?: number; minute?: number; exact?: boolean } | null; once?: { at?: number; label?: string } | null } | void
+): ScheduledAlarms {
+  return {
+    daily:
+      r?.daily && typeof r.daily.hour === "number"
+        ? { hour: r.daily.hour, minute: r.daily.minute ?? 0, exact: !!r.daily.exact }
+        : null,
+    once: r?.once && typeof r.once.at === "number" ? { at: r.once.at, label: r.once.label ?? "" } : null,
+  };
+}
+
+/** One place that turns a raw bridge payload into a ForegroundEvent. */
+function asForegroundEvent(
+  r: { reason?: unknown; at?: unknown; open?: unknown } | null | void
+): ForegroundEvent | null {
+  if (!r || typeof r.reason !== "string") return null;
+  const ev: ForegroundEvent = {
+    reason: r.reason as ForegroundReason,
+    at: typeof r.at === "number" ? r.at : Date.now(),
+  };
+  const open = asOpenTarget(r.open);
+  if (open) ev.open = open;
+  return ev;
+}
+
 export interface NativeLocation {
   lat: number;
   lng: number;
@@ -44,6 +100,14 @@ export interface NativeLocation {
 export interface ForegroundEvent {
   reason: ForegroundReason;
   at: number;
+  /** The widget row that was tapped, when there was one. */
+  open?: WidgetOpenTarget;
+}
+
+/** What the shell's AlarmManager currently holds (see AlarmScheduler.java). */
+export interface ScheduledAlarms {
+  daily: { hour: number; minute: number; exact: boolean } | null;
+  once: { at: number; label: string } | null;
 }
 
 /** Tone presets understood by the on-box neural voice (NeuralTts.java). */
@@ -78,6 +142,12 @@ export interface AuraNativeBridge {
   /** one-shot alarm at an absolute time; false when the OS refused it */
   scheduleOnce(atMs: number, label?: string): Promise<boolean>;
   cancelOnce(): Promise<void>;
+  /**
+   * What the OS currently holds, read back from the scheduler's own store.
+   * `null` fields mean "nothing armed". Only the shell can answer this — a
+   * browser returns both nulls, which is the truth there as well.
+   */
+  getScheduledAlarms(): Promise<ScheduledAlarms>;
   /**
    * Starts the screen/unlock/charging rollup. No permission needed, no JS timer:
    * SCREEN_ON/OFF are protected broadcasts a WebView cannot see once the screen
@@ -136,6 +206,10 @@ interface AuraNativePlugin {
   cancelDaily(): Promise<void>;
   scheduleOnce(o: { at: number; label?: string }): Promise<{ ok?: boolean; exact?: boolean }>;
   cancelOnce(): Promise<void>;
+  getScheduledAlarms(): Promise<{
+    daily?: { hour?: number; minute?: number; exact?: boolean } | null;
+    once?: { at?: number; label?: string } | null;
+  } | void>;
   circadianStart(): Promise<{ ok?: boolean }>;
   getCircadian(o: { day: string }): Promise<Partial<CircadianDaily> | void>;
   dial(o: { phone: string }): Promise<{ ok?: boolean }>;
@@ -147,7 +221,7 @@ interface AuraNativePlugin {
   stopSpeak(): Promise<void>;
   warmTts(o: { locale: string }): Promise<void>;
   openAccessibilitySettings(): Promise<{ ok?: boolean }>;
-  consumePendingReason(): Promise<{ reason?: string; at?: number; sos?: boolean } | void>;
+  consumePendingReason(): Promise<{ reason?: string; at?: number; sos?: boolean; open?: string } | void>;
   addListener?(
     event: string,
     cb: (data: ForegroundEvent) => void
@@ -157,8 +231,12 @@ interface AuraNativePlugin {
 /**
  * Fills in every method so a shell that predates (say) `scheduleDaily` behaves
  * exactly like the web: the call resolves to its safe value instead of throwing.
+ *
+ * Exported because the defaults themselves are a contract worth testing: an
+ * earlier version hard-returned `false` for `scheduleOnce`, which disabled
+ * `set_alarm` on every real device while looking like a safe stub.
  */
-function withDefaults(src: Partial<AuraNativeBridge>): AuraNativeBridge {
+export function withDefaults(src: Partial<AuraNativeBridge>): AuraNativeBridge {
   return {
     startBackgroundWake: () =>
       Promise.resolve(src.startBackgroundWake?.()).then((v) => !!v).catch(() => false),
@@ -174,8 +252,23 @@ function withDefaults(src: Partial<AuraNativeBridge>): AuraNativeBridge {
       Promise.resolve(src.cancelDaily?.()).then(() => undefined).catch(() => undefined),
     // A browser has no AlarmManager: report false rather than pretend an alarm
     // is armed. The executor then says "我設唔到鬧鐘" instead of lying.
-    scheduleOnce: () => Promise.resolve(false),
-    cancelOnce: () => Promise.resolve(),
+    //
+    // CRITICAL: this must still forward to `src` when the shell *did* provide
+    // it. An earlier version hard-returned `false`, which silently disabled
+    // `set_alarm` on every real device — the senior heard "設唔到鬧鐘" while
+    // the native scheduler sat unused. Same for cancel: a hard stub left an
+    // alarm ringing that he had explicitly asked to cancel.
+    scheduleOnce: (atMs, label) =>
+      Promise.resolve(src.scheduleOnce?.(atMs, label))
+        .then((v) => !!v)
+        .catch(() => false),
+    cancelOnce: () =>
+      Promise.resolve(src.cancelOnce?.()).then(() => undefined).catch(() => undefined),
+    // A browser holds no alarms, so the honest answer is "nothing armed".
+    getScheduledAlarms: () =>
+      Promise.resolve(src.getScheduledAlarms?.())
+        .then(normalizeAlarms)
+        .catch(() => ({ daily: null, once: null })),
     startCircadian: () => Promise.resolve(false),
     getCircadian: () => Promise.resolve(null),
     dial: () => Promise.resolve(false),
@@ -197,9 +290,7 @@ function withDefaults(src: Partial<AuraNativeBridge>): AuraNativeBridge {
       Promise.resolve(src.openAccessibilitySettings?.()).then((v) => !!v).catch(() => false),
     consumePendingReason: () =>
       Promise.resolve(src.consumePendingReason?.())
-        .then((r) => (r && typeof r.reason === "string"
-          ? { reason: r.reason as ForegroundReason, at: r.at ?? Date.now() }
-          : null))
+        .then((r) => asForegroundEvent(r))
         .catch(() => null),
   };
 }
@@ -227,6 +318,7 @@ export function bridge(): AuraNativeBridge | null {
     cancelDaily: () => p.cancelDaily(),
     scheduleOnce: (atMs, label) => p.scheduleOnce({ at: atMs, label }).then((r) => !!r?.ok),
     cancelOnce: () => p.cancelOnce(),
+    getScheduledAlarms: async () => normalizeAlarms(await p.getScheduledAlarms()),
     startCircadian: () => p.circadianStart().then((r) => !!r?.ok),
     dial: (phone) => p.dial({ phone }).then((r) => !!r?.ok),
     openApp: (key) => p.openApp({ app: key }).then((r) => !!r?.ok),
@@ -248,9 +340,7 @@ export function bridge(): AuraNativeBridge | null {
     openAccessibilitySettings: () => p.openAccessibilitySettings().then((r) => !!r?.ok),
     consumePendingReason: async () => {
       const r = await p.consumePendingReason();
-      return r && typeof r.reason === "string"
-        ? { reason: r.reason as ForegroundReason, at: r.at ?? Date.now() }
-        : null;
+      return asForegroundEvent(r);
     },
   });
 }
@@ -286,7 +376,8 @@ function subscribeForeground(cb: (e: ForegroundEvent) => void): () => void {
   if (p?.addListener) {
     let removed = false;
     const handle = p.addListener("foreground", (data) => {
-      if (data && typeof data.reason === "string") cb(data);
+      const ev = asForegroundEvent(data);
+      if (ev) cb(ev);
     });
     return () => {
       if (removed) return;
@@ -312,12 +403,75 @@ function subscribeForeground(cb: (e: ForegroundEvent) => void): () => void {
     } else if (raw && typeof raw === "object") {
       detail = raw as Partial<ForegroundEvent>;
     }
-    if (detail && typeof detail.reason === "string") {
-      cb({ reason: detail.reason as ForegroundReason, at: detail.at ?? Date.now() });
+    if (detail) {
+      const ev = asForegroundEvent(detail);
+      if (ev) cb(ev);
     }
   };
   window.addEventListener("memomate:foreground", handler);
   return () => window.removeEventListener("memomate:foreground", handler);
+}
+
+/** Icons are the only part a 2x2 widget can use to be readable at a glance. */
+const RECORD_ICON: Record<string, string> = {
+  med: "💊",
+  measure: "🩺",
+  alarm: "⏰",
+  card: "✅",
+};
+
+/** Truncates by code point so an emoji is never cut in half. */
+function clipChars(s: string, max: number): string {
+  const chars = Array.from(s.replace(/\s+/g, " ").trim());
+  return chars.length <= max ? chars.join("") : chars.slice(0, max).join("");
+}
+
+/** Local HH:MM — the widget lives on the senior's phone, so device time wins. */
+function hhmm(at: number): string {
+  const d = new Date(at);
+  const h = `${d.getHours()}`.padStart(2, "0");
+  const m = `${d.getMinutes()}`.padStart(2, "0");
+  return `${h}:${m}`;
+}
+
+function sameLocalDay(a: number, b: number): boolean {
+  const x = new Date(a);
+  const y = new Date(b);
+  return (
+    x.getFullYear() === y.getFullYear() && x.getMonth() === y.getMonth() && x.getDate() === y.getDate()
+  );
+}
+
+/**
+ * The one "already done today" line the widget shows, or null.
+ *
+ * Why it exists: a senior who cannot remember whether he took his pill needs
+ * to see *the tick*, not only the remaining tasks — the widget's item list
+ * says "食藥" until 8pm either way, so it cannot answer "did I take it?".
+ *
+ * Picks the newest medication/measurement of the local day. `alarm` is
+ * deliberately skipped when anything better exists: its `at` is when the alarm
+ * was *set*, not when it rang, so "⏰ 20:15" next to "聽日八點" would be a lie.
+ */
+export function homeWidgetRecord(
+  rows: RecordEntry[],
+  now = Date.now()
+): { text: string; at: number } | null {
+  const today = rows.filter(
+    (r) => typeof r.at === "number" && r.at <= now + 60_000 && sameLocalDay(r.at, now)
+  );
+  if (!today.length) return null;
+
+  const meaningful = today.filter((r) => r.kind === "med" || r.kind === "measure");
+  const pool = meaningful.length ? meaningful : today;
+  const latest = pool.reduce((a, b) => (b.at > a.at ? b : a));
+
+  const icon = RECORD_ICON[latest.kind] ?? "✅";
+  const label = clipChars(latest.title || latest.detail || "", 5);
+  // The leading ✓ is NOT decoration: the items below this row show pending
+  // chores as "·" and done ones as "✓", so an unmarked "💊 09:00 食藥" would
+  // read as one more thing still to do — and a double dose is the failure mode.
+  return { text: `✓ ${icon} ${hhmm(latest.at)}${label ? ` ${label}` : ""}`, at: latest.at };
 }
 
 /**
@@ -326,22 +480,79 @@ function subscribeForeground(cb: (e: ForegroundEvent) => void): () => void {
  *
  * `title` is displayed by the widget; the widget layout falls back to
  * `@string/app_name` when it is empty, so a future rename only touches strings.
+ *
+ * `records` is optional so an older caller keeps working; when present, the
+ * record row takes one of the three list slots — the widget is 2x2 and a fourth
+ * line would push the SOS button off the bottom edge.
  */
 export function homeWidgetPayload(
   cards: AgentCard[],
   reminders: ReminderItem[],
   now = Date.now(),
-  title = "忆伴"
+  title = "忆伴",
+  records: RecordEntry[] = []
 ): HomeWidgetPayload {
   const top = cards[0];
+  const record = homeWidgetRecord(records, now) ?? undefined;
   return {
     updatedAt: now,
     title,
     items: reminders
       .filter((r) => r.status === "pending" || r.status === "taken")
-      .slice(0, 4)
+      .slice(0, record ? 2 : 3)
       .map((r) => ({ text: r.med?.name ?? r.title, done: r.status === "taken" })),
     topCard: top ? { kind: top.kind, headline: top.data?.headline ?? top.title } : undefined,
+    record,
   };
+}
+
+/**
+ * The one-shot alarm the record store says is armed, or null.
+ *
+ * `dueAt` is the epoch the alarm must ring at; `at` is only when the senior
+ * said it. A record written before `dueAt` existed encodes the epoch in its id
+ * (`rec-alarm-<epoch>`), so an old row still reconciles.
+ */
+export function armedOnceFromRecords(
+  rows: RecordEntry[],
+  now = Date.now()
+): { dueAt: number; label: string } | null {
+  const future = rows
+    .filter((r) => r.kind === "alarm")
+    .map((r) => {
+      const due = r.dueAt ?? Number(/^rec-alarm-(\d+)$/.exec(r.id)?.[1] ?? NaN);
+      return Number.isFinite(due) && due > now ? { dueAt: due, label: r.title || r.detail || "" } : null;
+    })
+    .filter((x): x is { dueAt: number; label: string } => x !== null);
+  if (!future.length) return null;
+  return future.reduce((a, b) => (b.dueAt < a.dueAt ? b : a)); // the next one wins
+}
+
+export type AlarmReconcileAction = "arm" | "cancel" | "ok" | "unknown";
+
+/**
+ * Decides what to do after a restart / cold start, comparing what the record
+ * store believes with what the OS actually holds.
+ *
+ * The asymmetry is deliberate and is the whole point of this function:
+ *   - **missing alarm → arm it.** Setting the same PendingIntent twice is
+ *     idempotent (FLAG_UPDATE_CURRENT), so a redundant arm costs nothing.
+ *   - **orphan alarm → leave it alone.** A live alarm with no record may just
+ *     mean the record was pruned; cancelling it silently is a missed dose,
+ *     which is the one failure this product must not add.
+ *   - **fired alarm still registered → cancel.** `at <= now` can never ring
+ *     again, and a stale PendingIntent would make `getScheduledAlarms` lie.
+ */
+export function reconcileOnceAlarm(
+  record: { dueAt: number; label: string } | null,
+  armed: { at: number; label: string } | null,
+  now = Date.now()
+): { action: AlarmReconcileAction; at?: number; label?: string } {
+  if (record) {
+    if (armed && armed.at === record.dueAt) return { action: "ok" };
+    return { action: "arm", at: record.dueAt, label: record.label };
+  }
+  if (armed && armed.at <= now) return { action: "cancel" };
+  return { action: "unknown" };
 }
 

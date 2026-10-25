@@ -267,6 +267,14 @@ export interface RecordEntry {
   /** short detail shown on the card; never a raw audio transcript */
   detail?: string;
   at: number;
+  /**
+   * The moment this record is ABOUT, when that differs from `at`. Only
+   * `kind:"alarm"` sets it: `at` is when he asked, `dueAt` is when it rings.
+   * Without it a restart cannot reconcile the OS alarm against the record
+   * (see native.ts#reconcileOnceAlarm) — the app would re-arm nothing and the
+   * pill alarm would be silently lost.
+   */
+  dueAt?: number;
   /** local calendar day, `YYYY-MM-DD` — lets the app re-show today after a restart */
   day: string;
   source: "voice" | "reminder" | "agent";

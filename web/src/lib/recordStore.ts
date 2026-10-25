@@ -14,6 +14,8 @@ export interface NewRecord {
   title: string;
   detail?: string;
   at: number;
+  /** when the record is about a future moment (alarms only) — see types.ts */
+  dueAt?: number;
   source: RecordEntry["source"];
 }
 
@@ -24,6 +26,7 @@ export function newRecord(input: NewRecord): RecordEntry {
     title: input.title,
     detail: input.detail,
     at: input.at,
+    dueAt: input.dueAt,
     day: dayKey(input.at),
     source: input.source,
   };

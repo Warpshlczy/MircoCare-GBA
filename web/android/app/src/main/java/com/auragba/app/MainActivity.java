@@ -25,6 +25,13 @@ public class MainActivity extends BridgeActivity {
 
     /** Extra carrying one of: widget | alarm | reminder | notification | boot. */
     public static final String EXTRA_REASON = "reason";
+    /**
+     * Extra naming a screen to open on arrival. A CLOSED set on purpose: this
+     * activity is `showWhenLocked`, so an intent extra that could name any route
+     * would let whoever taps the widget drive a locked phone. Unknown values are
+     * dropped by {@link #safeOpen(String)} on both the Java and the JS side.
+     */
+    public static final String EXTRA_OPEN = "open";
     /** Action set by the widget's SOS hot zone. */
     public static final String ACTION_SOS = "com.auragba.app.SOS";
 
@@ -35,6 +42,12 @@ public class MainActivity extends BridgeActivity {
     private static final String KEY_REASON = "pending_reason";
     private static final String KEY_AT = "pending_at";
     private static final String KEY_SOS = "pending_sos";
+    private static final String KEY_OPEN = "pending_open";
+
+    /** The only deep links the widget may request. Mirrors native.ts. */
+    private static String safeOpen(String open) {
+        return "record".equals(open) ? open : null;
+    }
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
@@ -58,6 +71,7 @@ public class MainActivity extends BridgeActivity {
         String reason = intent.getStringExtra(EXTRA_REASON);
         if (reason == null && !sos) return; // a plain launcher tap: nothing to say
         if (reason == null) reason = "widget";
+        final String open = safeOpen(intent.getStringExtra(EXTRA_OPEN));
         final long at = System.currentTimeMillis();
 
         SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
@@ -65,6 +79,7 @@ public class MainActivity extends BridgeActivity {
                 .putString(KEY_REASON, reason)
                 .putLong(KEY_AT, at)
                 .putBoolean(KEY_SOS, sos)
+                .putString(KEY_OPEN, open)
                 .apply();
 
         if (getBridge() == null) return; // WebView not ready; consumePendingReason() will deliver it
@@ -72,6 +87,7 @@ public class MainActivity extends BridgeActivity {
         JSObject data = new JSObject();
         data.put("reason", reason);
         data.put("at", at);
+        if (open != null) data.put("open", open);
         getBridge().triggerWindowJSEvent(EVENT_FOREGROUND, data.toString());
 
         if (sos) {
@@ -94,6 +110,8 @@ public class MainActivity extends BridgeActivity {
         out.put("reason", reason);
         out.put("at", prefs.getLong(KEY_AT, 0L));
         out.put("sos", prefs.getBoolean(KEY_SOS, false));
+        String open = safeOpen(prefs.getString(KEY_OPEN, null));
+        if (open != null) out.put("open", open);
         prefs.edit().clear().apply();
         return out;
     }
