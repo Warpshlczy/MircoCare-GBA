@@ -79,8 +79,16 @@ export interface ToolRunnerDeps {
   raiseSos?: (event: SosEvent) => void;
   /** foreground coarse location; resolve null when denied or unavailable */
   locate?: () => Promise<{ lat: number; lng: number; accuracy?: number } | null>;
-  /** arm a one-shot alarm; resolve false when the OS refused (permission/slot) */
-  setAlarm?: (atMs: number, label: string) => Promise<boolean>;
+  /**
+   * Arm ONE one-shot alarm; resolve false when the OS refused (permission).
+   *
+   * `slot` identifies which alarm this is, and it is REQUIRED, not optional:
+   * the OS scheduler keeps several alarms side by side (AlarmScheduler.java),
+   * and without a slot key a second "叫我八點" would silently replace the first
+   * one while the record store still showed both. The slot is the record id, so
+   * the two halves of "this alarm exists" always name the same alarm.
+   */
+  setAlarm?: (atMs: number, label: string, slot: string) => Promise<boolean>;
   /**
    * Contacts we are allowed to dial — in practice the health card's emergency
    * contact. Empty array means "we know nobody", which is a refusal, not a
@@ -99,6 +107,21 @@ export interface ToolRunnerDeps {
   records?: RecordEntry[];
   /** clear the medication reminder the senior just confirmed */
   onMedTaken?: (name: string) => void;
+  /**
+   * Observability hook, called once per executed step (and never for a step that
+   * was skipped before execution). Injected rather than imported because the
+   * executor must stay free of IndexedDB — selfcheck drives it with a spy.
+   *
+   * Deliberately fire-and-forget: an audit write that could fail the tool would
+   * turn the report about the product into a cause of its failures.
+   */
+  recordAudit?: (input: {
+    tool: string;
+    outcome: "ok" | "failed";
+    at: number;
+    /** 0 for the first call of this tool in the turn, 1 for the second… */
+    seq: number;
+  }) => void;
 }
 
 export interface ToolRunner {
@@ -531,8 +554,12 @@ export function createToolRunner(deps: ToolRunnerDeps): ToolRunner {
     if (at === null) return { ok: false, message: copy.alarmBadTime };
     if (!deps.setAlarm) return { ok: false, message: copy.alarmFailed };
 
+    // One slot per ringing moment. Two alarms at different times are two slots,
+    // so "聽日八點食藥" followed by "後日九點覆診" leaves BOTH armed; the same
+    // moment asked twice is one slot, so re-confirming does not arm a duplicate.
+    const slot = `rec-alarm-${at}`;
     try {
-      if (!(await deps.setAlarm(at, label))) return { ok: false, message: copy.alarmFailed };
+      if (!(await deps.setAlarm(at, label, slot))) return { ok: false, message: copy.alarmFailed };
     } catch {
       return { ok: false, message: copy.alarmFailed };
     }
@@ -542,7 +569,7 @@ export function createToolRunner(deps: ToolRunnerDeps): ToolRunner {
     // bridge compares it with the OS scheduler and re-arms a lost alarm.
     if (deps.saveRecord) {
       await deps.saveRecord({
-        id: `rec-alarm-${at}`,
+        id: slot,
         kind: "alarm",
         title: label,
         detail: when,
@@ -773,7 +800,10 @@ export function createToolRunner(deps: ToolRunnerDeps): ToolRunner {
     return ok ? { ok: true, message: copy.appOpened(key) } : { ok: false, message: copy.appFailed };
   }
 
-  async function run(step: PlannedStep): Promise<ToolExecResult> {
+  /** How many times each tool already ran in THIS turn — the audit row's `seq`. */
+  const auditSeq = new Map<string, number>();
+
+  async function execute(step: PlannedStep): Promise<ToolExecResult> {
     const args = step.args ?? {};
     switch (step.name) {
       case "create_task":
@@ -804,6 +834,44 @@ export function createToolRunner(deps: ToolRunnerDeps): ToolRunner {
         // Reached only if the orchestrator ignored canRun().
         return { ok: false, message: copy.notFound };
     }
+  }
+
+  /**
+   * Every executed step is audited, whether it worked or not.
+   *
+   * The wrapper exists so no individual tool can forget to: a hand-placed call
+   * inside each of the thirteen functions is thirteen chances to miss one, and
+   * the one that gets missed will be the interesting one (a refusal, a failed
+   * dial). `skipped` steps never reach here — they never ran.
+   */
+  async function run(step: PlannedStep): Promise<ToolExecResult> {
+    let result: ToolExecResult;
+    try {
+      result = await execute(step);
+    } catch (err) {
+      // The executor's contract is "never throw", but a broken injected dep can
+      // still reject. Record it as a failure, then re-throw to the orchestrator's
+      // own catch so the turn keeps its existing behaviour.
+      try {
+        deps.recordAudit?.({ tool: step.name, outcome: "failed", at: deps.now, seq: auditSeq.get(step.name) ?? 0 });
+      } catch {
+        /* never let the audit change the outcome */
+      }
+      throw err;
+    }
+    const seq = auditSeq.get(step.name) ?? 0;
+    auditSeq.set(step.name, seq + 1);
+    try {
+      deps.recordAudit?.({
+        tool: step.name,
+        outcome: result.ok ? "ok" : "failed",
+        at: deps.now,
+        seq,
+      });
+    } catch {
+      /* never let the audit change the outcome */
+    }
+    return result;
   }
 
   return { canRun, run };

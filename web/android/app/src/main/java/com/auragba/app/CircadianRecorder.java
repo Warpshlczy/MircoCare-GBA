@@ -95,6 +95,18 @@ final class CircadianRecorder {
 
     // ----------------------------------------------------------------------- //
 
+    /**
+     * First screen-unlock of `day`, or 0 when nothing was observed.
+     *
+     * Package-private for {@link DigitalSkillRecorder}: "how long after waking
+     * the phone did he actually do something" needs the unlock stamp, and
+     * duplicating this prefs layout in a second class is how the two recorders
+     * would drift apart. 0 means "unknown", never "midnight".
+     */
+    static long firstActiveAt(Context ctx, String day) {
+        return prefs(ctx).getLong(key(day, "first"), 0L);
+    }
+
     private static void handle(Context ctx, Intent intent) {
         String action = intent.getAction();
         long now = System.currentTimeMillis();

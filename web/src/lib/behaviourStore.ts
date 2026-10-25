@@ -23,6 +23,7 @@ import {
   circadianRow,
   countInteractions,
   dayToUpload,
+  digitalSkillRow,
   emptyAccumulator,
   shouldUploadDay,
   addDays,
@@ -36,7 +37,7 @@ import { listTasks } from "./taskStore.ts";
 import { dayKey } from "./tasks.ts";
 import { CARE_DAY_PREFIX, hearingProxyFrom } from "./care.ts";
 import type { CareCounters } from "./care.ts";
-import type { BehaviourDaily, CircadianDaily, ConversationTurn, GaitWindow } from "./types";
+import type { BehaviourDaily, CircadianDaily, ConversationTurn, DigitalSkillDaily, GaitWindow } from "./types";
 
 const ACC_PREFIX = "behaviour_acc.";
 const INTERACTION_PREFIX = "interaction_acc.";
@@ -185,6 +186,26 @@ async function readCircadian(day: string): Promise<CircadianDaily | null> {
   }
 }
 
+/**
+ * Native usage-stats snapshot for `day`; null unless the permission is granted
+ * AND something was seen.
+ *
+ * `hasUsageAccess` is checked first on purpose: an unanswered query also returns
+ * nothing, and "we were not allowed to look" must not be stored as a measured
+ * zero. The permission is never requested from here — only a family member can
+ * grant it, from the settings screen.
+ */
+async function readDigitalSkill(day: string): Promise<DigitalSkillDaily | null> {
+  try {
+    const b = bridge();
+    if (!b) return null;
+    if (!(await b.hasUsageAccess())) return null;
+    return await b.getDigitalSkill(day);
+  } catch {
+    return null;
+  }
+}
+
 async function readProxy(day: string): Promise<ProxyDoc | null> {
   const doc = await get<ProxyDoc>("meta", `${PROXY_PREFIX}${day}`).catch(() => undefined);
   return doc ?? null;
@@ -314,8 +335,11 @@ export async function flushClosedDay(now = Date.now()): Promise<BehaviourFlushRe
   // Null means "we did not see anything", and then the row is OMITTED rather
   // than sent full of zeros.
   const circadian = circadianRow(day, await readCircadian(day));
+  // Usage-stats proxy, when the senior's phone has granted PACKAGE_USAGE_STATS.
+  // Same rule as circadian: no observation means the row is omitted, never zeroed.
+  const digitalSkill = digitalSkillRow(day, await readDigitalSkill(day));
 
-  await enqueue("behaviour", behaviourEnvelope(behaviour, circadian), now);
+  await enqueue("behaviour", behaviourEnvelope(behaviour, circadian, digitalSkill), now);
   await markUploaded(day, now);
   await pruneAccumulators(now);
   return { uploaded: day, checked: day };

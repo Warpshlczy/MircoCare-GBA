@@ -5,11 +5,18 @@ import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.net.Uri;
 import android.os.Build;
 
+import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
 
+import java.util.ArrayList;
 import java.util.Calendar;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
 
 /**
  * The one place that talks to AlarmManager.
@@ -22,6 +29,14 @@ import java.util.Calendar;
  * Exactness: on API 31+ an app may lack SCHEDULE_EXACT_ALARM. We degrade to an
  * inexact alarm instead of crashing (docs/dev.md §3.6: ±15min is acceptable),
  * and record which mode was used so the demo can explain it if asked.
+ *
+ * MULTI-SLOT one-shots: each alarm has an opaque `slot` string (the JS side uses
+ * the record id). The slot is carried as the PendingIntent's DATA URI, which is
+ * what the framework actually compares when matching pending intents — extras
+ * are not part of `Intent.filterEquals`. Sharing one request code across slots is
+ * therefore correct AND collision-free; an earlier version had a single fixed
+ * request code, so the second "叫我九點" replaced the first while the record
+ * store still listed both.
  */
 final class AlarmScheduler {
 
@@ -29,12 +44,24 @@ final class AlarmScheduler {
     static final String KEY_HOUR = "daily_hour";
     static final String KEY_MINUTE = "daily_minute";
     static final String KEY_EXACT = "daily_exact";
-    /** one-shot alarm: absolute epoch ms + what it is for */
-    static final String KEY_ONCE_AT = "once_at";
-    static final String KEY_ONCE_LABEL = "once_label";
+
+    /** Registry of live one-shot slots (a StringSet of slot ids). */
+    private static final String KEY_ONCE_SLOTS = "once_slots";
+    private static final String ONCE_AT = "once_at_";
+    private static final String ONCE_LABEL = "once_label_";
+
+    /** Pre-multi-slot keys: migrated on first read so an upgrade keeps its alarm. */
+    private static final String LEGACY_ONCE_AT = "once_at";
+    private static final String LEGACY_ONCE_LABEL = "once_label";
+    /** Slot name used for the alarm that predates slot ids. */
+    static final String LEGACY_SLOT = "legacy";
+
+    /** Fallback when the caller sends no slot (older JS, or a one-off call). */
+    static final String DEFAULT_SLOT = "default";
 
     private static final int REQUEST_CODE = 8801;
     private static final int REQUEST_CODE_ONCE = 8804;
+    private static final String ONCE_URI_PREFIX = "auragba://alarm/";
 
     private AlarmScheduler() {}
 
@@ -90,18 +117,23 @@ final class AlarmScheduler {
     }
 
     /**
-     * One-shot alarm ("聽日八點叫我"). The epoch is computed on the JS side because
-     * the model must never do that arithmetic; here we only refuse the impossible
-     * (a time already past) and arm it.
+     * One-shot alarm ("聽日八點叫我") in the slot named by `slot`. The epoch is
+     * computed on the JS side because the model must never do that arithmetic;
+     * here we only refuse the impossible (a time already past) and arm it.
+     *
+     * Arming the same slot twice is idempotent: same request code, same data
+     * URI, FLAG_UPDATE_CURRENT rewrites the extras. That is what lets the cold
+     * start reconciler re-arm blindly without creating duplicates.
      *
      * @return true when an alarm was actually set.
      */
-    static boolean scheduleOnce(Context ctx, long atMs, String label) {
+    static boolean scheduleOnce(Context ctx, long atMs, String label, String slot) {
         if (atMs <= System.currentTimeMillis()) return false; // past time: refuse, never fire instantly
         AlarmManager am = (AlarmManager) ctx.getSystemService(Context.ALARM_SERVICE);
         if (am == null) return false;
 
-        final PendingIntent pi = oncePendingIntent(ctx, label);
+        final String key = normalizeSlot(slot);
+        final PendingIntent pi = oncePendingIntent(ctx, key, label);
         boolean exact = true;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !am.canScheduleExactAlarms()) {
             exact = false; // same degradation as the daily alarm: ±15min beats a crash
@@ -124,34 +156,62 @@ final class AlarmScheduler {
             return false;
         }
 
-        prefs(ctx).edit()
-                .putLong(KEY_ONCE_AT, atMs)
-                .putString(KEY_ONCE_LABEL, label == null ? "" : label)
-                .apply();
+        // Written ONLY after set() succeeded: these prefs ARE the read-back
+        // (`getScheduledAlarms`), so a row here for an alarm the OS refused would
+        // make the app claim an alarm that will never ring.
+        SharedPreferences.Editor e = prefs(ctx).edit()
+                .putLong(ONCE_AT + key, atMs)
+                .putString(ONCE_LABEL + key, label == null ? "" : label);
+        Set<String> slots = slots(ctx);
+        if (slots.add(key)) e.putStringSet(KEY_ONCE_SLOTS, slots);
+        e.apply();
         return true;
     }
 
-    static void cancelOnce(Context ctx) {
+    /**
+     * Cancels ONE slot. An empty/unknown slot is a no-op rather than "cancel
+     * everything": a caller that lost its slot id must not be able to silence
+     * every alarm the senior is relying on.
+     */
+    static void cancelOnce(Context ctx, String slot) {
+        final String key = normalizeSlot(slot);
         AlarmManager am = (AlarmManager) ctx.getSystemService(Context.ALARM_SERVICE);
-        if (am != null) am.cancel(oncePendingIntent(ctx, prefs(ctx).getString(KEY_ONCE_LABEL, "")));
-        prefs(ctx).edit().remove(KEY_ONCE_AT).remove(KEY_ONCE_LABEL).apply();
-    }
-
-    /** Re-arms the saved one-shot alarm after a reboot, unless it is already past. */
-    static void rescheduleOnceFromPrefs(Context ctx) {
-        SharedPreferences p = prefs(ctx);
-        long at = p.getLong(KEY_ONCE_AT, 0L);
-        if (at <= System.currentTimeMillis()) {
-            // Missed while the phone was off: drop it rather than ring at boot.
-            p.edit().remove(KEY_ONCE_AT).remove(KEY_ONCE_LABEL).apply();
-            return;
+        if (am != null) {
+            am.cancel(oncePendingIntent(ctx, key, prefs(ctx).getString(ONCE_LABEL + key, "")));
         }
-        scheduleOnce(ctx, at, p.getString(KEY_ONCE_LABEL, ""));
+        Set<String> slots = slots(ctx);
+        SharedPreferences.Editor e = prefs(ctx).edit()
+                .remove(ONCE_AT + key)
+                .remove(ONCE_LABEL + key);
+        if (slots.remove(key)) e.putStringSet(KEY_ONCE_SLOTS, slots);
+        e.apply();
     }
 
-    /** Called by the receiver after it fires, so a stale alarm is never re-armed. */
-    static void clearOnce(Context ctx) {
-        prefs(ctx).edit().remove(KEY_ONCE_AT).remove(KEY_ONCE_LABEL).apply();
+    /**
+     * Re-arms every saved slot after a reboot, dropping the ones already past.
+     *
+     * A one-shot missed while the phone was off is dropped rather than rung at
+     * boot: waking someone at 3pm for an 8am pill is worse than silence, and the
+     * record store still shows the missed dose on screen.
+     */
+    static void rescheduleOnceFromPrefs(Context ctx) {
+        migrateLegacyOnce(ctx);
+        SharedPreferences p = prefs(ctx);
+        long now = System.currentTimeMillis();
+        List<String> keys = new ArrayList<>(slots(ctx));
+        for (String key : keys) {
+            long at = p.getLong(ONCE_AT + key, 0L);
+            if (at <= now) {
+                cancelOnce(ctx, key);
+                continue;
+            }
+            scheduleOnce(ctx, at, p.getString(ONCE_LABEL + key, ""), key);
+        }
+    }
+
+    /** Called by the receiver after it fires, so a stale slot is never re-armed. */
+    static void clearOnce(Context ctx, String slot) {
+        cancelOnce(ctx, slot);
     }
 
     /** Re-arms the saved daily alarm. No-op when nothing was ever scheduled. */
@@ -196,14 +256,69 @@ final class AlarmScheduler {
         return o;
     }
 
-    static JSObject readOnce(Context ctx) {
+    /**
+     * Every armed one-shot, soonest first — the multi-slot read-back.
+     *
+     * These read the same prefs {@link #rescheduleOnceFromPrefs} uses, so they
+     * report what this process believes the OS holds. A PendingIntent cannot be
+     * queried for its trigger time on any API level, so the prefs ARE the record
+     * — which is exactly why they are written only after a successful set().
+     */
+    static JSArray readOnceAll(Context ctx) {
+        migrateLegacyOnce(ctx);
         SharedPreferences p = prefs(ctx);
-        long at = p.getLong(KEY_ONCE_AT, 0L);
-        if (at <= 0L) return null;
-        JSObject o = new JSObject();
-        o.put("at", at);
-        o.put("label", p.getString(KEY_ONCE_LABEL, ""));
-        return o;
+        List<JSObject> rows = new ArrayList<>();
+        for (String key : slots(ctx)) {
+            long at = p.getLong(ONCE_AT + key, 0L);
+            if (at <= 0L) continue;
+            JSObject o = new JSObject();
+            o.put("at", at);
+            o.put("label", p.getString(ONCE_LABEL + key, ""));
+            o.put("slot", key);
+            rows.add(o);
+        }
+        // Soonest first: the JS reconciler matches by trigger time, and a stable
+        // order keeps its diff readable in logs.
+        Collections.sort(rows, (a, b) -> {
+            long x = a.optLong("at", 0L);
+            long y = b.optLong("at", 0L);
+            return Long.compare(x, y);
+        });
+        JSArray out = new JSArray();
+        for (JSObject o : rows) out.put(o);
+        return out;
+    }
+
+    /**
+     * Folds the pre-slot keys into a slot so an upgrade does not silently drop an
+     * alarm the senior is relying on. Runs at most once: it removes the old keys.
+     */
+    private static void migrateLegacyOnce(Context ctx) {
+        SharedPreferences p = prefs(ctx);
+        if (!p.contains(LEGACY_ONCE_AT)) return;
+        long at = p.getLong(LEGACY_ONCE_AT, 0L);
+        String label = p.getString(LEGACY_ONCE_LABEL, "");
+        SharedPreferences.Editor e = p.edit().remove(LEGACY_ONCE_AT).remove(LEGACY_ONCE_LABEL);
+        if (at > System.currentTimeMillis()) {
+            e.putLong(ONCE_AT + LEGACY_SLOT, at).putString(ONCE_LABEL + LEGACY_SLOT, label == null ? "" : label);
+            Set<String> s = slots(ctx);
+            s.add(LEGACY_SLOT);
+            e.putStringSet(KEY_ONCE_SLOTS, s);
+        }
+        e.apply();
+    }
+
+    /** A copy of the slot registry: the set returned by getStringSet must not be mutated. */
+    private static Set<String> slots(Context ctx) {
+        Set<String> stored = prefs(ctx).getStringSet(KEY_ONCE_SLOTS, null);
+        return stored == null ? new HashSet<>() : new HashSet<>(stored);
+    }
+
+    /** Empty or blank means "the caller had no slot" — never crash, never key on "". */
+    private static String normalizeSlot(String slot) {
+        if (slot == null) return DEFAULT_SLOT;
+        String trimmed = slot.trim();
+        return trimmed.isEmpty() ? DEFAULT_SLOT : trimmed;
     }
 
     private static SharedPreferences prefs(Context ctx) {
@@ -218,13 +333,18 @@ final class AlarmScheduler {
     }
 
     /**
-     * Label goes into the intent: the receiver must show what the alarm is FOR,
-     * and it cannot ask JS anything at 8am with the WebView possibly dead.
+     * Label AND slot travel in the intent: the receiver must show what the alarm
+     * is FOR, and it cannot ask JS anything at 8am with the WebView possibly
+     * dead. The slot is also the intent's DATA, which is what makes two alarms
+     * with the same request code distinct pending intents (`filterEquals`
+     * compares data, not extras).
      */
-    private static PendingIntent oncePendingIntent(Context ctx, String label) {
+    private static PendingIntent oncePendingIntent(Context ctx, String slot, String label) {
         Intent i = new Intent(ctx, OnceAlarmReceiver.class)
                 .setAction(OnceAlarmReceiver.ACTION_ONCE)
-                .putExtra(OnceAlarmReceiver.EXTRA_LABEL, label == null ? "" : label);
+                .setData(Uri.parse(ONCE_URI_PREFIX + Uri.encode(slot)))
+                .putExtra(OnceAlarmReceiver.EXTRA_LABEL, label == null ? "" : label)
+                .putExtra(OnceAlarmReceiver.EXTRA_SLOT, slot);
         int flags = PendingIntent.FLAG_UPDATE_CURRENT;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) flags |= PendingIntent.FLAG_IMMUTABLE;
         return PendingIntent.getBroadcast(ctx, REQUEST_CODE_ONCE, i, flags);

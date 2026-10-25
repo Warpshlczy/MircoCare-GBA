@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <application
         android:allowBackup="true"
@@ -114,4 +115,13 @@
     <!-- foreground-only geofence; NO background location, ever -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <!-- UsageStats proxy for the `digitalSkill` behaviour row (W4).
+         This is an AppOps permission, NOT a runtime one: declaring it only makes
+         the app eligible, a human must still grant it in Settings > Usage access.
+         `tools:ignore` because the lint check calls it "protected" — it is, and
+         that is exactly why we never prompt for it programmatically. When it is
+         not granted the row is omitted, never zeroed (see DigitalSkillRecorder). -->
+    <uses-permission
+        android:name="android.permission.PACKAGE_USAGE_STATS"
+        tools:ignore="ProtectedPermissions" />
 </manifest>

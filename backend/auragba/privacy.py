@@ -124,6 +124,36 @@ def input_digest(*parts: str) -> str:
     return h.hexdigest()[:16]
 
 
+#: A run of 3+ digits is a phone number, an ID, an error code or part of a
+#: coordinate — none of which belong in a family-facing sentence. A clock time
+#: ("08:12") survives because each of its runs is only two digits, and a time is
+#: legitimate content ("鬧鐘 08:12").
+_DIGIT_RUN = re.compile(r"\d{3,}")
+#: Anything that could be a coordinate read aloud ("22.3193, 114.1694").
+_COORD = re.compile(r"-?\d{1,3}\.\d{2,}")
+
+
+def scrub_summary(text: str | None, limit: int) -> str:
+    """Sanitise one family-facing audit summary to `limit` code points.
+
+    Applied on the SERVER even though the device already generated a clean
+    string, because the two halves must not depend on each other: a future
+    client (or a hostile one) can post anything to `/agent/audit`, and this row
+    is rendered next to a vulnerable person's medication schedule.
+
+    Truncation happens AFTER scrubbing so a redaction cannot be cut in half, and
+    an over-long input is never rejected — a 422 here would be retried by the
+    outbox for a week. See contract.py#AgentAuditEntry for the same reasoning.
+    """
+    if not text:
+        return ""
+    out = _COORD.sub("", text)
+    out = _DIGIT_RUN.sub("", out)
+    # Collapse what the removals left behind, then trim.
+    out = re.sub(r"\s{2,}", " ", out).strip()
+    return out[:limit]
+
+
 # --------------------------------------------------------------------------- #
 # FastAPI dependency: resolve the pseudonymous device id from a header.
 # --------------------------------------------------------------------------- #

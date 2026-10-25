@@ -41,15 +41,16 @@ from auragba.audio import (  # noqa: E402
     FUNCTIONAL_DIM, FUNCTIONAL_NAMES, AudioData, energy_vad, extract_features,
     frame_rms_db, load_audio,
 )
-from auragba.api.caregiver_routes import interaction_trend  # noqa: E402
+from auragba.api.caregiver_routes import agent_audit_today, interaction_trend  # noqa: E402
 from auragba.audit import AuditLog  # noqa: E402
 from auragba.changepoint import detect  # noqa: E402
 from auragba.config import settings, validate_runtime  # noqa: E402
 from auragba.contract import (  # noqa: E402
-    AgentCard, AgentIntentRequest, AgentTool, AgentTurnRequest, AssistantChatRequest,
-    BehaviourDaily, BehaviourDailyEnvelope, Contact, ContactsRequest, ConversationTurn,
-    GaitWindow, GeofenceEvent, HealthCardUpdate, ReminderEscalation, RecordSummary,
-    ScreeningSession, SosEvent, StreamScore, TaskEvent, TelemetryEvent, ToolCall,
+    AgentAuditEntry, AgentAuditRequest, AgentCard, AgentIntentRequest, AgentTool,
+    AgentTurnRequest, AssistantChatRequest, BehaviourDaily, BehaviourDailyEnvelope,
+    Contact, ContactsRequest, ConversationTurn, GaitWindow, GeofenceEvent,
+    HealthCardUpdate, ReminderEscalation, RecordSummary, ScreeningSession, SosEvent,
+    StreamScore, TaskEvent, TelemetryEvent, ToolCall,
 )
 from auragba.crypto import decrypt_text, encrypt_text  # noqa: E402
 from auragba.economics import estimate as economics  # noqa: E402
@@ -62,7 +63,7 @@ from auragba.model import (  # noqa: E402
     late_fusion, load_stream, neutral_score, score_acoustic, score_behavior, score_semantic,
 )
 from auragba.nlp import analyse_linguistics, coherence  # noqa: E402
-from auragba.privacy import pseudonymize, purge, scrub_props  # noqa: E402
+from auragba.privacy import pseudonymize, purge, scrub_props, scrub_summary  # noqa: E402
 from auragba.reports.weekly import (  # noqa: E402
     DIAGNOSTIC_WORDS, build_weekly_report, render_html, render_pdf,
 )
@@ -1540,5 +1541,78 @@ with tempfile.TemporaryDirectory() as tmp:
     _behaviour_doc("dev-j", 2, 6)
     _behaviour_doc("dev-j", 1, 6)
     assert interaction_trend(st, "dev-j", now_ms=now_i) is None, "fewer than 3 baseline days -> null"
+
+# --- agent audit: the family sees what IT did, scrubbed twice ---------------
+# The device builds `summary` from the tool name and outcome only, so no phone
+# number or name can reach this model through the normal path. The server
+# re-scrubs anyway: a future (or hostile) client can post anything to
+# /agent/audit, and this row is rendered next to a vulnerable person's schedule.
+assert scrub_summary("較好鬧鐘", 14) == "較好鬧鐘"
+assert scrub_summary("打畀91234567", 14) == "打畀", "a phone number never survives"
+assert scrub_summary("位置 22.3193, 114.1694", 14) == "位置 ,", "a coordinate never survives"
+assert scrub_summary("出錯 500", 14) == "出錯", "an error code never survives"
+assert scrub_summary("一二三四五六七八九十甲乙丙丁戊己", 14) == "一二三四五六七八九十甲乙丙丁", "truncated to the row width"
+assert scrub_summary(None, 14) == ""
+assert scrub_summary("", 14) == ""
+
+# A summary far longer than the 14-char row width is ACCEPTED by the model and
+# truncated on write. Rejecting it would turn one bad row into a 422 the outbox
+# retries for a week, blocking every later row in the same queue. The model's own
+# `max_length=200` is a payload-size guard, ~14x above anything our device sends.
+_audit_entry = AgentAuditEntry(
+    id="aa-1", at=1, tool="set_alarm", outcome="ok", summary="x" * 200
+)
+assert len(_audit_entry.summary) == 200, "the model itself does not reject a long summary"
+assert scrub_summary(_audit_entry.summary, 14) == "x" * 14, "but the stored row is 14 chars"
+_audit_entry_bad_id = None
+try:
+    AgentAuditEntry(id="", at=1, tool="set_alarm", outcome="ok", summary="")
+except Exception:
+    _audit_entry_bad_id = True
+assert _audit_entry_bad_id, "an empty id is refused (it is the idempotency key)"
+# An empty batch is valid and is a no-op, not a 422.
+assert AgentAuditRequest(entries=[]).entries == []
+
+with tempfile.TemporaryDirectory() as tmp:
+    st = Store(Path(tmp))
+    now_a = int(time.time() * 1000)
+    day_a = time.strftime("%Y-%m-%d", time.localtime(now_a / 1000))
+    older = now_a - 3 * 86_400_000
+
+    st.record("dev-a", "agentAudit", {
+        "id": "aa-old", "at": older, "tool": "locate", "outcome": "failed", "summary": "位置做唔到",
+    })
+    st.record("dev-a", "agentAudit", {
+        "id": "aa-1", "at": now_a - 2000, "tool": "set_alarm", "outcome": "ok", "summary": "較好鬧鐘",
+    })
+    st.record("dev-a", "agentAudit", {
+        "id": "aa-2", "at": now_a - 1000, "tool": "forbidden", "outcome": "refused", "summary": "冇做，拒絕咗",
+    })
+    st.record("dev-b", "agentAudit", {
+        "id": "aa-other", "at": now_a - 1000, "tool": "set_alarm", "outcome": "ok", "summary": "較好鬧鐘",
+    })
+
+    audit_today = agent_audit_today(st, "dev-a", now_ms=now_a)
+    assert audit_today["day"] == day_a
+    assert audit_today["count"] == 2, "another day is not 'today'"
+    assert [e["id"] if "id" in e else e["tool"] for e in audit_today["entries"]] == ["forbidden", "set_alarm"], \
+        "newest first"
+    assert audit_today["entries"][0]["outcome"] == "refused"
+    # The refusal must survive the round trip as its own outcome: it is the line
+    # that tells the family the safety guard worked.
+    assert audit_today["entries"][0]["summary"] == "冇做，拒絕咗"
+
+    # Device isolation: one senior's audit must never appear on another's screen.
+    assert agent_audit_today(st, "dev-b", now_ms=now_a)["count"] == 1
+    assert agent_audit_today(st, "dev-c", now_ms=now_a)["count"] == 0
+
+    # Explicit day query reaches back; a future day is honestly empty.
+    assert agent_audit_today(st, "dev-a", now_ms=now_a, day=day_a)["count"] == 2
+    assert agent_audit_today(st, "dev-a", now_ms=now_a, day="1999-01-01")["count"] == 0
+
+    # limit is clamped, not trusted (a shared device must not be able to make the
+    # dashboard slow for everyone).
+    assert len(agent_audit_today(st, "dev-a", now_ms=now_a, limit=1)["entries"]) == 1
+    assert agent_audit_today(st, "dev-a", now_ms=now_a, limit=1)["count"] == 2, "count is the day total"
 
 print("selfcheck: OK")

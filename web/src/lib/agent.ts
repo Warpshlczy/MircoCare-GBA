@@ -106,6 +106,24 @@ export interface AgentDeps {
    * The bridge owns this counter; the turn itself only decides what to say.
    */
   confusedStreak?: number;
+  /**
+   * Audit hook for calls that NEVER RAN: a safety refusal, a hallucinated tool,
+   * a bad argument, a senior who said "唔使", a tool with no executor.
+   *
+   * The executed ones are audited by the executor itself (toolExec.ts#run), so
+   * this hook and that one together cover a turn exactly once — no path records
+   * the same action twice, and none is silently missing.
+   *
+   * `outOfScope` replies are deliberately NOT audited: "can you make me a PDF"
+   * produces no action at all, and filling the family's report with 「做唔到」
+   * for questions would bury the refusals that actually matter.
+   */
+  onAudit?: (input: {
+    tool: string;
+    outcome: "refused" | "failed";
+    at: number;
+    seq?: number;
+  }) => void;
 }
 
 export interface ExecutedCall {
@@ -396,6 +414,15 @@ export async function runTurn(utterance: string, deps: AgentDeps): Promise<TurnO
   // 1. Refusal beats everything — including a backend that would happily act.
   const refuse = refuseReason(text, deps.locale);
   if (refuse) {
+    // The single most valuable audit row in the product: he asked to transfer
+    // money or read out a password, and the assistant said no. Recording it as
+    // `refused` (not `failed`) is what lets the family tell a working guard
+    // apart from a broken feature.
+    try {
+      deps.onAudit?.({ tool: "forbidden", outcome: "refused", at: deps.now });
+    } catch {
+      /* audit must never change what we say */
+    }
     return { ...emptyOutcome(), handled: true, refused: true, reply: refuse };
   }
 
@@ -491,26 +518,49 @@ export async function runTurn(utterance: string, deps: AgentDeps): Promise<TurnO
     reason: "invalid",
     detail: `${r.reason}${r.detail ? `: ${r.detail}` : ""}`,
   }));
+  // A rejected call never reaches the executor, so it is audited here. `refused`
+  // rather than `failed`: we decided not to run it, which is a different fact
+  // from "we tried and it broke".
+  for (const r of plan.rejected) {
+    try {
+      deps.onAudit?.({ tool: r.name || "unknown", outcome: "refused", at: deps.now });
+    } catch {
+      /* audit must never change what we say */
+    }
+  }
 
   // 5. Confirm + execute, in the planner's order (sos first).
   const executed: ExecutedCall[] = [];
   const toolCards: AgentCard[] = [];
+  /** Audit one step that never reached the executor. Swallows its own failure. */
+  const auditSkipped = (tool: string, outcome: "refused" | "failed"): void => {
+    try {
+      deps.onAudit?.({ tool, outcome, at: deps.now });
+    } catch {
+      /* audit must never change what we say */
+    }
+  };
   for (const step of plan.steps) {
     if (deps.canRun && !deps.canRun(step.name)) {
       // Cannot be performed in this build — skip it silently rather than
       // asking for permission we would then have to withdraw.
       skipped.push({ name: step.name, reason: "no_executor" });
+      auditSkipped(step.name, "failed"); // it did not run because the capability is absent
       continue;
     }
     if (step.risk === "confirm") {
       const yes = deps.confirm ? await deps.confirm(step.say) : false;
       if (!yes) {
         skipped.push({ name: step.name, reason: "declined" });
+        // He said "唔使". Worth a row: it is the difference between "the
+        // assistant never offered" and "it offered and he chose not to".
+        auditSkipped(step.name, "refused");
         continue;
       }
     }
     if (!deps.runTool) {
       skipped.push({ name: step.name, reason: "no_executor" });
+      auditSkipped(step.name, "failed");
       continue;
     }
     try {

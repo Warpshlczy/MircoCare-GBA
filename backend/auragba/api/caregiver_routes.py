@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -18,6 +19,9 @@ from ..timeutil import day_key
 DAY_MS = 86_400_000
 # Kinds A writes locally and reports through `POST /records/summary` (issue #7).
 _RECORD_KINDS = ("med", "alarm", "measure", "card")
+# Same shape `contract.py#_DAY` uses; duplicated to keep the query-string check
+# here from importing a private name out of the contract module.
+_DAY_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 def _day(ms: int) -> str:
@@ -39,6 +43,47 @@ def records_today(store: Store, device_id: str, now_ms: int | None = None) -> di
             continue
         kinds[kind] = {"count": document.get("count"), "lastAt": document.get("lastAt")}
     return {"day": day, "kinds": kinds}
+
+
+def agent_audit_today(
+    store: Store,
+    device_id: str,
+    now_ms: int | None = None,
+    limit: int = 20,
+    day: str | None = None,
+) -> dict:
+    """What the assistant did on this device on `day` (default: today).
+
+    The sibling of `records_today`, answering the other half of "what happened":
+    `records` is what the senior did, this is what the assistant did — including
+    the refusals (he asked to transfer money; it said no). Both are needed for
+    the family screen to be honest, and neither repeats the other.
+
+    Rows arrive already scrubbed twice (device-side from tool+outcome only, then
+    privacy.py#scrub_summary on write). Nothing here re-derives text from a
+    transcript, so no health content can leak through this path.
+    """
+    now_ms = int(time.time() * 1000) if now_ms is None else now_ms
+    which = day or _day(now_ms)
+    # A 48h window covers any local day plus clock skew between device and server;
+    # the day-key comparison then applies the same timezone rule as every other
+    # stream, and the scan stays bounded (audit rows are tens per day, not thousands).
+    rows = [
+        row
+        for row in store.history(device_id, "agentAudit", since_ms=now_ms - 2 * DAY_MS)
+        if _day(int(row.get("at") or 0)) == which
+    ]
+    rows.sort(key=lambda r: int(r.get("at") or 0), reverse=True)
+    entries = [
+        {
+            "at": int(row.get("at") or 0),
+            "tool": row.get("tool"),
+            "outcome": row.get("outcome"),
+            "summary": row.get("summary"),
+        }
+        for row in rows[:limit]
+    ]
+    return {"day": which, "entries": entries, "count": len(rows)}
 
 
 def interaction_trend(store: Store, device_id: str, now_ms: int | None = None) -> dict | None:
@@ -145,6 +190,9 @@ def overview(
         "interactionTrend": interaction_trend(store, device),
         # "今日记录咗未" without shipping the readable records: coarse counts only.
         "recordsToday": records_today(store, device),
+        # What the ASSISTANT did today (tool calls + safety refusals). Same
+        # reasoning as recordsToday: the shape is fixed and already redacted.
+        "agentAudit": agent_audit_today(store, device),
         "screeningSessions": store.history(device, "screening_sessions")[-30:],
         "activityTrend": store.history(device, "gait")[-30:],
         "alerts": alerts[-30:],
@@ -157,6 +205,29 @@ def overview(
             and row.get("seniorDeviceId") == device
         ][-30:],
     }
+
+
+@router.get("/audit")
+def get_agent_audit(
+    day: str | None = None,
+    limit: int = 20,
+    senior_device_id: str | None = None,
+    principal: Principal = Depends(current_principal),
+) -> dict:
+    """One day of agent activity for one bound senior (family only).
+
+    Exists separately from `/overview` so the family screen can page backwards
+    ("what happened on Tuesday") without re-fetching the whole dashboard. Both
+    paths share `agent_audit_today`, so the two can never disagree.
+
+    `limit` is clamped, not trusted: an unbounded read on a shared device is a
+    cheap way to make the dashboard slow for everyone.
+    """
+    device = linked_device(principal, senior_device_id)
+    safe_limit = max(1, min(50, limit))
+    if day is not None and not _DAY_PATTERN.match(day):
+        raise HTTPException(status_code=422, detail="day must be YYYY-MM-DD")
+    return agent_audit_today(store, device, limit=safe_limit, day=day)
 
 
 @router.post("/contacts", response_model=list[Contact])

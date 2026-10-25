@@ -19,6 +19,7 @@
 //      returning to the foreground, and every minute. Idempotent.
 
 import {
+  postAgentAudit,
   postBehaviourDaily,
   postConversationMemory,
   postGaitWindow,
@@ -34,6 +35,7 @@ import type { RecordSummaryBody, ReminderEscalation } from "./api.ts";
 import { drain } from "./outboxStore.ts";
 import type { DrainResult } from "./outboxStore.ts";
 import type {
+  AgentAuditEntry,
   BehaviourDaily,
   ConversationTurn,
   GaitWindow,
@@ -64,6 +66,8 @@ export interface OutboxTransport {
   reminder: (e: ReminderEscalation) => Promise<void>;
   conversation: (t: ConversationTurn) => Promise<void>;
   recordSummary: (b: RecordSummaryBody) => Promise<void>;
+  /** accepts one row or a batch: the endpoint takes an array */
+  audit: (entries: AgentAuditEntry[]) => Promise<void>;
 }
 
 export const defaultTransport: OutboxTransport = {
@@ -77,6 +81,7 @@ export const defaultTransport: OutboxTransport = {
   reminder: postReminderEscalation,
   conversation: postConversationMemory,
   recordSummary: postRecordSummary as (b: RecordSummaryBody) => Promise<void>,
+  audit: postAgentAudit,
 };
 
 /**
@@ -94,6 +99,20 @@ export function behaviourBody(payload: unknown): BehaviourBody {
 /** Accepts one telemetry event or an array — the endpoint always takes an array. */
 export function telemetryBatch(payload: unknown): TelemetryEvent[] {
   return Array.isArray(payload) ? (payload as TelemetryEvent[]) : [payload as TelemetryEvent];
+}
+
+/**
+ * Same tolerance for audit rows: the writer enqueues ONE row per tool call (so a
+ * crashed turn cannot lose the whole day), but the endpoint takes a batch. An
+ * empty or malformed payload is dropped to an empty array and the POST becomes a
+ * no-op rather than a permanent 422 that retries every 5 minutes for a week.
+ */
+export function auditBatch(payload: unknown): AgentAuditEntry[] {
+  if (Array.isArray(payload)) return payload as AgentAuditEntry[];
+  if (payload && typeof payload === "object" && Array.isArray((payload as { entries?: unknown }).entries)) {
+    return (payload as { entries: AgentAuditEntry[] }).entries;
+  }
+  return payload && typeof payload === "object" ? [payload as AgentAuditEntry] : [];
 }
 
 /**
@@ -134,6 +153,9 @@ export function makeSender(transport: OutboxTransport = defaultTransport) {
         return;
       case "recordSummary":
         await transport.recordSummary(item.payload as RecordSummaryBody);
+        return;
+      case "agentAudit":
+        await transport.audit(auditBatch(item.payload));
         return;
       default: {
         const unknown: string = item.kind;

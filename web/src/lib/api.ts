@@ -5,7 +5,7 @@ import type {
   AgentIntentRequest, AgentTurnRequest, AgentTurnResponse, TelemetryEvent,
   ConversationTurn, MedicationPlan, MedicationPlanRequest, ReminderKind,
   BehaviourDaily, CircadianDaily, DigitalSkillDaily, TaskEvent, GeofenceEvent, Contact,
-  HealthCardUpdate, RecordKind,
+  HealthCardUpdate, RecordKind, AgentAuditEntry, AgentAuditOutcome,
 } from "./types";
 
 export interface AssistantMessage { role: "system" | "user" | "assistant"; content: string; }
@@ -206,6 +206,19 @@ export interface CaregiverOverview {
     kinds?: Partial<
       Record<"med" | "alarm" | "measure" | "card", { count?: number; lastAt?: number }>
     >;
+  };
+  /**
+   * What the ASSISTANT did today — one row per tool call, newest first,
+   * including the safety refusals ("he asked to transfer money, it said no").
+   * `summary` is a ≤14-char line already redacted on the device AND again on the
+   * server, so it is safe to render as-is; `outcome` distinguishes a working
+   * guard (refused) from a broken feature (failed). An empty list means "nothing
+   * happened yet", never "nothing is being recorded".
+   */
+  agentAudit?: {
+    day?: string;
+    count?: number;
+    entries?: { at?: number; tool?: string; outcome?: AgentAuditOutcome; summary?: string }[];
   };
   activityTrend: { endedAt?: number; steps?: number; cadence?: number; fall?: boolean }[];
   alerts: { id?: string; at?: number; reason?: string; status?: string }[];
@@ -415,6 +428,24 @@ export interface RecordSummaryBody {
 
 export async function postRecordSummary(body: RecordSummaryBody): Promise<void> {
   await request<void>("/records/summary", { method: "POST", body: JSON.stringify(body) });
+}
+
+/**
+ * One batch of agent-audit rows. 204, idempotent per `entry.id`.
+ *
+ * The endpoint takes an ARRAY because the outbox replays a whole item at once;
+ * sending one row per request would make a 14-tool day into 14 round trips, each
+ * with its own retry window. Callers may pass a single row and it is wrapped.
+ */
+export interface AgentAuditBody {
+  entries: AgentAuditEntry[];
+}
+
+export async function postAgentAudit(entries: AgentAuditEntry[]): Promise<void> {
+  await request<void>("/agent/audit", {
+    method: "POST",
+    body: JSON.stringify({ entries } satisfies AgentAuditBody),
+  });
 }
 
 /**

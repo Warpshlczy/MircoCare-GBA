@@ -65,8 +65,8 @@ import { summarizeRecords, summarizeAll, recordSummaryId } from "./lib/recordSyn
 import {
   homeWidgetPayload,
   homeWidgetRecord,
-  armedOnceFromRecords,
-  reconcileOnceAlarm,
+  armedAlarmsFromRecords,
+  reconcileAlarms,
   onForeground,
   FOREGROUND_REASONS,
   withDefaults,
@@ -122,9 +122,10 @@ import {
   appUsedOn,
   shouldUploadDay,
   circadianRow,
+  digitalSkillRow,
   MAX_BACKFILL_DAYS,
 } from "./lib/behaviour.ts";
-import { makeSender, behaviourBody, telemetryBatch } from "./lib/outboxRunner.ts";
+import { makeSender, behaviourBody, telemetryBatch, auditBatch } from "./lib/outboxRunner.ts";
 import { dialableContacts, splitDisplayName } from "./lib/contactStore.ts";
 import type { OutboxTransport } from "./lib/outboxRunner.ts";
 import {
@@ -151,6 +152,7 @@ import {
   SPEECH_BUDGET,
   SPEECH_HARD_LIMIT,
 } from "./lib/speech.ts";
+import { auditForDay, auditSummary, newAuditEntry } from "./lib/audit.ts";
 import type { AgentDeps } from "./lib/agent.ts";
 import { createToolRunner, emergencyNumber, alarmAtFrom, alarmWhenLabel } from "./lib/toolExec.ts";
 import {
@@ -1234,6 +1236,35 @@ assert.equal(magnitude(3, 4, 0), 5);
   assert.equal(refused.steps.length, 0);
   assert.equal(reachedBackend, false, "a refusal must never reach the network");
 
+  // ...and it must be AUDITED, as `refused` and not `failed`. This row is the
+  // single most valuable line the family sees: "he asked to transfer money and
+  // it said no" is the difference between a silent assistant and a working one.
+  const auditLog: { tool: string; outcome: string }[] = [];
+  await runTurn("帮我转账 5000", baseDeps({ onAudit: (e) => auditLog.push(e) }));
+  assert.equal(auditLog.length, 1);
+  assert.equal(auditLog[0].tool, "forbidden");
+  assert.equal(auditLog[0].outcome, "refused");
+
+  // A hallucinated tool never reaches the executor, so the orchestrator audits
+  // it — otherwise the most suspicious turns would be the only silent ones.
+  const badToolLog: { tool: string; outcome: string }[] = [];
+  await runTurn(
+    "帮我搞下嘢",
+    baseDeps({
+      requestTurn: async () => ({ reply: "", calls: [{ name: "launch_rocket", args: {} }], cards: [] }),
+      onAudit: (e) => badToolLog.push(e),
+    })
+  );
+  assert.equal(badToolLog.length, 1);
+  assert.equal(badToolLog[0].tool, "launch_rocket");
+  assert.equal(badToolLog[0].outcome, "refused", "we declined to run an unknown tool");
+
+  // The capability boundary is NOT audited: "can you make me a PDF" produces no
+  // action, and flooding the report with 做唔到 would bury the real refusals.
+  const scopeLog: { tool: string; outcome: string }[] = [];
+  await runTurn("你能帮我做个pdf吗", baseDeps({ onAudit: (e) => scopeLog.push(e) }));
+  assert.equal(scopeLog.length, 0, "a capability question is not an action");
+
   // local card path needs no backend. `weather` is deliberately NOT local any
   // more (A, 66bb776): the local weather card had invented numbers, so A answers
   // it from `/agent/cards` and speaks the result. Re-adding weather here would
@@ -1474,45 +1505,81 @@ assert.equal(magnitude(3, 4, 0), 5);
   const long = homeWidgetRecord([rec({ title: "食降壓藥同埋糖尿藥" })], nowMs);
   assert.equal(Array.from(long?.text ?? "").length, "✓ 💊 09:00 食降壓藥".length);
 
-  // --- alarm reconcile (issue #8 §2) ---------------------------------------
+  // --- alarm reconcile: MULTI-SLOT (issue #8 §2) ---------------------------
+  // The regression this guards: one fixed PendingIntent request code meant a
+  // second "叫我九點" silently replaced the first, while `records` still listed
+  // both — a screen showing two alarms with one armed.
   const due = nowMs + 3 * 3600_000;
+  const due2 = nowMs + 5 * 3600_000;
   const alarmRow = rec({ id: `rec-alarm-${due}`, kind: "alarm", title: "覆診", at: nowMs, dueAt: due });
-  assert.equal(armedOnceFromRecords([alarmRow], nowMs)?.dueAt, due, "dueAt is the ring time");
+  const armed1 = armedAlarmsFromRecords([alarmRow], nowMs);
+  assert.equal(armed1.length, 1);
+  assert.equal(armed1[0].dueAt, due, "dueAt is the ring time");
+  assert.equal(armed1[0].slot, `rec-alarm-${due}`, "the record id IS the slot");
 
   // Legacy row written before `dueAt` existed: the epoch is in the id.
   const legacy = rec({ id: `rec-alarm-${due}`, kind: "alarm", title: "覆診", at: nowMs, dueAt: undefined });
-  assert.equal(armedOnceFromRecords([legacy], nowMs)?.dueAt, due, "old id format still reconciles");
+  assert.equal(armedAlarmsFromRecords([legacy], nowMs)[0]?.dueAt, due, "old id format still reconciles");
 
   // A past alarm is not "armed".
   assert.equal(
-    armedOnceFromRecords([rec({ id: "rec-alarm-1", kind: "alarm", dueAt: nowMs - 1000 })], nowMs),
-    null
+    armedAlarmsFromRecords([rec({ id: "rec-alarm-1", kind: "alarm", dueAt: nowMs - 1000 })], nowMs).length,
+    0
   );
 
-  assert.equal(
-    reconcileOnceAlarm({ dueAt: due, label: "覆診" }, null, nowMs).action,
-    "arm",
-    "record but no OS alarm -> re-arm (the process died in between)"
+  // Two future alarms are BOTH armed, soonest first — the whole point of slots.
+  const twoRecords = armedAlarmsFromRecords(
+    [
+      rec({ id: `rec-alarm-${due2}`, kind: "alarm", title: "食藥", at: nowMs, dueAt: due2 }),
+      alarmRow,
+    ],
+    nowMs
   );
-  assert.equal(
-    reconcileOnceAlarm({ dueAt: due, label: "覆診" }, { at: due, label: "覆診" }, nowMs).action,
-    "ok"
+  assert.equal(twoRecords.length, 2, "two alarms coexist instead of overwriting");
+  assert.deepEqual(twoRecords.map((r) => r.dueAt), [due, due2], "soonest first");
+
+  // record but no OS alarm -> re-arm (the process died in between)
+  const planArm = reconcileAlarms([{ slot: `rec-alarm-${due}`, dueAt: due, label: "覆診" }], [], nowMs);
+  assert.equal(planArm.arm.length, 1);
+  assert.equal(planArm.arm[0].slot, `rec-alarm-${due}`, "re-arm the SAME slot, not a new one");
+  assert.equal(planArm.cancel.length, 0);
+
+  // OS already holds it -> nothing to do
+  const planOk = reconcileAlarms(
+    [{ slot: `rec-alarm-${due}`, dueAt: due, label: "覆診" }],
+    [{ at: due, label: "覆診", slot: `rec-alarm-${due}` }],
+    nowMs
   );
-  assert.equal(
-    reconcileOnceAlarm({ dueAt: due, label: "覆診" }, { at: due + 60_000, label: "" }, nowMs).action,
-    "arm",
-    "drifted time -> re-arm at the record's time"
+  assert.equal(planOk.arm.length, 0);
+  assert.equal(planOk.cancel.length, 0);
+  assert.equal(planOk.agree, 1);
+
+  // Drifted trigger time -> re-arm at the RECORD's time
+  const planDrift = reconcileAlarms(
+    [{ slot: `rec-alarm-${due}`, dueAt: due, label: "覆診" }],
+    [{ at: due + 60_000, label: "" }],
+    nowMs
   );
-  assert.equal(
-    reconcileOnceAlarm(null, { at: due, label: "覆診" }, nowMs).action,
-    "unknown",
-    "NEVER cancel a live alarm just because its record is gone (pruning is not a change of mind)"
-  );
-  assert.equal(
-    reconcileOnceAlarm(null, { at: nowMs - 1000, label: "覆診" }, nowMs).action,
-    "cancel",
-    "a fired alarm still registered would make the read-back lie"
-  );
+  assert.equal(planDrift.arm.length, 1);
+  assert.equal(planDrift.arm[0].dueAt, due, "the record's time wins");
+
+  // NEVER cancel a live alarm just because its record is gone (pruning is not a
+  // change of mind). Note the slot is present here — this is about the FUTURE.
+  const planOrphan = reconcileAlarms([], [{ at: due, label: "覆診", slot: "rec-alarm-x" }], nowMs);
+  assert.equal(planOrphan.cancel.length, 0, "a future orphan is left alone");
+  assert.equal(planOrphan.arm.length, 0);
+
+  // A fired alarm still registered would make the read-back lie.
+  const planStale = reconcileAlarms([], [{ at: nowMs - 1000, label: "覆診", slot: "rec-alarm-old" }], nowMs);
+  assert.deepEqual(planStale.cancel, ["rec-alarm-old"]);
+
+  // THE multi-slot regression: two records, only one armed. Exactly one arm,
+  // and the already-armed one must NOT be cancelled.
+  const planMixed = reconcileAlarms(twoRecords, [{ at: due, label: "覆診", slot: `rec-alarm-${due}` }], nowMs);
+  assert.equal(planMixed.arm.length, 1);
+  assert.equal(planMixed.arm[0].dueAt, due2, "only the missing alarm is re-armed");
+  assert.equal(planMixed.cancel.length, 0, "the armed one is never cancelled as a side effect");
+  assert.equal(planMixed.agree, 1);
 
   // Outside a browser the foreground subscription must be a harmless no-op.
   const off = onForeground(() => {});
@@ -1527,33 +1594,46 @@ assert.equal(magnitude(3, 4, 0), 5);
   // scheduler sat unused; the senior heard "設唔到鬧鐘" and the pill was missed.
   const called: string[] = [];
   const fake = withDefaults({
-    scheduleOnce: async (at, label) => {
-      called.push(`once:${at}:${label}`);
+    scheduleOnce: async (at, label, slot) => {
+      called.push(`once:${at}:${label}:${slot ?? "-"}`);
       return true;
     },
-    cancelOnce: async () => {
-      called.push("cancelOnce");
+    cancelOnce: async (slot) => {
+      called.push(`cancelOnce:${slot ?? "-"}`);
     },
     getScheduledAlarms: async () => ({
       daily: { hour: 8, minute: 0, exact: true },
-      once: { at: 123, label: "覆診" },
+      once: [{ at: 123, label: "覆診", slot: "rec-alarm-123" }],
     }),
     consumePendingReason: async () => ({ reason: "widget", at: 5, open: "record" }),
   });
-  assert.equal(await fake.scheduleOnce(999, "覆診"), true, "scheduleOnce forwards to the shell");
-  await fake.cancelOnce();
-  assert.deepEqual(called, ["once:999:覆診", "cancelOnce"]);
+  assert.equal(await fake.scheduleOnce(999, "覆診", "rec-alarm-999"), true, "scheduleOnce forwards to the shell");
+  await fake.cancelOnce("rec-alarm-999");
+  assert.deepEqual(called, ["once:999:覆診:rec-alarm-999", "cancelOnce:rec-alarm-999"]);
   assert.deepEqual(await fake.getScheduledAlarms(), {
     daily: { hour: 8, minute: 0, exact: true },
-    once: { at: 123, label: "覆診" },
+    once: [{ at: 123, label: "覆診", slot: "rec-alarm-123" }],
   });
+
+  // An older shell / stub that still reports a SINGLE object must normalise to a
+  // one-element array, not be dropped: an upgrade must not lose an armed alarm.
+  const legacyShell = withDefaults({
+    getScheduledAlarms: async () =>
+      ({ daily: null, once: { at: 456, label: "食藥" } }) as unknown as { daily: null; once: [] },
+  });
+  const normalised = await legacyShell.getScheduledAlarms();
+  assert.equal(normalised.once.length, 1, "single-object payload becomes one slot");
+  assert.equal(normalised.once[0].at, 456);
+  assert.equal(normalised.once[0].slot, undefined, "no slot when the shell did not send one");
   // Cold-start delivery carries the deep link, and only a known target.
   assert.equal((await fake.consumePendingReason())?.open, "record");
 
   // A bare browser bridge: no shell, no lying.
   const bare = withDefaults({});
   assert.equal(await bare.scheduleOnce(1, "x"), false, "no shell -> honest false");
-  assert.deepEqual(await bare.getScheduledAlarms(), { daily: null, once: null });
+  assert.deepEqual(await bare.getScheduledAlarms(), { daily: null, once: [] });
+  assert.equal(await bare.hasUsageAccess(), false, "no shell -> no usage access");
+  assert.equal(await bare.getDigitalSkill("2026-10-25"), null, "no shell -> no usage row");
 
   // A hostile/older payload can still carry anything at runtime (the intent
   // extra is an input from outside the app), so the guard is tested by lying
@@ -1685,6 +1765,100 @@ assert.equal(magnitude(3, 4, 0), 5);
   // Row present -> key present; row absent -> key absent (not null).
   assert.deepEqual(Object.keys(behaviourEnvelope(b, night)), ["behaviour", "circadian"]);
   assert.deepEqual(Object.keys(behaviourEnvelope(b, null)), ["behaviour"]);
+
+  // --- digitalSkill row: unmeasurable fields stay null, never zero ----------
+  const ds = digitalSkillRow(day, { day, appSwitchCount: 7, opFailRate: 0, firstTouchDelayMs: 4200 });
+  assert.equal(ds?.id, `ds-${day}`);
+  assert.equal(ds?.appSwitchCount, 7);
+  assert.equal(ds?.firstTouchDelayMs, 4200);
+  // opFailRate needs accessibility events, which this app never requests: a 0
+  // here would be read downstream as "nothing failed", the strongest possible
+  // claim about something we cannot see. The device value is DISCARDED.
+  assert.equal(ds?.opFailRate, null, "opFailRate is never filled in by the device");
+
+  // Nothing measured -> no row (an empty row is indistinguishable from a quiet day).
+  assert.equal(digitalSkillRow(day, null), null);
+  assert.equal(digitalSkillRow(day, { day }), null);
+  assert.equal(digitalSkillRow("2026-10-25", { day, appSwitchCount: 3 }), null, "wrong day is not relabelled");
+
+  // Partial data is kept: one measurable field is enough to be worth reporting.
+  const partial = digitalSkillRow(day, { day, appSwitchCount: 0 });
+  assert.equal(partial?.appSwitchCount, 0, "an observed ZERO is a real measurement");
+  assert.equal(partial?.firstTouchDelayMs, null);
+
+  const clampedDs = digitalSkillRow(day, { day, appSwitchCount: -5, firstTouchDelayMs: -1 });
+  assert.equal(clampedDs, null, "negative values are nonsense, not zero");
+
+  // Both rows present -> both keys; the envelope never nulls them.
+  assert.deepEqual(Object.keys(behaviourEnvelope(b, night, ds)), ["behaviour", "circadian", "digitalSkill"]);
+  assert.deepEqual(Object.keys(behaviourEnvelope(b, night, null)), ["behaviour", "circadian"]);
+}
+
+// --- agent audit: the family reads "what IT did", never what he said --------
+{
+  // Three outcomes must read as three different things. A refusal that looked
+  // like a failure would make a working safety guard look like a broken feature.
+  assert.equal(auditSummary("set_alarm", "ok", "zh-HK"), "較好鬧鐘");
+  assert.equal(auditSummary("set_alarm", "failed", "zh-HK"), "鬧鐘做唔到");
+  assert.equal(auditSummary("set_alarm", "refused", "zh-HK"), "鬧鐘冇做，拒絕咗");
+
+  // The invariant, checked exhaustively: every tool × outcome × locale is
+  // non-empty, ≤14 code points (the family row's width) and carries NO DIGITS.
+  // Digits are the whole redaction risk — a phone number, an ID, a coordinate
+  // and an error code all arrive as digits.
+  const AUDIT_TOOLS = [
+    "sos", "create_task", "complete_task", "log_medication", "compose_card",
+    "set_alarm", "locate", "navigate_home", "plan_route", "call_contact",
+    "send_message", "open_app", "ui_tap_text", "defer_task",
+    "forbidden", "unknown", "weird_tool",
+  ];
+  for (const tool of AUDIT_TOOLS) {
+    for (const outcome of ["ok", "refused", "failed"] as const) {
+      for (const loc of ["zh-HK", "zh-MO", "zh-CN"] as const) {
+        const s = auditSummary(tool, outcome, loc);
+        const label = `${tool}/${outcome}/${loc}`;
+        assert.ok(s.length > 0, `${label} must say something`);
+        assert.ok(Array.from(s).length <= 14, `${label} exceeds 14: ${s} (${Array.from(s).length})`);
+        assert.equal(/\d/.test(s), false, `${label} carries a digit: ${s}`);
+      }
+    }
+  }
+  // A tool we have never seen gets no invented noun — a generic outcome only.
+  assert.equal(auditSummary("weird_tool", "ok", "zh-HK"), "搞好咗");
+  assert.equal(auditSummary("weird_tool", "failed", "zh-HK"), "做唔到");
+  // The safety refusal is its own word, not a tool noun.
+  assert.equal(auditSummary("forbidden", "refused", "zh-HK"), "冇做，拒絕咗");
+
+  // Two calls of one tool in one turn are two rows; a replay is one.
+  const a0 = newAuditEntry({ tool: "set_alarm", outcome: "ok", locale: "zh-HK", at: 1_000_000 });
+  const a1 = newAuditEntry({ tool: "set_alarm", outcome: "ok", locale: "zh-HK", at: 1_000_000, seq: 1 });
+  const a0Again = newAuditEntry({ tool: "set_alarm", outcome: "ok", locale: "zh-HK", at: 1_000_000 });
+  assert.equal(a0.id, "aa-set_alarm-1000000-0");
+  assert.notEqual(a0.id, a1.id, "same tool twice -> distinct ids");
+  assert.equal(a0.id, a0Again.id, "the same call twice -> the SAME id (outbox replay dedupes)");
+  assert.equal(a0.summary, "較好鬧鐘");
+
+  // A day filter is the local day, newest first, capped.
+  const morning = new Date(2026, 9, 24, 9, 0, 0).getTime();
+  const evening = new Date(2026, 9, 24, 21, 0, 0).getTime();
+  const nextDay = new Date(2026, 9, 25, 9, 0, 0).getTime();
+  const rows = [
+    newAuditEntry({ tool: "set_alarm", outcome: "ok", locale: "zh-HK", at: morning }),
+    newAuditEntry({ tool: "log_medication", outcome: "ok", locale: "zh-HK", at: evening }),
+    newAuditEntry({ tool: "locate", outcome: "failed", locale: "zh-HK", at: nextDay }),
+  ];
+  const day24 = auditForDay(rows, "2026-10-24");
+  assert.equal(day24.length, 2, "only one local day");
+  assert.equal(day24[0].at, evening, "newest first");
+  assert.equal(auditForDay(rows, "2026-10-24", 1).length, 1, "limit is honoured");
+  assert.equal(auditForDay(rows, "2026-10-26").length, 0);
+
+  // The batch wrapper tolerates the three shapes a queue can hand it.
+  assert.equal(auditBatch({ id: "x" }).length, 1, "one row");
+  assert.equal(auditBatch([{ id: "x" }, { id: "y" }]).length, 2, "an array");
+  assert.equal(auditBatch({ entries: [{ id: "x" }] }).length, 1, "an envelope");
+  assert.equal(auditBatch(null).length, 0, "null is an empty batch, not a crash");
+  assert.equal(auditBatch(42).length, 0, "a scalar is an empty batch, not a crash");
 }
 
 // --- tool executors: create / complete / locate / sos (B, local only) --------
@@ -2003,11 +2177,19 @@ assert.equal(magnitude(3, 4, 0), 5);
   // --- set_alarm also leaves a record (an alarm survives a restart) --------
   {
     const records: RecordEntry[] = [];
+    const slots: string[] = [];
+    const audit: { tool: string; outcome: string; seq: number }[] = [];
     const alarmRunner = createToolRunner(
       deps({
-        setAlarm: async () => true,
+        setAlarm: async (_at: number, _label: string, slot: string) => {
+          slots.push(slot);
+          return true;
+        },
         saveRecord: async (r: RecordEntry) => {
           records.push(r);
+        },
+        recordAudit: (e: { tool: string; outcome: string; seq: number }) => {
+          audit.push(e);
         },
       })
     );
@@ -2017,6 +2199,42 @@ assert.equal(magnitude(3, 4, 0), 5);
     assert.equal(records[0].kind, "alarm");
     assert.ok(records[0].detail?.includes("點") || records[0].detail?.includes("点"), String(records[0].detail));
     assert.equal(armed.cards?.[0].kind, "alarm", "the senior sees the alarm card");
+
+    // The OS slot and the record id must be the SAME string: that is what makes
+    // the reconciler able to tell "armed but no record" from "record but not
+    // armed" for one specific alarm instead of guessing at a single global one.
+    assert.equal(slots.length, 1);
+    assert.equal(slots[0], records[0].id, "slot === record id");
+    assert.equal(slots[0], `rec-alarm-${records[0].dueAt}`, "slot is derived from the ring time");
+
+    // Two alarms at different times are two slots — the regression that made the
+    // second "叫我九點" silently replace the first.
+    const second = await alarmRunner.run(step("set_alarm", { time: "09:00", label: "食藥" }));
+    assert.equal(second.ok, true);
+    assert.equal(slots.length, 2);
+    assert.notEqual(slots[0], slots[1], "a second alarm gets its own slot");
+
+    // Every executed step is audited, in order, with a per-tool seq.
+    assert.equal(audit.length, 2);
+    assert.equal(audit[0].tool, "set_alarm");
+    assert.equal(audit[0].outcome, "ok");
+    assert.deepEqual(audit.map((a) => a.seq), [0, 1], "same tool twice -> distinguishable rows");
+
+    // A failing tool is audited as `failed`, and the senior still hears why.
+    const failAudit: { tool: string; outcome: string }[] = [];
+    const failRunner = createToolRunner(
+      deps({
+        setAlarm: async () => false,
+        recordAudit: (e: { tool: string; outcome: string }) => {
+          failAudit.push(e);
+        },
+      })
+    );
+    const refused = await failRunner.run(step("set_alarm", { time: "08:00", label: "覆診" }));
+    assert.equal(refused.ok, false);
+    assert.equal(failAudit.length, 1);
+    assert.equal(failAudit[0].tool, "set_alarm");
+    assert.equal(failAudit[0].outcome, "failed", "a refused OS call must NOT be audited as ok");
   }
 
   // --- records card: today's durable list, and a truthful empty state ------
@@ -2508,7 +2726,7 @@ assert.equal(magnitude(3, 4, 0), 5);
     return m ? [...m[1].matchAll(/"([^"]+)"/g)].map((x) => x[1]) : [];
   };
 
-  for (const name of ["CardKind", "Intent"]) {
+  for (const name of ["CardKind", "Intent", "AgentAuditOutcome"]) {
     const py = pyLiteral(name).sort();
     const ts = tsUnion(name).sort();
     assert.ok(py.length > 0, `backend ${name} not found — did contract.py move?`);
@@ -2535,6 +2753,7 @@ assert.equal(magnitude(3, 4, 0), 5);
     reminder: async (e) => void seen.push(`reminder:${e.id}`),
     conversation: async (t) => void seen.push(`conversation:${t.id}`),
     recordSummary: async (b) => void seen.push(`recordSummary:${b.day}:${b.kind}:${b.count}`),
+    audit: async (rows) => void seen.push(`audit:${rows.length}`),
   };
   const send = makeSender(fake);
   const NOW = Date.UTC(2026, 9, 24, 3, 0, 0);
@@ -2559,6 +2778,12 @@ assert.equal(magnitude(3, 4, 0), 5);
   await send(queued("reminder", { id: "r1", at: NOW, locale: "zh-HK", kind: "medication", stage: "notify-caregiver" }));
   await send(queued("conversation", { id: "c1", at: NOW, role: "user", text: "", locale: "zh-HK" }));
   await send(queued("recordSummary", { day: "2026-10-24", kind: "med", count: 2, lastAt: NOW }));
+  // The writer enqueues ONE row per tool call; the endpoint takes a batch. The
+  // wrapper is what bridges the two, so an envelope, an array and a bare row all
+  // have to reach `audit` as an array.
+  await send(
+    queued("agentAudit", { id: "aa-1", at: NOW, tool: "set_alarm", outcome: "ok", summary: "較好鬧鐘" })
+  );
 
   assert.deepEqual(seen, [
     "sos:sos-1",
@@ -2571,6 +2796,7 @@ assert.equal(magnitude(3, 4, 0), 5);
     "reminder:r1",
     "conversation:c1",
     "recordSummary:2026-10-24:med:2",
+    "audit:1",
   ]);
 
   // Payload normalisation: two callers, two shapes, one endpoint.
