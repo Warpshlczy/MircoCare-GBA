@@ -90,6 +90,16 @@ assert settings.fusion_w_acoustic == 0.2, f"acoustic weight default drifted: {se
 assert settings.fusion_w_semantic == 0.8, f"semantic weight default drifted: {settings.fusion_w_semantic}"
 assert settings.risk_watch == 0.409, f"watch threshold drifted: {settings.risk_watch}"
 assert settings.risk_elevated == 0.521, f"elevated threshold drifted: {settings.risk_elevated}"
+# The committed template must carry the same values: a `--env-file .env` server
+# and a bare `python selfcheck.py` must not disagree on bands (C0).
+_example_env = (Path(__file__).resolve().parent / ".env.example").read_text(encoding="utf-8")
+for _pinned in (
+    "AURA_FUSION_W_ACOUSTIC=0.2",
+    "AURA_FUSION_W_SEMANTIC=0.8",
+    "AURA_RISK_WATCH=0.409",
+    "AURA_RISK_ELEVATED=0.521",
+):
+    assert _pinned in _example_env, f".env.example drifted from code defaults: {_pinned}"
 assert abs(settings.fusion_w_acoustic + settings.fusion_w_semantic - 1.0) < 1e-9
 assert settings.fusion3_w_acoustic == 0.15 and settings.fusion3_w_semantic == 0.65
 assert settings.fusion3_w_behavior == 0.20
