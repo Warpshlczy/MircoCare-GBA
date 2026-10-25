@@ -66,6 +66,20 @@ def interaction_trend(store: object, device_id: str, now_ms: int | None = None) 
 router = APIRouter(prefix="/caregiver", tags=["caregiver"])
 
 
+def _seed_card(device: str) -> dict:
+    """Seed a missing health card.
+
+    A family deletion is sticky: after `DELETE /caregiver/health-card`, editing
+    contacts or another field must start from an empty card, never from the demo
+    identities (a fake name/phone on the caregiver screen is worse than a blank).
+    """
+    from .contract_routes import _DEMO_CARD, _blank_card
+
+    if store.get_doc(device, "health_card_deleted") is not None:
+        return _blank_card(device)
+    return {**_DEMO_CARD, "id": f"hc-{device}"}
+
+
 def linked_device(principal: Principal, senior_device_id: str | None) -> str:
     """Resolve a family account to one of its bound senior devices."""
     relations = family_relations(require_role(principal, "family"))
@@ -138,9 +152,10 @@ def put_contacts(
     now = int(time.time() * 1000)
     card = store.get_doc(device, "health_card")
     if not card:
-        from .contract_routes import _DEMO_CARD
-
-        card = {**_DEMO_CARD, "id": f"hc-{device}", "updatedAt": now}
+        card = {
+            **_seed_card(device),
+            "updatedAt": now,
+        }
     card["contacts"] = [c.model_dump() for c in req.contacts]
     card["updatedAt"] = now
     store.set_doc(device, "health_card", card)
@@ -162,9 +177,10 @@ def put_health_card(
     now = int(time.time() * 1000)
     card = store.get_doc(device, "health_card")
     if not card:
-        from .contract_routes import _DEMO_CARD
-
-        card = {**_DEMO_CARD, "id": f"hc-{device}", "updatedAt": now}
+        card = {
+            **_seed_card(device),
+            "updatedAt": now,
+        }
     card.update(req.model_dump(exclude_unset=True, exclude_none=True))
     card["updatedAt"] = now
     store.set_doc(device, "health_card", card)

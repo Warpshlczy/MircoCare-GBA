@@ -42,9 +42,9 @@ from auragba.changepoint import detect  # noqa: E402
 from auragba.config import settings, validate_runtime  # noqa: E402
 from auragba.contract import (  # noqa: E402
     AgentCard, AgentIntentRequest, AgentTool, AgentTurnRequest, AssistantChatRequest,
-    BehaviourDaily, BehaviourDailyEnvelope, Contact, ContactsRequest, GeofenceEvent,
-    HealthCardUpdate, ScreeningSession, SosEvent, StreamScore, TaskEvent, TelemetryEvent,
-    ToolCall,
+    BehaviourDaily, BehaviourDailyEnvelope, Contact, ContactsRequest, ConversationTurn,
+    GaitWindow, GeofenceEvent, HealthCardUpdate, ReminderEscalation, ScreeningSession,
+    SosEvent, StreamScore, TaskEvent, TelemetryEvent, ToolCall,
 )
 from auragba.crypto import decrypt_text, encrypt_text  # noqa: E402
 from auragba.economics import estimate as economics  # noqa: E402
@@ -1183,6 +1183,44 @@ with tempfile.TemporaryDirectory() as tmp:
     assert _card["contacts"][0]["name"] == "陳小明"
     assert _card["emergencyContact"]["name"], "the SOS escalation contact must remain"
 
+# --- at-least-once replay: gait / conversation / reminder escalation -----------
+with tempfile.TemporaryDirectory() as tmp:
+    st = Store(Path(tmp))
+    import auragba.api.contract_routes as contract_routes  # noqa: E402
+
+    _real = (contract_routes.store, contract_routes.notify_dispatch)
+    _notified: list[tuple] = []
+    contract_routes.store = st
+    contract_routes.notify_dispatch = lambda *a, **k: _notified.append(a) or []
+    try:
+        _gait = GaitWindow(
+            id="gw-replay", startedAt=1, endedAt=2, steps=10,
+            cadence=100.0, cv=0.1, fall=True, fallReason="impact",
+        )
+        contract_routes.post_gait_window(_gait, "dev-replay")
+        contract_routes.post_gait_window(_gait, "dev-replay")
+        assert len(st.history("dev-replay", "gait")) == 1, "gait replay must not append"
+        assert len(st.history("dev-replay", "gait_falls")) == 1, "fall replay must not append"
+
+        _turn = ConversationTurn(
+            id="turn-replay", at=3, role="user", text="我今日好攰", locale="zh-CN",
+        )
+        contract_routes.post_conversation_memory(_turn, "dev-replay")
+        contract_routes.post_conversation_memory(_turn, "dev-replay")
+        assert len(st.history("dev-replay", "conversation")) == 1, "conversation replay must not append"
+        # A revoked turn keeps its marker, so a late replay cannot re-insert it.
+        assert st.delete_by_id("dev-replay", "conversation", _turn.id)
+        contract_routes.post_conversation_memory(_turn, "dev-replay")
+        assert st.history("dev-replay", "conversation") == [], "revoked turn must stay revoked"
+
+        _esc = ReminderEscalation(id="rem-replay", at=4, locale="zh-CN")
+        contract_routes.post_reminder_escalation(_esc, "dev-replay")
+        contract_routes.post_reminder_escalation(_esc, "dev-replay")
+        assert len(st.history("dev-replay", "reminder_escalations")) == 1, "escalation replay must not append"
+        assert len(_notified) == 1, "escalation replay must not page the family twice"
+    finally:
+        contract_routes.store, contract_routes.notify_dispatch = _real
+
 # --- governance: health-card write/delete, unbind, account delete, economics ---
 with tempfile.TemporaryDirectory() as tmp:
     st = Store(Path(tmp))
@@ -1218,6 +1256,18 @@ with tempfile.TemporaryDirectory() as tmp:
             contract_routes.store = _real_contract
         assert _blank.name == "未填写", "a deleted card must not be re-seeded with demo data"
         assert st.get_doc("dev-hc", "health_card") is None
+
+        # Editing contacts/fields after a deletion must start from an EMPTY card,
+        # not from the demo identities.
+        caregiver_routes.put_contacts(ContactsRequest(contacts=[_contact]), principal=_who)
+        _after = st.get_doc("dev-hc", "health_card")
+        assert _after["name"] == "未填写" and _after["allergies"] == []
+        assert _after["medications"] == [] and _after["emergencyContact"]["phone"] == ""
+        assert _after["contacts"][0]["name"] == "陳小明"
+        caregiver_routes.put_health_card(HealthCardUpdate(name="李婆婆"), principal=_who)
+        _edited = st.get_doc("dev-hc", "health_card")
+        assert _edited["name"] == "李婆婆"
+        assert _edited["allergies"] == [] and _edited["emergencyContact"]["phone"] == ""
     finally:
         (caregiver_routes.store, caregiver_routes.family_relations,
          caregiver_routes.require_role, caregiver_routes.audit_log,
