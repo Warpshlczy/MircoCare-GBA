@@ -7,6 +7,7 @@ import time
 from fastapi import APIRouter, Depends, HTTPException
 
 from ..auth import Principal, current_principal, family_relations, require_role
+from ..contract import Contact, ContactsRequest
 from ..notifications import notify_families
 from ..store import store
 
@@ -113,6 +114,32 @@ def overview(
             if row.get("familyAccountId") == principal.account_id
         ][-30:],
     }
+
+
+@router.post("/contacts", response_model=list[Contact])
+def put_contacts(
+    req: ContactsRequest,
+    senior_device_id: str | None = None,
+    principal: Principal = Depends(current_principal),
+) -> list[Contact]:
+    """Replace the callable contact list for one bound senior (family only).
+
+    The senior app must not edit this list: deleting one's own emergency contacts
+    is not recoverable on the device. `emergencyContact` (the SOS escalation
+    chain) is deliberately left untouched — daily calls and emergency paging are
+    different jobs.
+    """
+    device = linked_device(principal, senior_device_id)
+    now = int(time.time() * 1000)
+    card = store.get_doc(device, "health_card")
+    if not card:
+        from .contract_routes import _DEMO_CARD
+
+        card = {**_DEMO_CARD, "id": f"hc-{device}", "updatedAt": now}
+    card["contacts"] = [c.model_dump() for c in req.contacts]
+    card["updatedAt"] = now
+    store.set_doc(device, "health_card", card)
+    return req.contacts
 
 
 @router.post("/sos/{sos_id}/ack")

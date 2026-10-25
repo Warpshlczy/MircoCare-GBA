@@ -119,7 +119,9 @@ _TEXTS: dict[str, dict[str, Any]] = {
             "outings": "外出次数",
             "outingsValue": "{n} 次",
             "awayMinutes": "外出时长",
-            "awayMinutesValue": "{minutes} 分钟（{n} 次）",
+            "awayMinutesValue": "{minutes} 分钟",
+            "awayMinutesCoveredValue": "{minutes} 分钟（{n} 次）",
+            "awayMinutesUnderMinute": "不足 1 分钟",
             "proxy": "听力/视觉代理",
             "proxyValue": "能听清 {hearing}；能看清 {vision}",
             "proxyNote": "代理指标，非听力学/视力检查；数值越高表示越常听清/看清，不参与风险分。",
@@ -246,7 +248,9 @@ _TEXTS: dict[str, dict[str, Any]] = {
             "outings": "外出次數",
             "outingsValue": "{n} 次",
             "awayMinutes": "外出時長",
-            "awayMinutesValue": "{minutes} 分鐘（{n} 次）",
+            "awayMinutesValue": "{minutes} 分鐘",
+            "awayMinutesCoveredValue": "{minutes} 分鐘（{n} 次）",
+            "awayMinutesUnderMinute": "不足 1 分鐘",
             "proxy": "聽力/視覺代理",
             "proxyValue": "能聽清 {hearing}；能看清 {vision}",
             "proxyNote": "代理指標，非聽力學/視力檢查；數值越高表示越常聽清/看清，不參與風險分。",
@@ -528,10 +532,11 @@ def _activity_section(
             )
         )
         proxy_note = copy["proxyNote"]
-    # Home-fence exits are real per-event records; B only writes `minutesAway`
-    # on the closing `enter` event (and only when that exit was alerted), so the
-    # duration covers a subset of outings. A week with no exits is "not
-    # recorded", so the line is omitted rather than printed as 0.
+    # B emits an exit for EVERY crossing (`alert` only decides whether the
+    # family is paged) and a closing `enter` with `minutesAway` for every
+    # return. A stale comment used to claim duration covered only alerted trips;
+    # that is no longer true. The only gap is a missing enter (app killed), so
+    # the `(n 次)` suffix is shown only when coverage is incomplete.
     exits = [e for e in geofence if e.get("kind") == "exit"]
     away_minutes = [
         float(e["minutesAway"])
@@ -544,14 +549,15 @@ def _activity_section(
             ReportCount(label=copy["outings"], value=copy["outingsValue"].format(n=len(exits)))
         )
     if away_minutes:
-        outing_counts.append(
-            ReportCount(
-                label=copy["awayMinutes"],
-                value=copy["awayMinutesValue"].format(
-                    minutes=round(sum(away_minutes)), n=len(away_minutes)
-                ),
-            )
-        )
+        total = round(sum(away_minutes))
+        if total <= 0:
+            # A sub-minute trip must not read as "did not go out".
+            value = copy["awayMinutesUnderMinute"]
+        elif len(away_minutes) != len(exits):
+            value = copy["awayMinutesCoveredValue"].format(minutes=total, n=len(away_minutes))
+        else:
+            value = copy["awayMinutesValue"].format(minutes=total)
+        outing_counts.append(ReportCount(label=copy["awayMinutes"], value=value))
     if not gait:
         counts = proxy_counts + outing_counts
         return ReportSection(

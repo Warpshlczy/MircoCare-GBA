@@ -19,6 +19,7 @@ import time
 import wave
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -40,8 +41,8 @@ from auragba.changepoint import detect  # noqa: E402
 from auragba.config import settings, validate_runtime  # noqa: E402
 from auragba.contract import (  # noqa: E402
     AgentCard, AgentIntentRequest, AgentTool, AgentTurnRequest, AssistantChatRequest,
-    BehaviourDaily, BehaviourDailyEnvelope, GeofenceEvent, ScreeningSession, SosEvent,
-    StreamScore, TaskEvent, TelemetryEvent, ToolCall,
+    BehaviourDaily, BehaviourDailyEnvelope, Contact, ContactsRequest, GeofenceEvent,
+    ScreeningSession, SosEvent, StreamScore, TaskEvent, TelemetryEvent, ToolCall,
 )
 from auragba.crypto import decrypt_text, encrypt_text  # noqa: E402
 from auragba.economics import estimate as economics  # noqa: E402
@@ -875,6 +876,40 @@ with tempfile.TemporaryDirectory() as tmp:
         "reject/capture rows must not raise or mask the weekly advice tier"
     )
 
+# Full duration coverage drops the redundant "(n 次)"; a sub-minute round must
+# not read as "did not go out".
+with tempfile.TemporaryDirectory() as tmp:
+    st_out = Store(Path(tmp))
+    t_out = int(time.time() * 1000)
+    st_out.record("dev-out", "geofence_events",
+                  {"id": "o1", "at": t_out - 3 * 86_400_000, "kind": "exit", "distanceM": 500.0})
+    st_out.record("dev-out", "geofence_events",
+                  {"id": "i1", "at": t_out - 3 * 86_400_000 + 1_800_000, "kind": "enter",
+                   "distanceM": 10.0, "minutesAway": 30.0})
+    st_out.record("dev-out", "geofence_events",
+                  {"id": "o2", "at": t_out - 2 * 86_400_000, "kind": "exit", "distanceM": 300.0})
+    st_out.record("dev-out", "geofence_events",
+                  {"id": "i2", "at": t_out - 2 * 86_400_000 + 1_200_000, "kind": "enter",
+                   "distanceM": 10.0, "minutesAway": 20.0})
+    _out_counts = {c.label: c.value for c in next(
+        s for s in build_weekly_report("dev-out", st_out, now=t_out).sections
+        if s.key == "activity").counts}
+    assert _out_counts["外出次数"] == "2 次"
+    assert _out_counts["外出时长"] == "50 分钟", "full coverage must drop the redundant count"
+
+with tempfile.TemporaryDirectory() as tmp:
+    st_zero = Store(Path(tmp))
+    t_zero = int(time.time() * 1000)
+    st_zero.record("dev-zero", "geofence_events",
+                   {"id": "z1", "at": t_zero - 86_400_000, "kind": "exit", "distanceM": 20.0})
+    st_zero.record("dev-zero", "geofence_events",
+                   {"id": "z2", "at": t_zero - 86_400_000 + 20_000, "kind": "enter",
+                    "distanceM": 5.0, "minutesAway": 0.0})
+    _zero_counts = {c.label: c.value for c in next(
+        s for s in build_weekly_report("dev-zero", st_zero, now=t_zero).sections
+        if s.key == "activity").counts}
+    assert _zero_counts["外出时长"] == "不足 1 分钟", "a sub-minute trip is not 0"
+
 # --- k-anonymity gate (DPIA D.3) ---------------------------------------------
 _small = (
     [{"band": "low"} for _ in range(5)]
@@ -1075,6 +1110,46 @@ with tempfile.TemporaryDirectory() as tmp:
     assert len(rows) == 2 and all(r["alert"] is True for r in rows), (
         "one row per outing; the silent start is replaced by the escalation"
     )
+
+# --- contacts: family-managed callable list, SOS contact untouched ------------
+_contact = Contact(id="c1", name="陳小明", relation="儿子", phone="+852 9000 0000")
+assert _contact.phone == "+85290000000", "phone formatting is normalised before validation"
+for _bad_contacts in (
+    {"contacts": [{"id": f"c{i}", "name": "x", "phone": "123456"} for i in range(6)]},
+    {"contacts": [{"id": "c", "name": "x", "phone": "not-a-phone"}]},
+    {"contacts": [{"id": "c", "name": "x", "phone": "123456"},
+                  {"id": "c", "name": "y", "phone": "123456"}]},
+):
+    try:
+        ContactsRequest(**_bad_contacts)
+    except Exception:
+        pass
+    else:
+        raise AssertionError(f"invalid contacts accepted: {_bad_contacts}")
+
+with tempfile.TemporaryDirectory() as tmp:
+    st = Store(Path(tmp))
+    import auragba.api.caregiver_routes as caregiver_routes  # noqa: E402
+
+    _real_cg_store = caregiver_routes.store
+    _real_rel = caregiver_routes.family_relations
+    _real_role = caregiver_routes.require_role
+    caregiver_routes.store = st
+    caregiver_routes.family_relations = lambda p: [{"seniorDeviceId": "dev-contact"}]
+    caregiver_routes.require_role = lambda p, role: p
+    try:
+        saved = caregiver_routes.put_contacts(
+            ContactsRequest(contacts=[_contact]),
+            principal=SimpleNamespace(account_id="fam-c"),
+        )
+    finally:
+        caregiver_routes.store = _real_cg_store
+        caregiver_routes.family_relations = _real_rel
+        caregiver_routes.require_role = _real_role
+    assert saved[0].phone == "+85290000000"
+    _card = st.get_doc("dev-contact", "health_card")
+    assert _card["contacts"][0]["name"] == "陳小明"
+    assert _card["emergencyContact"]["name"], "the SOS escalation contact must remain"
 
 # --- interaction trend: latest closed day vs the senior's own median ----------
 with tempfile.TemporaryDirectory() as tmp:

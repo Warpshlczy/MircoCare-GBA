@@ -50,6 +50,7 @@ python3 selfcheck.py                              # 可运行断言自检 → se
 | 13 | `POST /task/events` | 任务状态事件（created/completed/deferred/timeout） | 204 |
 | 14 | `POST /geofence/events` | 离家/返家越界事件（与 SOS 分开，按 id 幂等） | 204 |
 | 15 | `DELETE /conversation/turns/{id}` | 撤回单条会话 + 审计记录 + 基线重算标记 | 204 / 404 |
+| 16 | `POST /caregiver/contacts` | 家属写入可拨联系人（≤5，整表替换；不动 SOS 联系人） | 200 |
 
 > `/sos`、`/reminders/escalate`、`/reports/weekly/send` 统一走 `notify.dispatch`：先写家属 outbox，再打印「已通知家属 N 人」；配置 `AURA_NOTIFY_WEBHOOK` 时额外推一条粗粒度通知。demo 不声称“已送达”。
 
@@ -134,6 +135,7 @@ uvicorn auragba.main:app --env-file .env --reload --port 8000
 | `AURA_FUSION_W_ACOUSTIC` / `AURA_FUSION_W_SEMANTIC` | 两流融合权重（行为流缺失时使用，自动归一） | 0.2 / 0.8 |
 | `AURA_FUSION3_W_ACOUSTIC` / `_SEMANTIC` / `_BEHAVIOR` | 三流初始先验（行为流存在时使用，自动归一） | 0.15 / 0.65 / 0.20 |
 | `AURA_RISK_WATCH` / `AURA_RISK_ELEVATED` | 风险分档切点 | 0.409 / 0.521 |
+| `AURA_DEPLOY_PREVALENCE` | 部署患病率假设（仅用于 PPV 沟通；空 = 不输出数字） | 空 |
 | `AURA_DATA_DIR` | 假名存储 / 审计日志目录 | `./.data` |
 | `AURA_CORS_ORIGINS` | 允许的 CORS 源（逗号分隔，禁止 `*`） | `http://localhost:3000,http://localhost:8000` |
 | `AURA_LLM_ENABLED` | 是否启用三个 LLM 端点 | `false` |

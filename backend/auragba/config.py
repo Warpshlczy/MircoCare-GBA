@@ -35,6 +35,16 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_opt_float(name: str) -> float | None:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 def _env_bool(name: str, default: bool) -> bool:
     raw = os.getenv(name)
     if raw is None:
@@ -66,6 +76,10 @@ class Settings:
     fusion3_w_behavior: float = _env_float("AURA_FUSION3_W_BEHAVIOR", 0.20)
     risk_watch: float = _env_float("AURA_RISK_WATCH", 0.409)
     risk_elevated: float = _env_float("AURA_RISK_ELEVATED", 0.521)
+    # Deployment prevalence used ONLY for PPV/NPV communication. Empty means no
+    # PPV number is ever printed; when set, reports must label it as an assumption,
+    # never as a measured property of the model.
+    deploy_prevalence: float | None = _env_opt_float("AURA_DEPLOY_PREVALENCE")
     data_dir: Path = field(
         default_factory=lambda: Path(
             os.getenv("AURA_DATA_DIR", str(Path(__file__).resolve().parents[1] / ".data"))
@@ -161,6 +175,11 @@ def validate_runtime(s: Settings = settings) -> None:
         raise RuntimeError(
             "AURA_REGULATORY_CLAIM_LEVEL must be 'observation' or 'triage_support'; "
             "diagnostic claims require regulatory clearance this build does not have"
+        )
+    if s.deploy_prevalence is not None and not 0.0 < s.deploy_prevalence < 1.0:
+        raise RuntimeError(
+            "AURA_DEPLOY_PREVALENCE must be between 0 and 1 (e.g. 0.10); "
+            "leave it empty to suppress all PPV numbers"
         )
 
 

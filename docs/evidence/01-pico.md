@@ -32,6 +32,17 @@
 
 **单流与分层规则**（已实现）：仅剩一个数据流时强制 `low` 并标 `insufficientStreams`，不得凭单流给出 elevated；elevated 层才建议就医。
 
+**校准与混淆（答辩必须同时给出）**
+
+| 事项 | 数值 | 含义 |
+|---|---|---|
+| 人口学基线 AUC | 0.638–0.659（age + education + sex） | 与声学单流同量级；按 education±1 / age±5 匹配后声学 AUC 仍有 0.639 → 信号真实，但**报 AUC 必须声明教育/年龄混淆** |
+| riskIndex 校准 | Brier 0.2324；常数基线 0.2256 | **riskIndex 不是概率**；周报只展示 `riskBand`，不展示分数 |
+| watch 操作点 | 敏感度 0.877 / 特异度 0.297 | 筛查向高敏感度；代价是假阳性 |
+| PPV @10% 患病率 | 12.2% | PPV 随患病率崩塌，调阈值救不了；只有配置 `AURA_DEPLOY_PREVALENCE` 才允许输出 PPV，且必须标注为假设 |
+
+> `AURA_DEPLOY_PREVALENCE` 为空时，任何界面/报告都不输出 PPV 数字；`riskIndex` 永远不表述为「概率」。
+
 ---
 
 ## 3. 文献证据（近 5 年；DOI 答辩前逐条补齐）

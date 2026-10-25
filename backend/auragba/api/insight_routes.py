@@ -175,5 +175,7 @@ def health() -> dict:
         "privacyMode": settings.privacy_mode,
         "llmIntegration": "enabled" if settings.llm_available else "disabled-fallback",
         "weather": "open-meteo" if settings.weather_enabled else "disabled",
+        # null = no deployment-prevalence assumption; clients must not print PPV.
+        "deployPrevalence": settings.deploy_prevalence,
         "notForDiagnosis": True,
     }
