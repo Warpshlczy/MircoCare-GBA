@@ -121,8 +121,16 @@ def compute_baseline(
     times = at_ms if at_ms is not None and len(at_ms) == total else None
 
     if times and z_window_days:
-        cutoff = max(times) - z_window_days * 86_400_000
-        ref_idx = {i for i, t in enumerate(times) if t >= cutoff}
+        # A missing timestamp is "unknown", not "now": `max()` on a list that
+        # contains None raises TypeError, so only known stamps can set the cutoff.
+        known = [t for t in times if t is not None]
+        if known:
+            cutoff = max(known) - z_window_days * 86_400_000
+            ref_idx = {
+                i for i, t in enumerate(times) if t is not None and t >= cutoff
+            }
+        else:
+            ref_idx = set()
     else:
         ref_idx = set(range(total))
 

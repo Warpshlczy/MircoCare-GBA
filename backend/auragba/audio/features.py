@@ -240,8 +240,11 @@ def _analyse_vector(x: np.ndarray, sr: int) -> dict[str, object]:
     # formants on voiced frames (decimated for speed)
     formants: list[list[float]] = []
     order = min(22, max(8, sr // 1000 + 4))
+    # `voiced` already holds FRAME INDICES, not a boolean mask: slicing keeps
+    # exactly those indices. `np.where(voiced)[0]` would return positions inside
+    # this array (and silently drop frame 0), so it is NOT equivalent.
     sampled: list[int] = (
-        list(voiced[:: max(1, len(voiced) // 40)].tolist()) if voiced.size else []
+        voiced[:: max(1, len(voiced) // 40)].tolist() if voiced.size else []
     )
     for i in sampled:
         fs = _formants(_lpc(frames[i], order), sr)
