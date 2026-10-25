@@ -174,9 +174,9 @@ export const TOOLS: readonly ToolDecl[] = [
   {
     name: "call_contact",
     description:
-      "Open the dialler for a named contact stored in the health card. MUST restate the contact's " +
-      "full name and get a yes before dialling; if the senior declines, cancel. Never auto-redial. " +
-      "A name we do not have is refused, never guessed.",
+      "Open the dialler for a person the FAMILY added to the health card. MUST restate the name and " +
+      "get a yes before dialling; if the senior declines, cancel. Never auto-redial. A name we do not " +
+      "have, or one shared by two people, is refused rather than guessed.",
     schema: {
       type: "object",
       properties: {
