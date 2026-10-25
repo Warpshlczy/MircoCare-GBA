@@ -13,7 +13,7 @@
 // Every method degrades to a safe value when the shell is older/missing, so
 // callers never need to feature-detect individually.
 
-import type { AgentCard, CircadianDaily, RecordEntry, ReminderItem } from "./types";
+import type { AgentCard, CircadianDaily, DigitalSkillDaily, RecordEntry, ReminderItem } from "./types";
 
 export interface HomeWidgetPayload {
   updatedAt: number;
@@ -62,16 +62,60 @@ function asOpenTarget(v: unknown): WidgetOpenTarget | undefined {
   return typeof v === "string" && OPEN_TARGET_SET.has(v) ? (v as WidgetOpenTarget) : undefined;
 }
 
-/** One normaliser for the raw plugin shape: absent keys become `null`. */
+/**
+ * One armed one-shot alarm, as the OS holds it.
+ *
+ * `slot` is the identity: it is the record id (`rec-alarm-<dueAt>`) on this
+ * device, and the shell derives its PendingIntent request code from it. Two
+ * alarms at two different times are two slots and coexist — an earlier build
+ * had ONE fixed request code, so a second 「叫我九點」 silently replaced the
+ * first while the record store still listed both.
+ */
+export interface ArmedOnce {
+  at: number;
+  label: string;
+  /** absent only on a shell older than multi-slot support */
+  slot?: string;
+}
+
+/** What the shell's AlarmManager currently holds (see AlarmScheduler.java). */
+export interface ScheduledAlarms {
+  daily: { hour: number; minute: number; exact: boolean } | null;
+  /** every armed one-shot, soonest first. Empty = nothing armed. */
+  once: ArmedOnce[];
+}
+
+/**
+ * One normaliser for the raw plugin shape: absent keys become `null`/`[]`.
+ *
+ * Accepts `once` as an ARRAY (current shell) or a single object (an older shell,
+ * and the injected stub used by tests). Reading it as "some or one" is what lets
+ * the web build and a not-yet-updated APK share this file.
+ */
 function normalizeAlarms(
-  r: { daily?: { hour?: number; minute?: number; exact?: boolean } | null; once?: { at?: number; label?: string } | null } | void
+  r:
+    | {
+        daily?: { hour?: number; minute?: number; exact?: boolean } | null;
+        once?: { at?: number; label?: string; slot?: string } | { at?: number; label?: string; slot?: string }[] | null;
+      }
+    | void
 ): ScheduledAlarms {
+  const raw = r?.once;
+  const list = Array.isArray(raw) ? raw : raw ? [raw] : [];
+  const once: ArmedOnce[] = [];
+  for (const item of list) {
+    if (!item || typeof item.at !== "number") continue;
+    const entry: ArmedOnce = { at: item.at, label: typeof item.label === "string" ? item.label : "" };
+    if (typeof item.slot === "string" && item.slot) entry.slot = item.slot;
+    once.push(entry);
+  }
+  once.sort((a, b) => a.at - b.at);
   return {
     daily:
       r?.daily && typeof r.daily.hour === "number"
         ? { hour: r.daily.hour, minute: r.daily.minute ?? 0, exact: !!r.daily.exact }
         : null,
-    once: r?.once && typeof r.once.at === "number" ? { at: r.once.at, label: r.once.label ?? "" } : null,
+    once,
   };
 }
 
@@ -105,10 +149,6 @@ export interface ForegroundEvent {
 }
 
 /** What the shell's AlarmManager currently holds (see AlarmScheduler.java). */
-export interface ScheduledAlarms {
-  daily: { hour: number; minute: number; exact: boolean } | null;
-  once: { at: number; label: string } | null;
-}
 
 /** Tone presets understood by the on-box neural voice (NeuralTts.java). */
 export type VoicePreset = "warm" | "gentle" | "cheerful" | "urgent";
@@ -139,9 +179,18 @@ export interface AuraNativeBridge {
   /** Repeats every day; resolves false when the OS refused to schedule. */
   scheduleDaily(hour: number, minute: number): Promise<boolean>;
   cancelDaily(): Promise<void>;
-  /** one-shot alarm at an absolute time; false when the OS refused it */
-  scheduleOnce(atMs: number, label?: string): Promise<boolean>;
-  cancelOnce(): Promise<void>;
+  /**
+   * One-shot alarm at an absolute time; false when the OS refused it.
+   *
+   * `slot` names WHICH alarm this is (the record id). It is required when the
+   * caller wants several alarms to coexist: the shell derives the PendingIntent
+   * request code from it, so two different slots are two independent alarms.
+   * Omitting it falls back to the legacy single slot, which is only correct for
+   * a caller that can hold one alarm — the executor never does.
+   */
+  scheduleOnce(atMs: number, label?: string, slot?: string): Promise<boolean>;
+  /** Cancels the alarm in `slot`, or the legacy single slot when omitted. */
+  cancelOnce(slot?: string): Promise<void>;
   /**
    * What the OS currently holds, read back from the scheduler's own store.
    * `null` fields mean "nothing armed". Only the shell can answer this — a
@@ -156,6 +205,23 @@ export interface AuraNativeBridge {
   startCircadian(): Promise<boolean>;
   /** One day's rollup, or null when nothing was observed (NOT zeros). */
   getCircadian(day: string): Promise<CircadianDaily | null>;
+  /**
+   * Whether the senior's phone has granted PACKAGE_USAGE_STATS.
+   *
+   * Asked, never demanded: this is a special permission that can only be turned
+   * on by hand in the system settings, and nagging a forgetful 78-year-old with
+   * a settings screen is a net loss. A false answer simply means the
+   * `digitalSkill` row is omitted from the upload.
+   */
+  hasUsageAccess(): Promise<boolean>;
+  /** Opens the system usage-access screen so a FAMILY member can enable it. */
+  openUsageAccessSettings(): Promise<boolean>;
+  /**
+   * One day's usage-stats proxy, or null when the permission is off / nothing
+   * was seen. `opFailRate` is always null: it needs accessibility events, which
+   * this app does not request, and a fabricated 0 would read as "no failures".
+   */
+  getDigitalSkill(day: string): Promise<DigitalSkillDaily | null>;
   /** Opens the dialler prefilled. The call itself stays the senior's choice. */
   dial(phone: string): Promise<boolean>;
   /** Launches one whitelisted app ('wechat' | 'phone' | 'camera' | 'settings'). */
@@ -204,14 +270,18 @@ interface AuraNativePlugin {
   bringToForeground(o?: { reason?: ForegroundReason }): Promise<{ ok?: boolean }>;
   scheduleDaily(o: { hour: number; minute: number }): Promise<{ ok?: boolean; exact?: boolean }>;
   cancelDaily(): Promise<void>;
-  scheduleOnce(o: { at: number; label?: string }): Promise<{ ok?: boolean; exact?: boolean }>;
-  cancelOnce(): Promise<void>;
+  scheduleOnce(o: { at: number; label?: string; slot?: string }): Promise<{ ok?: boolean; exact?: boolean }>;
+  cancelOnce(o?: { slot?: string }): Promise<void>;
   getScheduledAlarms(): Promise<{
     daily?: { hour?: number; minute?: number; exact?: boolean } | null;
-    once?: { at?: number; label?: string } | null;
+    /** current shell: an array. Older shell / stub: one object. */
+    once?: { at?: number; label?: string; slot?: string } | { at?: number; label?: string; slot?: string }[] | null;
   } | void>;
   circadianStart(): Promise<{ ok?: boolean }>;
   getCircadian(o: { day: string }): Promise<Partial<CircadianDaily> | void>;
+  hasUsageAccess(): Promise<{ ok?: boolean }>;
+  openUsageAccessSettings(): Promise<{ ok?: boolean }>;
+  getDigitalSkill(o: { day: string }): Promise<Partial<DigitalSkillDaily> | void>;
   dial(o: { phone: string }): Promise<{ ok?: boolean }>;
   openApp(o: { app: string }): Promise<{ ok?: boolean }>;
   getLocation(): Promise<Partial<NativeLocation> | void>;
@@ -258,19 +328,28 @@ export function withDefaults(src: Partial<AuraNativeBridge>): AuraNativeBridge {
     // `set_alarm` on every real device — the senior heard "設唔到鬧鐘" while
     // the native scheduler sat unused. Same for cancel: a hard stub left an
     // alarm ringing that he had explicitly asked to cancel.
-    scheduleOnce: (atMs, label) =>
-      Promise.resolve(src.scheduleOnce?.(atMs, label))
+    scheduleOnce: (atMs, label, slot) =>
+      Promise.resolve(src.scheduleOnce?.(atMs, label, slot))
         .then((v) => !!v)
         .catch(() => false),
-    cancelOnce: () =>
-      Promise.resolve(src.cancelOnce?.()).then(() => undefined).catch(() => undefined),
+    cancelOnce: (slot) =>
+      Promise.resolve(src.cancelOnce?.(slot)).then(() => undefined).catch(() => undefined),
     // A browser holds no alarms, so the honest answer is "nothing armed".
     getScheduledAlarms: () =>
       Promise.resolve(src.getScheduledAlarms?.())
         .then(normalizeAlarms)
-        .catch(() => ({ daily: null, once: null })),
+        .catch(() => ({ daily: null, once: [] })),
     startCircadian: () => Promise.resolve(false),
     getCircadian: () => Promise.resolve(null),
+    // A browser cannot inspect app usage. "No access" is true here, and it makes
+    // the caller omit the row instead of inventing zeros.
+    hasUsageAccess: () => Promise.resolve(src.hasUsageAccess?.() ?? false).then((v) => !!v).catch(() => false),
+    openUsageAccessSettings: () =>
+      Promise.resolve(src.openUsageAccessSettings?.()).then((v) => !!v).catch(() => false),
+    getDigitalSkill: (day) =>
+      Promise.resolve(src.getDigitalSkill?.(day))
+        .then((r) => (r && typeof r.day === "string" ? (r as DigitalSkillDaily) : null))
+        .catch(() => null),
     dial: () => Promise.resolve(false),
     openApp: () => Promise.resolve(false),
     getLocation: () =>
@@ -316,10 +395,18 @@ export function bridge(): AuraNativeBridge | null {
     // The plugin takes one options object, so wrap the two positional args.
     scheduleDaily: (hour, minute) => p.scheduleDaily({ hour, minute }).then((r) => !!r?.ok),
     cancelDaily: () => p.cancelDaily(),
-    scheduleOnce: (atMs, label) => p.scheduleOnce({ at: atMs, label }).then((r) => !!r?.ok),
-    cancelOnce: () => p.cancelOnce(),
+    scheduleOnce: (atMs, label, slot) => p.scheduleOnce({ at: atMs, label, slot }).then((r) => !!r?.ok),
+    cancelOnce: (slot) => p.cancelOnce({ slot }),
     getScheduledAlarms: async () => normalizeAlarms(await p.getScheduledAlarms()),
     startCircadian: () => p.circadianStart().then((r) => !!r?.ok),
+    hasUsageAccess: () => p.hasUsageAccess().then((r) => !!r?.ok),
+    openUsageAccessSettings: () => p.openUsageAccessSettings().then((r) => !!r?.ok),
+    getDigitalSkill: async (day) => {
+      const r = await p.getDigitalSkill({ day });
+      // Empty object = permission off or nothing observed: the caller omits the
+      // row. A row without `day` would be unattributable, so it is dropped too.
+      return r && typeof r.day === "string" ? ({ ...r, day } as DigitalSkillDaily) : null;
+    },
     dial: (phone) => p.dial({ phone }).then((r) => !!r?.ok),
     openApp: (key) => p.openApp({ app: key }).then((r) => !!r?.ok),
     getCircadian: async (day) => {
@@ -507,52 +594,83 @@ export function homeWidgetPayload(
 }
 
 /**
- * The one-shot alarm the record store says is armed, or null.
+ * Every one-shot alarm the record store says should still ring, soonest first.
  *
- * `dueAt` is the epoch the alarm must ring at; `at` is only when the senior
- * said it. A record written before `dueAt` existed encodes the epoch in its id
- * (`rec-alarm-<epoch>`), so an old row still reconciles.
+ * `dueAt` is the epoch the alarm must ring at; `at` is only when the senior said
+ * it. A record written before `dueAt` existed encodes the epoch in its id
+ * (`rec-alarm-<epoch>`), so an old row still reconciles. Alarms already past are
+ * dropped: they have rung (or were missed), and re-arming one would ring now.
  */
-export function armedOnceFromRecords(
-  rows: RecordEntry[],
-  now = Date.now()
-): { dueAt: number; label: string } | null {
-  const future = rows
-    .filter((r) => r.kind === "alarm")
-    .map((r) => {
-      const due = r.dueAt ?? Number(/^rec-alarm-(\d+)$/.exec(r.id)?.[1] ?? NaN);
-      return Number.isFinite(due) && due > now ? { dueAt: due, label: r.title || r.detail || "" } : null;
-    })
-    .filter((x): x is { dueAt: number; label: string } => x !== null);
-  if (!future.length) return null;
-  return future.reduce((a, b) => (b.dueAt < a.dueAt ? b : a)); // the next one wins
+export function armedAlarmsFromRecords(rows: RecordEntry[], now = Date.now()): ArmedAlarmRecord[] {
+  const out: ArmedAlarmRecord[] = [];
+  for (const r of rows) {
+    if (r.kind !== "alarm") continue;
+    const due = r.dueAt ?? Number(/^rec-alarm-(\d+)$/.exec(r.id)?.[1] ?? NaN);
+    if (!Number.isFinite(due) || due <= now) continue;
+    out.push({ slot: r.id, dueAt: due, label: r.title || r.detail || "" });
+  }
+  out.sort((a, b) => a.dueAt - b.dueAt);
+  return out;
 }
 
-export type AlarmReconcileAction = "arm" | "cancel" | "ok" | "unknown";
+/** One alarm the record store believes is armed. `slot` is the record id. */
+export interface ArmedAlarmRecord {
+  slot: string;
+  dueAt: number;
+  label: string;
+}
 
 /**
- * Decides what to do after a restart / cold start, comparing what the record
- * store believes with what the OS actually holds.
+ * What to do after a restart / cold start, comparing the record store with what
+ * the OS actually holds — for EVERY alarm, not just the next one.
+ *
+ * Matching is by `at` (the ringing moment), not by slot string: an older shell
+ * reports no slot, and the moment is the thing the senior actually asked for.
  *
  * The asymmetry is deliberate and is the whole point of this function:
- *   - **missing alarm → arm it.** Setting the same PendingIntent twice is
- *     idempotent (FLAG_UPDATE_CURRENT), so a redundant arm costs nothing.
- *   - **orphan alarm → leave it alone.** A live alarm with no record may just
- *     mean the record was pruned; cancelling it silently is a missed dose,
- *     which is the one failure this product must not add.
- *   - **fired alarm still registered → cancel.** `at <= now` can never ring
- *     again, and a stale PendingIntent would make `getScheduledAlarms` lie.
+ *   - **missing alarm → arm it.** Arming the same slot twice is idempotent
+ *     (the shell reuses the request code), so a redundant arm costs nothing.
+ *   - **orphan alarm in the future → leave it alone.** A live alarm with no
+ *     record may just mean the record was pruned; cancelling it silently is a
+ *     missed dose, the one failure this product must not add.
+ *   - **orphan alarm already past → cancel.** `at <= now` can never ring again,
+ *     and a stale PendingIntent would make `getScheduledAlarms` lie.
  */
-export function reconcileOnceAlarm(
-  record: { dueAt: number; label: string } | null,
-  armed: { at: number; label: string } | null,
+export interface AlarmReconcilePlan {
+  arm: ArmedAlarmRecord[];
+  /** slots to cancel (past, and no longer backed by a record) */
+  cancel: string[];
+  /** how many records the OS already agrees with — for the selfcheck + logs */
+  agree: number;
+}
+
+export function reconcileAlarms(
+  records: ArmedAlarmRecord[],
+  armed: ArmedOnce[],
   now = Date.now()
-): { action: AlarmReconcileAction; at?: number; label?: string } {
-  if (record) {
-    if (armed && armed.at === record.dueAt) return { action: "ok" };
-    return { action: "arm", at: record.dueAt, label: record.label };
+): AlarmReconcilePlan {
+  const byAt = new Map<number, ArmedOnce>();
+  for (const a of armed) byAt.set(a.at, a);
+
+  const plan: AlarmReconcilePlan = { arm: [], cancel: [], agree: 0 };
+  const wantedAt = new Set<number>();
+
+  for (const rec of records) {
+    wantedAt.add(rec.dueAt);
+    if (byAt.has(rec.dueAt)) plan.agree += 1;
+    else plan.arm.push(rec);
   }
-  if (armed && armed.at <= now) return { action: "cancel" };
-  return { action: "unknown" };
+
+  for (const a of armed) {
+    if (wantedAt.has(a.at)) continue;
+    if (a.at <= now) {
+      // Only a slot we can address may be cancelled. An older shell's alarm with
+      // no slot is the legacy single one, and `cancelOnce()` still reaches it.
+      if (a.slot) plan.cancel.push(a.slot);
+    }
+    // In the future and unbacked: leave it (see the asymmetry note above).
+  }
+
+  return plan;
 }
 

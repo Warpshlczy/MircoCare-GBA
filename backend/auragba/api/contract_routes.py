@@ -16,6 +16,7 @@ import time
 from fastapi import APIRouter, Depends, HTTPException
 
 from ..contract import (
+    AgentAuditRequest,
     AgentCard,
     AgentIntentRequest,
     AgentTurnRequest,
@@ -46,8 +47,9 @@ from ..llm.errors import (
 )
 from ..audit import audit_log
 from ..config import ENGINE_VERSION, FEATURE_SET_VERSION, FUSION_VERSION
+from ..contract import AUDIT_SUMMARY_MAX
 from ..crypto import encrypt_text
-from ..privacy import device_id, input_digest, scrub_props
+from ..privacy import device_id, input_digest, scrub_props, scrub_summary
 from ..screening import ingest_session
 from ..store import store
 from ..notify import dispatch as notify_dispatch
@@ -291,6 +293,50 @@ def post_behaviour_daily(body: BehaviourDailyEnvelope, dev: str = Depends(device
     can tell "not measured" apart from "zero".
     """
     store.set_doc(dev, f"behaviour:{body.behaviour.day}", body.model_dump())
+
+
+@router.post("/agent/audit", status_code=204)
+def post_agent_audit(body: AgentAuditRequest, dev: str = Depends(device_id)) -> None:
+    """What the assistant DID on the senior's phone: one row per tool invocation.
+
+    Answers the question `records` cannot: `records` says "he took a dose at
+    08:12", this says "at 15:02 he asked me to transfer money and I refused".
+    The refusal rows are the most valuable output of the whole agent — they are
+    the difference between "it was silent" and "it was working".
+
+    Idempotent per `entry.id`, because the outbox is at-least-once: a send that
+    times out after the server stored it is replayed verbatim. Without this the
+    family screen would show two "鬧鐘" lines for one alarm set.
+
+    `summary` is re-scrubbed here even though the device already redacted it —
+    see privacy.py#scrub_summary. Never rejected for length: a 422 would be
+    retried for a week and block every later row in the same queue.
+    """
+    if not body.entries:
+        # An empty batch is what a client that lost its rows sends. 204, not 422:
+        # rejecting it would wedge the queue head forever.
+        return
+
+    oldest = min(e.at for e in body.entries)
+    seen = {
+        str(row.get("id"))
+        for row in store.history(dev, "agentAudit", since_ms=max(0, oldest - 1))
+    }
+    for entry in body.entries:
+        if entry.id in seen:
+            continue
+        seen.add(entry.id)  # also de-duplicates repeats inside one batch
+        store.record(
+            dev,
+            "agentAudit",
+            {
+                "id": entry.id,
+                "at": entry.at,
+                "tool": entry.tool[:48],
+                "outcome": entry.outcome,
+                "summary": scrub_summary(entry.summary, AUDIT_SUMMARY_MAX),
+            },
+        )
 
 
 @router.post("/reminders/escalate", status_code=204)

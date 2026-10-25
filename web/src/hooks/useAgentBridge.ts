@@ -29,11 +29,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { appendTurn, isLlmReady, runTurn } from "@/lib/agent";
 import type { RecentTurn } from "@/lib/agent";
 import { getHealth, postAgentTurn } from "@/lib/api";
+import { recordAudit } from "@/lib/auditStore";
 import { flushClosedDay } from "@/lib/behaviourStore";
 import { pruneCareHistory, markCareDayOpened, MEASURED_DWELL_MS } from "@/lib/careStore";
 import { emergencyContacts } from "@/lib/contactStore";
 import { distanceFromHomeM, startFenceWatch } from "@/lib/geofenceStore";
-import { bridge, armedOnceFromRecords, reconcileOnceAlarm } from "@/lib/native";
+import { bridge, armedAlarmsFromRecords, reconcileAlarms } from "@/lib/native";
 import { flushOutboxOnce, startOutboxAutoFlush } from "@/lib/outboxRunner";
 import { enqueue } from "@/lib/outboxStore";
 import { listRecords, saveRecord } from "@/lib/recordStore";
@@ -197,12 +198,12 @@ export function useAgentBridge(deps: AgentBridgeDeps): AgentBridge {
       void pruneCareHistory().catch(() => {});
     })();
 
-    // Alarms: does the OS still hold what `records` believes?
+    // Alarms: does the OS still hold what `records` believes — for EVERY alarm?
     //
     // The record is written first and the OS call second, so a process death in
     // between leaves a record with no armed alarm — "聽日八點叫我食藥" would
-    // never ring, and nothing on screen would say so. `reconcileOnceAlarm`
-    // re-arms in that direction only; it never cancels an alarm that has no
+    // never ring, and nothing on screen would say so. `reconcileAlarms` re-arms
+    // in that direction only; it never cancels a FUTURE alarm that has no
     // record, because a pruned row is not evidence that he changed his mind.
     void (async () => {
       const b = bridge();
@@ -213,11 +214,14 @@ export function useAgentBridge(deps: AgentBridgeDeps): AgentBridge {
           b.getScheduledAlarms(),
           listRecords().catch(() => [] as RecordEntry[]),
         ]);
-        const plan = reconcileOnceAlarm(armedOnceFromRecords(rows, now), armed.once, now);
-        if (plan.action === "arm" && typeof plan.at === "number") {
-          await b.scheduleOnce(plan.at, plan.label);
-        } else if (plan.action === "cancel") {
-          await b.cancelOnce();
+        const plan = reconcileAlarms(armedAlarmsFromRecords(rows, now), armed.once, now);
+        // Re-arming an already-armed slot is idempotent (same request code), so
+        // a redundant arm is harmless; a missed one is a missed dose.
+        for (const rec of plan.arm) {
+          await b.scheduleOnce(rec.dueAt, rec.label, rec.slot);
+        }
+        for (const slot of plan.cancel) {
+          await b.cancelOnce(slot);
         }
       } catch {
         /* a broken bridge must never block the senior from talking */
@@ -268,10 +272,12 @@ export function useAgentBridge(deps: AgentBridgeDeps): AgentBridge {
               return pos ?? null;
             }
           : undefined,
-        // One-shot alarm. Without this the executor reports "我設唔到鬧鐘" —
-        // which is true on the web, and honest on a phone with the permission off.
+        // One-shot alarm, addressed by SLOT so several can coexist. Without the
+        // slot the shell's single fixed request code made the second "叫我九點"
+        // silently replace the first while `records` still listed both — a
+        // screen that showed two alarms while only one was armed.
         setAlarm: bridge()
-          ? async (atMs, label) => (await bridge()?.scheduleOnce(atMs, label)) ?? false
+          ? async (atMs, label, slot) => (await bridge()?.scheduleOnce(atMs, label, slot)) ?? false
           : undefined,
         // The number always comes from the health card (cached for offline);
         // the model's name is only a lookup key.
@@ -291,6 +297,12 @@ export function useAgentBridge(deps: AgentBridgeDeps): AgentBridge {
           recordsRef.current = [...recordsRef.current.filter((r) => r.id !== entry.id), entry];
         },
         onMedTaken: d.onMedTaken,
+        // Every executed step leaves one row in `agent_audit` and one item in the
+        // outbox. Fire-and-forget: auditStore swallows its own failures, and a
+        // report about the product must never be able to break the product.
+        recordAudit: (e) => {
+          void recordAudit({ ...e, locale: d.locale });
+        },
       });
 
       const out = await runTurn(text, {
@@ -305,6 +317,11 @@ export function useAgentBridge(deps: AgentBridgeDeps): AgentBridge {
         runTool: runner.run,
         confirm: d.onConfirm,
         confusedStreak: confusedRef.current,
+        // Calls that never reach the executor (a safety refusal, a hallucinated
+        // tool, a senior who said 唔使) are audited from the orchestrator side.
+        onAudit: (e) => {
+          void recordAudit({ ...e, locale: d.locale });
+        },
       });
 
       if (!out.handled) return false;

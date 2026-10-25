@@ -25,6 +25,8 @@ public class OnceAlarmReceiver extends BroadcastReceiver {
 
     static final String ACTION_ONCE = "com.auragba.app.ONCE_ALARM";
     static final String EXTRA_LABEL = "label";
+    /** Which alarm fired — the slot must be retired, and the others must not be. */
+    static final String EXTRA_SLOT = "slot";
 
     private static final String CHANNEL_ID = "memomate_alarm";
     private static final int NOTIF_ID = 8805;
@@ -32,12 +34,16 @@ public class OnceAlarmReceiver extends BroadcastReceiver {
 
     @Override
     public void onReceive(Context ctx, Intent intent) {
-        AlarmScheduler.clearOnce(ctx); // it has fired; a reboot must not replay it
+        // Retire ONLY the slot that fired; a reboot must not replay it, and the
+        // senior's other alarms must survive this one.
+        String slot = intent == null ? null : intent.getStringExtra(EXTRA_SLOT);
+        String key = slot == null || slot.isEmpty() ? AlarmScheduler.DEFAULT_SLOT : slot;
+        AlarmScheduler.clearOnce(ctx, key);
         String label = intent == null ? "" : intent.getStringExtra(EXTRA_LABEL);
-        postNotification(ctx, label == null ? "" : label.trim());
+        postNotification(ctx, label == null ? "" : label.trim(), key);
     }
 
-    private void postNotification(Context ctx, String label) {
+    private void postNotification(Context ctx, String label, String slot) {
         NotificationManager nm = (NotificationManager) ctx.getSystemService(Context.NOTIFICATION_SERVICE);
         if (nm == null) return;
 
@@ -71,7 +77,10 @@ public class OnceAlarmReceiver extends BroadcastReceiver {
                 .build();
 
         try {
-            nm.notify(NOTIF_ID, n);
+            // One notification id PER SLOT: with several alarms armed, a fixed id
+            // would make the second firing silently replace the first one's
+            // notification, and the senior would never see that he missed a dose.
+            nm.notify(NOTIF_ID + Math.abs(slot.hashCode() % 1000), n);
         } catch (SecurityException ignored) {
             // POST_NOTIFICATIONS revoked — nothing else to do here.
         }

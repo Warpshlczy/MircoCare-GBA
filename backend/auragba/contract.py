@@ -453,6 +453,60 @@ class RecordSummary(_Base):
     lastAt: int | None = Field(default=None, ge=0)
 
 
+# --------------------------------------------------------------------------- #
+# Agent audit trail — "what the assistant itself did" (issue #2 A5 follow-up).
+#
+# Two streams, two questions, deliberately not merged:
+#   records      -> what HE did (a dose taken, a measurement)
+#   agent_audit  -> what IT did (set an alarm, opened an app, refused a transfer)
+#
+# The refusal line is the point: "he asked me to transfer money and I said no"
+# is the difference between "the assistant was silent" and "it was working".
+# --------------------------------------------------------------------------- #
+# Multi-line on purpose: `web/src/selfcheck.ts` parses this literal to assert it
+# matches `types.ts#AgentAuditOutcome` value for value. A single-line form would
+# silently skip the check (the parser needs a closing `]` on its own line).
+AgentAuditOutcome = Literal[
+    "ok",
+    "refused",
+    "failed",
+]
+
+#: The width the family screen gives one row. The device already truncates to
+#: this; the server truncates again because "the client did it" is not a control.
+AUDIT_SUMMARY_MAX = 14
+
+
+class AgentAuditEntry(_Base):
+    """One tool invocation, as the family may see it.
+
+    `summary` is generated on the device from the TOOL NAME and the OUTCOME only
+    — never from the call's arguments — so a phone number, a name or a task text
+    cannot reach this model through the normal path. It is re-scrubbed on write
+    anyway (routes#_scrub_summary): defence in depth, not the primary control.
+    """
+
+    id: str = Field(min_length=1, max_length=120)
+    at: int = Field(ge=0)
+    tool: str = Field(min_length=1, max_length=48)
+    outcome: AgentAuditOutcome
+    # NOT `max_length=14` on purpose. A device that sends a 15-character summary
+    # would get a 422, and the outbox retries a 422 forever (backoff caps at 5
+    # min, TTL 7 days) — one bad row would poison the whole queue. Truncate on
+    # write instead of rejecting; the invariant is enforced where it is used.
+    summary: str = Field(default="", max_length=200)
+
+
+class AgentAuditRequest(_Base):
+    """Body of POST /agent/audit — a batch, because the outbox replays a batch.
+
+    An empty list is valid and is a no-op: it is what an older client that lost
+    its rows would send, and answering 422 to it would block the queue.
+    """
+
+    entries: list[AgentAuditEntry] = Field(default_factory=list, max_length=100)
+
+
 class AssistantMessage(_Base):
     role: Literal["system", "user", "assistant"]
     content: str

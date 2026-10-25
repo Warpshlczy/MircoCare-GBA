@@ -254,6 +254,48 @@ export function circadianRow(day: string, raw: Partial<CircadianDaily> | null | 
 }
 
 /**
+ * Validates a native usage-stats snapshot into a row C will accept, or null.
+ *
+ * Two gates, both about honesty rather than validation:
+ *   1. NOTHING MEASURED → omit the row. Zero app switches on a day the phone was
+ *      never unlocked is not "0 switches = decline", it is "we did not look".
+ *   2. `opFailRate` is ALWAYS null. It needs accessibility events, which this app
+ *      never requests; a 0 there would be read by C's model as "no operation
+ *      failed", the strongest possible claim about a thing we cannot see.
+ *
+ * The permission itself is the caller's gate (`hasUsageAccess`) — this function
+ * assumes the caller already decided reading it is allowed.
+ */
+export function digitalSkillRow(
+  day: string,
+  raw: Partial<DigitalSkillDaily> | null | undefined
+): DigitalSkillDaily | null {
+  if (!raw) return null;
+  if (raw.day && raw.day !== day) return null;
+
+  // A negative value is nonsense, and clamping it to 0 would manufacture a
+  // "measured zero" — the exact lie the rest of this file exists to prevent.
+  // Treat it as unmeasured instead.
+  const count = (v: unknown): number | null =>
+    typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.round(v) : null;
+
+  const switches = count(raw.appSwitchCount);
+  const delay = count(raw.firstTouchDelayMs);
+
+  // Both unmeasured: the row would carry nothing but the two nulls above, and an
+  // empty row is indistinguishable from a measured quiet day in every aggregate.
+  if (switches === null && delay === null) return null;
+
+  return {
+    id: `ds-${day}`,
+    day,
+    appSwitchCount: switches,
+    opFailRate: null,
+    firstTouchDelayMs: delay,
+  };
+}
+
+/**
  * The POST /behaviour/daily body. `circadian` / `digitalSkill` are OMITTED (not
  * nulled) when their source did not observe anything — C's envelope allows that,
  * and an empty row would be indistinguishable from "he never woke at night".

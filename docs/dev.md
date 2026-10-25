@@ -552,12 +552,17 @@ mv public/live2d/model.manifest.json /tmp/ && npm run build; mv /tmp/model.manif
 | 10 | 吃药上报被 mock 规划器改成建任务（#7） | `runTurn`：本地计划含 `log_medication` 且模型没选它时，**以本地计划为准**；模型选了 `log_medication` 则保留其 `name/note` | selfcheck：mock 返回 `create_task` → 实际执行 `log_medication`；模型给药名时药名保留 |
 | 11 | 小组件「今日記錄」行与深链（#8） | `homeWidgetPayload(..., todayLog)` 第 5 参；`onForeground` 先 `planOpen(e.open)` 再 `planForeground(reason)`，`kind === "records"` → 直接展示记录卡（不开麦） | 点 widget 记录行 → 只出「今日記錄」卡；不阻塞原有 widget 点击听话 |
 | 12 | 家属端今日记录与删号（#2/#7） | 家属端展示 `recordsToday.kinds.med`（缺省显示「暂无上报」，不写 0）；新增「删除账号」：`flushOutboxOnce → wipeLocalData → deleteAccount` | 删号后本机 11 个 store 清空、`deviceId` 保留；未上报时不显示 0 |
+| 13 | **`set_alarm` 只能有一个闹钟**（第二次静默覆盖第一个） | `AlarmScheduler` 改**多槽**：槽位 = 记录 id（`rec-alarm-<dueAt>`），作为 PendingIntent 的 **data URI**（`filterEquals` 只比 data 不比 extras）+ 每槽 prefs 行 + `readOnceAll()`；`getScheduledAlarms().once` 由对象改为**数组**；`reconcileOnceAlarm` → `reconcileAlarms`（集合：arm[]/cancel[]/agree）；`OnceAlarmReceiver` 只退掉自己那一槽，通知 id 按槽派生 | 连设 08:00 与 09:00 两个都响；`records` 与 OS 数量一致；取消一个不影响另一个；重启后两槽都恢复；旧装机的单槽 prefs 自动迁移为 `legacy` 槽 |
+| 14 | **`agent_audit` 是空表**（家属端看不到「今天小忆做了什么」，`ui_tap_text` 无审计不可放开） | 新增端侧 `lib/audit.ts`（纯：`auditSummary` 只由**工具名+结果**生成，≤14 字、零数字）+ `lib/auditStore.ts`（写 `agent_audit` → outbox `agentAudit`）；`toolExec.run()` 统一包一层，每个执行过的步骤记一行，`agent.ts#onAudit` 补记**没执行**的（安全拒绝 / 幻觉工具 / 长者说唔使）；后端 `POST /agent/audit`（批量、按 id 幂等、服务端二次脱敏 `privacy.py#scrub_summary`）+ `GET /caregiver/audit?day=`，并挂进 `/caregiver/overview.agentAudit` | 一次 `set_alarm` 后 `agent_audit` 有行且家属端可见；「帮我转账」→ `outcome: refused`（**不是 failed**，否则安全拦截看起来像故障）；电话/坐标/错误码不上屏；重放不重复计数 |
+| 15 | **`digitalSkill` 通道零产出**（三流融合实际只有两流） | `AndroidManifest` 加 `PACKAGE_USAGE_STATS`（AppOps 特殊权限，只声明不索取）+ `DigitalSkillRecorder`（`UsageStatsManager.queryEvents` 数**包间切换**，非事件数）；`firstTouchDelayMs` = 解锁→当天首个前台应用；**`opFailRate` 恒 null**（需 accessibility 事件，本应用不申请）；`behaviour.ts#digitalSkillRow` 校验 + 进 envelope；`getCircadian` 同款「没测到就不发这一行」 | 未授权时不发该行、不弹设置页；`appSwitchCount` 真机有数；`opFailRate` 恒为 null 而非 0。**注意：`fusion3_*` 权重 0.15/0.65/0.20 与风险阈值 0.409/0.521 是按两流校准的，该通道真正有数之后必须重扫**（`backend/scripts/eval_fusion.py`） |
 
 > **T3-Y 承接句暂缓**：它会改变轮次语义（主句后追加一句并自动开麦），与本次「叫名字才打断/接手」的模型冲突，且必须真机验证节奏。等分段播放真机验收通过后再决定是否启用；T3-Z（`replyFollowup` 契约字段）继续不动。
 >
 > **`spokenSegments()` 落地位置**：B 的 `38a8763` 已合入 main，A 侧临时实现已丢弃，统一使用 `lib/speech.ts` 中 B 的版本（`spokenSegments(text, opts)`）；`audio.ts` 只调用不带 opts 的默认形态。
 
 > 联动缺口（已提 issue）：C 侧 `/agent/turn` 需接受 `log_medication` / `compose_card` 与脚本卡契约；B 侧桌面小组件需展示记录卡、原生闹钟持久化对齐、后台跌倒采样使用同一阈值。
+
+> **待 A 接线（第 13–15 条落地后）**：`web/src/app/caregiver/page.tsx` 需要把 `CaregiverOverview.agentAudit`（`api.ts` 已加类型）渲染成「今日小忆做了什么」一屏——每条 `{at, outcome, summary}`，`outcome==="refused"` 用中性/正向色而不是红色（那是拦截成功，不是故障），空列表显示「今日未有小忆嘅动作」而不是 0。此处 `page.tsx` / `caregiver/page.tsx` 仍属 A，B 未改动。
 >
 > 本轮触碰了共享契约文件（`types.ts` / `db.ts` / `cards.ts` / `tools.ts` / `toolrun.ts` / `toolExec.ts`）：按 §0.2 流程本应先 review 再实现，A 端为不阻塞演示先行落地，**已在 issue 中逐条列出差异**，B/C 确认后以本表为准。
 

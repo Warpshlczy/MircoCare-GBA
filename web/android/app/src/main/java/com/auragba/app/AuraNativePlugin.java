@@ -264,26 +264,38 @@ public class AuraNativePlugin extends Plugin {
     /**
      * One-shot alarm. `at` is epoch ms computed on the JS side (the model only
      * reports a clock time; see toolExec.ts#alarmAtFrom for why).
+     *
+     * `slot` names which alarm this is, and several may be armed at once — the
+     * JS side passes the record id. A missing slot falls back to the legacy
+     * single slot instead of failing: an older WebView must keep working.
      */
     @PluginMethod
     public void scheduleOnce(PluginCall call) {
         Long at = call.getLong("at");
         String label = call.getString("label", "");
+        String slot = call.getString("slot", AlarmScheduler.DEFAULT_SLOT);
         JSObject ret = new JSObject();
         if (at == null) {
             ret.put("ok", false);
             call.resolve(ret);
             return;
         }
-        boolean ok = AlarmScheduler.scheduleOnce(getContext(), at, label);
+        boolean ok = AlarmScheduler.scheduleOnce(getContext(), at, label, slot);
         ret.put("ok", ok);
+        ret.put("slot", AlarmScheduler.DEFAULT_SLOT.equals(slot) ? null : slot);
         ret.put("exact", AlarmScheduler.wasExact(getContext()));
         call.resolve(ret);
     }
 
+    /**
+     * Cancels ONE slot. Without a slot this cancels the legacy single alarm only;
+     * it never clears every alarm, because a caller that lost its slot id must
+     * not be able to silence the doses the senior depends on.
+     */
     @PluginMethod
     public void cancelOnce(PluginCall call) {
-        AlarmScheduler.cancelOnce(getContext());
+        String slot = call.getString("slot", AlarmScheduler.DEFAULT_SLOT);
+        AlarmScheduler.cancelOnce(getContext(), slot);
         call.resolve();
     }
 
@@ -301,8 +313,10 @@ public class AuraNativePlugin extends Plugin {
         // Absent key = nothing armed; the JS mapper normalises absent to null.
         JSObject daily = AlarmScheduler.readDaily(getContext());
         if (daily != null) ret.put("daily", daily);
-        JSObject once = AlarmScheduler.readOnce(getContext());
-        if (once != null) ret.put("once", once);
+        // `once` is an ARRAY since multi-slot: several alarms can be armed at
+        // once, and a single object here is what made the second alarm invisible
+        // to the reconciler while `records` still listed both.
+        ret.put("once", AlarmScheduler.readOnceAll(getContext()));
         call.resolve(ret);
     }
 
@@ -398,6 +412,64 @@ public class AuraNativePlugin extends Plugin {
         ret.put("nightWakeCount", snap.nightWakeCount);
         ret.put("chargingHours", snap.chargingHours);
         call.resolve(ret);
+    }
+
+    /**
+     * Whether PACKAGE_USAGE_STATS is granted.
+     *
+     * Asked, never demanded — the JS layer only checks this to decide whether the
+     * `digitalSkill` row can be read at all, and never opens a settings screen on
+     * its own. See DigitalSkillRecorder for why an empty query is not an answer.
+     */
+    @PluginMethod
+    public void hasUsageAccess(PluginCall call) {
+        JSObject ret = new JSObject();
+        ret.put("ok", DigitalSkillRecorder.hasAccess(getContext()));
+        call.resolve(ret);
+    }
+
+    /**
+     * Opens the system usage-access list so a FAMILY member can grant it.
+     *
+     * An AppOps permission can never be granted programmatically — this only
+     * navigates. Falls back to the app's own settings page when the OEM hides the
+     * usage-access screen, so the tap is never a no-op.
+     */
+    @PluginMethod
+    public void openUsageAccessSettings(PluginCall call) {
+        JSObject ret = new JSObject();
+        boolean opened = false;
+        try {
+            Intent i = new Intent(android.provider.Settings.ACTION_USAGE_ACCESS_SETTINGS);
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            getContext().startActivity(i);
+            opened = true;
+        } catch (Exception e) {
+            opened = false;
+        }
+        if (!opened) {
+            try {
+                Intent i = new Intent(android.provider.Settings.ACTION_SETTINGS);
+                i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                getContext().startActivity(i);
+                opened = true;
+            } catch (Exception ignored) {
+                opened = false;
+            }
+        }
+        ret.put("ok", opened);
+        call.resolve(ret);
+    }
+
+    /**
+     * One day's usage-stats row, or EMPTY when the permission is off or nothing
+     * was observed — the JS side then omits the row instead of sending zeros.
+     */
+    @PluginMethod
+    public void getDigitalSkill(PluginCall call) {
+        String day = call.getString("day", CircadianRecorder.dayKey(System.currentTimeMillis()));
+        JSObject snap = DigitalSkillRecorder.snapshot(getContext(), day);
+        call.resolve(snap == null ? new JSObject() : snap);
     }
 
     // --- native TTS (boy timbre; no cloud, no text leaves the phone) --------

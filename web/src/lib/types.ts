@@ -417,6 +417,37 @@ export interface TaskEvent {
   doneAt?: number;
 }
 
+export type AgentAuditOutcome = "ok" | "refused" | "failed";
+
+/**
+ * One line of "what the assistant actually did on this phone today".
+ *
+ * Why a separate stream from `records`: `records` answers "what did HE do"
+ * (a dose taken, a measurement), this answers "what did IT do" (opened an app,
+ * tapped a button on his behalf, refused a transfer). The family screen needs
+ * both, and the two have different retention and different redaction rules.
+ *
+ * `summary` is generated ON THE DEVICE and is already redacted: no phone
+ * numbers, no coordinates, no error codes, at most AUDIT_SUMMARY_MAX characters.
+ * The server re-scrubs it anyway (contract.py#AgentAuditEntry) because "the
+ * client already did it" is not a privacy control.
+ */
+export interface AgentAuditEntry {
+  id: string;
+  at: number;
+  tool: string;
+  outcome: AgentAuditOutcome;
+  /** ≤ AUDIT_SUMMARY_MAX code points, already safe to show a family member */
+  summary: string;
+}
+
+/**
+ * Cap on the stored summary. Fourteen is not arbitrary: it is the width the
+ * family screen gives one row next to the tool name, and it is short enough
+ * that a leak of a full phone number (8 digits + prefix) cannot fit.
+ */
+export const AUDIT_SUMMARY_MAX = 14;
+
 export type OutboxKind =
   | "gait"
   | "screening"
@@ -433,7 +464,13 @@ export type OutboxKind =
    * thing about `records` that ever leaves the phone (issue #7); idempotent
    * server-side by (device, day, kind).
    */
-  | "recordSummary";
+  | "recordSummary"
+  /**
+   * Batch of `AgentAuditEntry`. Idempotent server-side by `entry.id`, because
+   * the outbox replays a batch whenever a send times out after the server had
+   * already stored it.
+   */
+  | "agentAudit";
 
 /**
  * One entry in the offline replay queue. Replay is at-least-once, so every
