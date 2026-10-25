@@ -25,6 +25,7 @@
 | 路径 | 归属 | 其他两人的正确做法 |
 |---|---|---|
 | `web/src/app/page.tsx` | **A 独占** | B 只通过 A 预埋的 `useAgentBridge()` 接缝接入；C 不碰前端 |
+| `web/src/app/caregiver/page.tsx` | **A** | 与 `page.tsx` 同一规则：这是家属端**视图**，只有 A 改。C 供数据（`/caregiver/*`），B 供 `api.ts` 类型与脱敏口径；B/C 想加一屏就提 issue 给 A，不要直接改 |
 | `web/src/components/Avatar.tsx`、`lib/viseme.ts`、`lib/proactive.ts`、`lib/interview.ts`、`lib/audio.ts`、`lib/speech.ts`、`lib/i18n.ts` | A | B/C 只读 |
 | `web/src/lib/tools.ts`、`lib/toolrun.ts`、`lib/geofence.ts`、`lib/activity.ts`、`lib/agent.ts`、`hooks/useAgentBridge.ts` | B | A 只调用其导出，不改内部 |
 | `web/src/lib/native.ts`、`web/android/**` | **B** | A 提需求给 B，不改 Java/原生契约实现 |
