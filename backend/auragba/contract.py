@@ -27,6 +27,9 @@ CardKind = Literal[
     # B's agent layer renders these; CardRenderer dispatches on data/html, not
     # kind. Missing values here would make FastAPI's response validation 500.
     "place", "alarm", "agentPlan",
+    # Durable on-device record ("今日食藥 08:12", issue #7). A record card MUST
+    # be structured `data`; the validators drop `html`, so no script is rendered.
+    "record",
 ]
 
 
@@ -430,6 +433,24 @@ class TaskEvent(_Base):
     source: Literal["voice", "reminder", "followup", "agent"]
     dueAt: int | None = None
     doneAt: int | None = None
+
+
+RecordKind = Literal["med", "alarm", "measure", "card"]
+
+
+class RecordSummary(_Base):
+    """Coarse daily record aggregate from the device (issue #7).
+
+    Deliberately carries no medication name, note or transcript: only
+    day + kind + count + last activity time. The client keeps the readable
+    records on-device and uploads this summary so the family screen can answer
+    "今日记录咗未" without receiving health text.
+    """
+
+    day: str = Field(pattern=_DAY)
+    kind: RecordKind
+    count: int = Field(ge=0, le=99)
+    lastAt: int | None = Field(default=None, ge=0)
 
 
 class AssistantMessage(_Base):

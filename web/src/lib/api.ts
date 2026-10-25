@@ -5,6 +5,7 @@ import type {
   AgentIntentRequest, AgentTurnRequest, AgentTurnResponse, TelemetryEvent,
   ConversationTurn, MedicationPlan, MedicationPlanRequest, ReminderKind,
   BehaviourDaily, CircadianDaily, DigitalSkillDaily, TaskEvent, GeofenceEvent, Contact,
+  HealthCardUpdate,
 } from "./types";
 
 export interface AssistantMessage { role: "system" | "user" | "assistant"; content: string; }
@@ -241,6 +242,50 @@ export async function postSos(e: SosEvent): Promise<SosAck> {
 export async function getHealthCard(): Promise<HealthCard> {
   return request("/health-card/me", { method: "GET" });
 }
+
+// ---------------------------------------------------------------------------
+// Family-side health card administration (C, issue #2/#3 governance batch).
+// All five are session-authenticated through `request()`; the 204s below are
+// handled by its `res.status === 204` branch (api.ts:146) — no body to parse.
+// The UI for these belongs to the caregiver page; this file is only the pipe.
+// ---------------------------------------------------------------------------
+export async function updateHealthCard(patch: HealthCardUpdate): Promise<HealthCard> {
+  return request<HealthCard>("/caregiver/health-card", { method: "PUT", body: JSON.stringify(patch) });
+}
+export async function deleteHealthCard(): Promise<void> {
+  await request<void>("/caregiver/health-card", { method: "DELETE" });
+}
+/** Drops one senior binding. 404 = already revoked; the caller treats both as done. */
+export async function revokePairing(seniorDeviceId: string): Promise<void> {
+  await request<void>(`/caregiver/pairing/${encodeURIComponent(seniorDeviceId)}`, { method: "DELETE" });
+}
+/**
+ * Erases the account, its pairings and (for a senior) the device store — 204.
+ * Local cleanup (which of the 10 IndexedDB stores to drop) is the caller's
+ * decision; `localStorage["auragba.deviceId"]` must SURVIVE (dev.md:82:
+ * changing it means a new device identity and a voided baseline).
+ */
+export async function deleteAccount(): Promise<void> {
+  await request<void>("/auth/me", { method: "DELETE" });
+}
+/**
+ * Weekly report PDF. Deliberately NOT `request()`: that helper JSON.parses the
+ * body, which would explode on binary. Blob so the caller can either download
+ * it or hand it to a viewer.
+ */
+export async function fetchWeeklyPdf(scope: "senior" | "caregiver"): Promise<Blob> {
+  const path = weeklyPdfPath(scope);
+  const res = await fetch(`${API_BASE}${path}`, {
+    credentials: "include",
+    headers: { "X-Device-Id": deviceId() },
+  });
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText} @ ${path}`);
+  return res.blob();
+}
+/** Path choice as a pure function — selfcheck asserts the mapping in Node. */
+export function weeklyPdfPath(scope: "senior" | "caregiver"): string {
+  return scope === "senior" ? "/reports/weekly/me.pdf" : "/caregiver/reports/weekly.pdf";
+}
 export async function assistantChat(req: AssistantChatRequest): Promise<AssistantChatResponse> {
   return request<AssistantChatResponse>(
     "/assistant/chat",
@@ -292,6 +337,13 @@ export interface HealthResponse {
   privacyMode?: string;
   /** "enabled" | "disabled-fallback" — the ONLY honest signal that a real planner is behind /agent/turn */
   llmIntegration?: string;
+  /**
+   * Target-population prevalence for PPV math (`AURA_DEPLOY_PREVALENCE`).
+   * `null`/absent = unconfigured: riskExplain then emits qualitative notes
+   * only and NEVER a PPV number (issue #3 §4). Non-null values are a modelling
+   * assumption and must be labelled as such in the UI.
+   */
+  deployPrevalence?: number | null;
   weather?: string;
   notForDiagnosis?: boolean;
 }

@@ -2746,6 +2746,29 @@ assert.equal(magnitude(3, 4, 0), 5);
     "declined 之后不许再说话"
   );
 
+  // ③½ 模型乱来（工具名不存在 / 参数坏）→ "未識做"。事情根本没发生，所以绝不
+  // 复述规划器的假成功；也不能落进 nothing 池——那是在要求长者重说，等于把
+  // 机器的错记到他头上（与 confusedRef 的注释是同一条原则）。
+  const bogusReply = composeReply({
+    ...base,
+    skipped: [{ name: "send_sms", reason: "invalid" }],
+    plannerReply: "好，我幫你記住咗。",
+  });
+  assert.ok(bogusReply.length > 0, "invalid 必须有话说，不能沉默");
+  assert.notEqual(bogusReply, "好，我幫你記住咗。", "事情没发生，不许复述规划器的假成功");
+
+  // 两个池必须不相交：各抽 40 次，invalid 的答案不允许出现在 nothing 的采样里。
+  const nothingLines = new Set<string>();
+  const unknownLines = new Set<string>();
+  for (let i = 0; i < 40; i += 1) {
+    nothingLines.add(composeReply(base));
+    unknownLines.add(composeReply({ ...base, skipped: [{ name: "send_sms", reason: "invalid" }] }));
+  }
+  assert.ok(unknownLines.size >= 3, `unknownTool 池覆盖不足：${[...unknownLines].join(" / ")}`);
+  for (const line of unknownLines) {
+    assert.ok(!nothingLines.has(line), `invalid 落进了 nothing 池（那是在要求长者重说）：${line}`);
+  }
+
   // ④ 规划器只是聊天 → 用它的句子，但要压成一句
   assert.equal(composeReply({ ...base, plannerReply: rambling }), "你今日聽得幾好，不過我見你講嘢少咗少少。");
 
@@ -2759,6 +2782,7 @@ assert.equal(magnitude(3, 4, 0), 5);
       const lines = [
         composeReply({ ...base, locale, executed: [{ name: "x", ok: false }], hadSteps: true }),
         composeReply({ ...base, locale, skipped: [{ name: "send_message", reason: "no_executor" }], hadSteps: true }),
+        composeReply({ ...base, locale, skipped: [{ name: "send_sms", reason: "invalid" }] }),
         composeReply({ ...base, locale }),
       ];
       for (const line of lines) {
@@ -2771,7 +2795,7 @@ assert.equal(magnitude(3, 4, 0), 5);
         );
       }
     }
-    assert.ok(seen.size >= 6, `${locale} 的随机池覆盖不足（只抽到 ${seen.size} 条），断言可能空转`);
+    assert.ok(seen.size >= 8, `${locale} 的随机池覆盖不足（只抽到 ${seen.size} 条），断言可能空转`);
   }
 
   // 工具朗读行：回读长者原话之后仍在预算内（这是最容易失控的一类）
@@ -2927,6 +2951,145 @@ assert.equal(magnitude(3, 4, 0), 5);
   assert.equal(rang.length, 0, "and nothing is dialled");
   assert.equal((ambiguous.message ?? "").includes("大仔"), true, "the senior hears who the two are");
   assert.equal((ambiguous.message ?? "").includes("細仔"), true);
+}
+
+
+// --- spokenSegments: 链式朗读的分段，不丢字 ---------------------------------
+{
+  const joined = (segs: string[]) => segs.join("").replace(/\s+/g, "");
+  const src = (t: string) => t.replace(/\s+/g, "");
+
+  // 空输入不产生一个空段：空串会让引擎"说了一段什么也没有的语音"。
+  assert.deepEqual(spokenSegments(""), []);
+  assert.deepEqual(spokenSegments("   "), []);
+
+  // 一句短话原样返回一段（不重排，不改标点 —— 原文就是长者看到的那句）。
+  assert.deepEqual(spokenSegments("好，我記低咗。"), ["好，我記低咗。"]);
+
+  // 紧急文案是两句，第一句的句号要留着：它给引擎降调，也给长者一个换气点。
+  const sos = spokenSegments("我仲未接到屋企人。你打 999。");
+  assert.equal(sos.length, 2);
+  assert.equal(sos[0], "我仲未接到屋企人。");
+  assert.equal(sos[1], "你打 999。");
+
+  // 硬不变量：分句不丢字、不重复。对不识字的长者，少读一个字就是少一件事。
+  for (const t of [
+    "我仲未接到屋企人。你打 999。",
+    "好，我記低咗：買牛奶同埋降壓藥，記得食。",
+    "今日天氣清涼，最低氣溫十八度，出門記得著多件衫，唔好冷親。",
+    "呢句冇任何標點符號但係真係好長好長要切成幾段先讀得完嘅一句話呀",
+    "血壓 138/85，心跳 72。",
+  ]) {
+    assert.equal(joined(spokenSegments(t)), src(t), `no character lost: ${t.slice(0, 10)}`);
+  }
+
+  // 每段装得下一次呼吸，且确实被切开了（不是整句一次合成）。
+  const long = "今日天氣清涼，最低氣溫十八度，出門記得著多件衫，唔好冷親。";
+  const segs = spokenSegments(long);
+  assert.ok(segs.length > 1, "a 29-character line must not be one segment");
+  for (const one of segs) assert.ok(spokenLength(one) <= SEGMENT_MAX, `segment too long: ${one}`);
+
+  // 没有任何停顿点的长句要均分：14/14/3 那种尾巴听起来像卡住了。
+  const noPunct = spokenSegments("呢句冇任何標點符號但係真係好長好長要切成幾段先讀得完嘅一句話呀");
+  const lens = noPunct.map(spokenLength);
+  assert.ok(noPunct.length > 1);
+  assert.ok(Math.max(...lens) - Math.min(...lens) <= 1, `unbalanced split: ${lens.join("/")}`);
+  assert.equal(joined(noPunct), src("呢句冇任何標點符號但係真係好長好長要切成幾段先讀得完嘅一句話呀"));
+
+  // 小数点不是句尾："36.8" 不能变成 "36." + "8"，否则体温会被读成两个数。
+  assert.equal(spokenSegments("體溫 36.8 度，正常。").join("").includes("36.8"), true);
+
+  // 只剩标点的碎片不单独成段：引擎不出声，却要白等 250ms。
+  const punct = spokenSegments("好！。 再見。");
+  assert.equal(
+    punct.every((one) => one.replace(/[。！？!?；;，、,：:…\s]/g, "").length > 0),
+    true,
+    "a punctuation-only piece must be glued to the previous segment"
+  );
+
+  // 段数封顶：尾巴并进最后一段，而不是念成一张清单。
+  const many = spokenSegments("一句。兩句。三句。四句。五句。六句。");
+  assert.equal(many.length, MAX_SEGMENTS);
+  assert.equal(joined(many), src("一句。兩句。三句。四句。五句。六句。"));
+
+  // 段间静音与每段上限是常量：audio.ts 与断言必须引用同一个数，不能各写一份。
+  assert.equal(SEGMENT_GAP_MS, 250);
+  assert.equal(SEGMENT_MAX, 14, "one segment must fit one caption line (13–14 字)");
+}
+
+// --- governance API pipe (C's issue #2/#3 batch; the UI belongs to A) --------
+{
+  // api.ts cannot be imported here either (extensionless ./types import);
+  // the source text is the assertion surface, same as the audio.ts seam above.
+  const api = readFileSync(new URL("./lib/api.ts", import.meta.url), "utf8");
+  const types = readFileSync(new URL("./lib/types.ts", import.meta.url), "utf8");
+
+  for (const call of [
+    '"/caregiver/health-card", { method: "PUT"',
+    '"/caregiver/health-card", { method: "DELETE"',
+    '`/caregiver/pairing/${encodeURIComponent(seniorDeviceId)}`, { method: "DELETE"',
+    '"/auth/me", { method: "DELETE"',
+    '"/reports/weekly/me.pdf"',
+    '"/caregiver/reports/weekly.pdf"',
+  ]) {
+    assert.ok(api.includes(call), `api.ts must call ${call}`);
+  }
+  for (const fn of [
+    "export async function updateHealthCard(",
+    "export async function deleteHealthCard(",
+    "export async function revokePairing(",
+    "export async function deleteAccount(",
+    "export async function fetchWeeklyPdf(",
+    "export function weeklyPdfPath(",
+  ]) {
+    assert.ok(api.includes(fn), `api.ts must export ${fn.slice(7)}`);
+  }
+  assert.ok(
+    api.includes("deployPrevalence?: number | null;"),
+    "HealthResponse carries deployPrevalence (null = no PPV numbers, issue #3 §4)"
+  );
+
+  // The PDF must bypass request(): that helper JSON.parses the body and would
+  // explode on binary. The scope→path mapping is a pure function so the two
+  // report surfaces can be pinned down here.
+  const pdf = /export async function fetchWeeklyPdf\([\s\S]*?\n\}/.exec(api);
+  assert.ok(pdf, "fetchWeeklyPdf exists");
+  assert.ok(pdf[0].includes("res.blob()"), "the PDF is read as a Blob, not parsed as JSON");
+  assert.ok(!pdf[0].includes("request<"), "the PDF must not go through the JSON request() helper");
+  const map = /export function weeklyPdfPath\([\s\S]*?\n\}/.exec(api);
+  assert.ok(
+    map && map[0].includes('"/reports/weekly/me.pdf"') && map[0].includes('"/caregiver/reports/weekly.pdf"'),
+    "both report scopes (senior self-read + caregiver) are mapped"
+  );
+
+  // PATCH semantics: the family edits one row at a time, so nothing may be
+  // required — and contacts keep their own endpoint (whole-table replace).
+  // The body is captured up to the interface's own closing brace; nested
+  // object types are stripped before the field split, or `phone: string`
+  // would masquerade as a required field of its own.
+  const hcu = /export interface HealthCardUpdate \{([\s\S]*?)\n\}/.exec(types);
+  assert.ok(hcu, "types.ts must declare HealthCardUpdate");
+  assert.ok(
+    /emergencyContact\?:\s*\{\s*name: string;\s*phone: string;?\s*\}/.test(types),
+    "emergencyContact keeps the {name, phone} shape (the `?` variant lives in HealthCardUpdate)"
+  );
+  const fields = hcu[1]
+    .replace(/\{[^}]*\}/g, "") // drop inline object types, keep the top-level fields
+    .split(";")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  assert.ok(fields.length >= 7, `HealthCardUpdate fields: ${fields.length}`);
+  for (const f of fields) {
+    assert.ok(/^[A-Za-z]+\?:/.test(f), `every HealthCardUpdate field must be optional: ${f}`);
+  }
+  assert.ok(!hcu[1].includes("contacts"), "contacts never ride the health-card update (own endpoint)");
+
+  // The outbox comment used to promise server-side gait dedup that did not
+  // exist yet; C is landing the marker (issue #2 B1). Keep it honest.
+  assert.ok(
+    !/backend already does for/.test(types),
+    "the stale 'backend already does for gait' claim must stay out of types.ts"
+  );
 }
 
 console.log("selfcheck: OK");

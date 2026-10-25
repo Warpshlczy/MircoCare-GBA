@@ -9,11 +9,10 @@
 //    丢的是句首：一段 10 秒的连续语音，听到句尾时前面已经掉了。这不是"听得累"，
 //    是工作记忆装不下。所以 24 字是**提示语**的上限，不是平均目标。
 //
-// 2. **字幕装不下**。A 的 `.caption` 是 48px / `-webkit-line-clamp: 2`；375px 屏
-//    宽下每行 6–7 个汉字 → 满打满算 13–14 字。任何超过 14 字的朗读行，长者
-//    "听到的"和"看到的"不是同一句话；而且 clamp 会补省略号，**看起来像说完了**。
-//    文案侧能做的是：一句不超一个呼吸，把字号/行数问题留给 A（issue #1 §2.2）。
-//    也就是说，本文件不解决截断，它只保证我们不再**亲手**制造一条注定被截的句子。
+// 2. **字幕装不下**。2026-10-25 之前 A 的 `.caption` 是 48px / 2 行，375px 屏宽
+//    下满打满算只有 13–14 字；现已改为 4 行 / 38px（大字档 5 行 / 48px），
+//    34 字的运行时上限可以完整显示。文案侧仍然保持"一句不超一个呼吸"，因为
+//    装得下不等于听得完（理由见第 1 条）。
 //
 // 3. **一次讲一件事**。两个工具都成功时，只报第一件。计划里 `sos` 排第一
 //    （`toolrun.ts` 的排序），所以"第一件"按构造就是最要紧的那件事；第二句
@@ -124,69 +123,100 @@ export function fitUtterance(text: string, hard = SPEECH_HARD_LIMIT): string {
   return clip(one, hard - 1);
 }
 
-// ---------------------------------------------------------------------------
-// Segmentation for playback (issue #6 · T2)
+// --------------------------------------------------------------------------- //
+// 分句朗读：把一句长话切成几段，链式播放，段间留一个换气
+// --------------------------------------------------------------------------- //
 //
-// `speak()` used to synthesize the whole line in one go. A 24-character line is
-// 5–6 seconds of continuous audio; by the time the senior hears the end, the
-// beginning is gone. Splitting at punctuation gives the engine (and the ear) a
-// breath, WITHOUT changing a single character of the content — `join("")` is
-// the original text. This is a playback concern, not a content one: the caption
-// still shows the whole line once.
-// ---------------------------------------------------------------------------
+// 为什么要分：引擎把整句一次合成时，句内的逗号几乎不产生停顿（中文 TTS 的
+// 韵律预测对书面标点很不敏感），长者听到的是一条没有换气的长音。分句后每段
+// 之间插入 `SEGMENT_GAP_MS` 的静音，停顿就由我们控制，而不是求引擎。
+//
+// 顺带解决两件工程问题：①部分引擎对超长文本会静默截断（说一半就结束），
+// 每段 ≤ `SEGMENT_MAX` 字可以规避；②字幕与语音按段对齐后，A 的 `.caption`
+// 不必一次吞下一整段长文。
+//
+// 一条硬不变量：**分句不丢字、不重复**。`segments.join("")` 必须等于原文
+// （忽略空白）。对不识字的长者，少读一个字就是少一件事。
 
-/** Silence between two synthesized segments (ms). */
+/** 段间静音。约一次换气的一半，够听出"他分开了两句"，又不会让对话卡住。 */
 export const SEGMENT_GAP_MS = 250;
-/** One segment ≈ one caption line, so a segment can be heard in one breath. */
+
+/** 一段的目标上限。14 字 ≈ 3 秒，正好是字幕一行的容量。 */
 export const SEGMENT_MAX = 14;
-/** More than this and it sounds like a shopping list, not speech. */
+
+/**
+ * 最多分几段。超过就把尾巴并入最后一段 —— 8 段独立朗读听起来像在念清单，
+ * 而且每段之间的 250ms 会把一句话拖成 5 秒的等待。
+ */
 export const MAX_SEGMENTS = 5;
 
-const SOFT_BREAK = "，、：,:, ";
+/** 可以在这些符号处切开（保留符号本身，它给引擎一个降调/停顿的提示）。 */
+const SOFT_BREAK = "，、,：: ";
 
-/** Split one over-long sentence at a soft break, or evenly when it has none. */
-function softSplit(sentence: string, max: number): string[] {
-  const chars = [...sentence];
-  if (chars.length <= max) return [sentence];
+export interface SegmentOptions {
+  maxSegment?: number;
+  maxSegments?: number;
+}
+
+/** 把一段超长文本硬切成 ≤max 的几块，优先落在软停顿上。 */
+function hardSplit(segment: string, max: number): string[] {
+  if (spokenLength(segment) <= max) return [segment];
+
+  const chars = [...segment];
+  const limit = Math.min(max, chars.length);
+  // 从 limit 往前找最近的软停顿，但不能退太多 —— 退过 1/3 就说明这句没有
+  // 可用的停顿点，硬切比切出一个 3 字的碎片更自然。
   let cut = -1;
-  for (let i = Math.min(max, chars.length - 1); i >= Math.ceil(max / 3); i -= 1) {
+  for (let i = limit - 1; i >= Math.ceil(max / 3); i -= 1) {
     if (SOFT_BREAK.includes(chars[i])) {
-      cut = i;
+      cut = i + 1; // 停顿符留在前一段末尾
       break;
     }
   }
-  if (cut === -1) {
-    // No usable pause: even slices. (14/14/3 leaves a 3-character stump that
-    // sounds like the engine stalled; 11/11/11 does not.)
+  if (cut <= 0) {
+    // 没有任何停顿点：均分，不要切出 "14/14/3" 那种尾巴 —— 最后 3 个字听起来
+    // 像卡住了，而长者在等的正是"这句话什么时候说完"。
     const parts = Math.ceil(chars.length / max);
-    const size = Math.ceil(chars.length / parts);
-    const out: string[] = [];
-    for (let i = 0; i < chars.length; i += size) out.push(chars.slice(i, i + size).join(""));
-    return out;
+    cut = Math.ceil(chars.length / parts);
   }
-  return [chars.slice(0, cut + 1).join(""), ...softSplit(chars.slice(cut + 1).join(""), max)];
+
+  const head = chars.slice(0, cut).join("").trim();
+  const tail = chars.slice(cut).join("").trim();
+  if (!tail) return head ? [head] : [];
+  return head ? [head, ...hardSplit(tail, max)] : hardSplit(tail, max);
 }
 
 /**
- * A line → the segments to synthesize, in order. PURE.
+ * 一句话 → 链式朗读的若干段。
  *
- * Invariant: `segments.join("")` equals the input ignoring whitespace. Missing a
- * character is missing a fact for someone who cannot read the caption.
+ * 用法（A 的 `audio.ts` 补丁）：逐段 `speak`，每段 `onend` 之后再发下一段，
+ * 段之间等 `SEGMENT_GAP_MS`。字幕仍然只显示**整句一次**——分段只喂给引擎。
  */
-export function spokenSegments(text: string): string[] {
-  const pieces: string[] = [];
-  for (const sentence of splitSentences(text)) pieces.push(...softSplit(sentence, SEGMENT_MAX));
+export function spokenSegments(text: string, opts: SegmentOptions = {}): string[] {
+  const max = Math.max(4, Math.floor(opts.maxSegment ?? SEGMENT_MAX));
+  const cap = Math.max(1, Math.floor(opts.maxSegments ?? MAX_SEGMENTS));
 
-  // A fragment of nothing but punctuation makes the engine silent for 250 ms.
-  const merged: string[] = [];
-  for (const piece of pieces) {
-    const meaningful = piece.replace(/[。！？!?；;，、：:,\s]/g, "");
-    if (!meaningful && merged.length > 0) merged[merged.length - 1] += piece;
-    else if (meaningful || merged.length === 0) merged.push(piece);
+  const pieces: string[] = [];
+  for (const sentence of splitSentences(text)) {
+    for (const p of hardSplit(sentence, max)) {
+      const trimmed = p.trim();
+      if (trimmed) pieces.push(trimmed);
+    }
   }
 
-  if (merged.length <= MAX_SEGMENTS) return merged;
-  const head = merged.slice(0, MAX_SEGMENTS - 1);
-  head.push(merged.slice(MAX_SEGMENTS - 1).join(""));
-  return head;
+  // 只有标点的碎片（"。"、"，"）单独成段毫无意义：引擎不出声，却要等 250ms。
+  // 挂回前一段，长度也会更接近一个呼吸。
+  const merged: string[] = [];
+  for (const p of pieces) {
+    const prev = merged[merged.length - 1];
+    if (prev !== undefined && /^[。！？!?；;，、,：:…]+$/.test(p)) {
+      merged[merged.length - 1] = prev + p;
+      continue;
+    }
+    merged.push(p);
+  }
+
+  if (merged.length <= cap) return merged;
+  // 段数封顶：尾巴并进最后一段。宁可最后一句长一点，也不要念成清单。
+  return [...merged.slice(0, cap - 1), merged.slice(cap - 1).join("")];
 }

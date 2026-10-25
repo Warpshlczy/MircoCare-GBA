@@ -142,7 +142,7 @@ export interface TurnOutcome {
  * should never hear the same line twice in a row (issue #2). These are only
  * used when the model cannot answer at all.
  */
-const COPY: Record<Locale, { refusedFallback: string[]; notWired: string[]; failed: string[]; nothing: string[] }> = {
+const COPY: Record<Locale, { refusedFallback: string[]; notWired: string[]; unknownTool: string[]; failed: string[]; nothing: string[] }> = {
   "zh-HK": {
     refusedFallback: [
       "呢個我做唔到，要你自己或者屋企人做。",
@@ -153,6 +153,11 @@ const COPY: Record<Locale, { refusedFallback: string[]; notWired: string[]; fail
       "呢個功能仲未接好，我記低咗，轉頭再試。",
       "呢樣嘢我暫時做唔到，已經記低咗。",
       "呢個掣仲未駁通，你遲啲再叫我試。",
+    ],
+    unknownTool: [
+      "呢樣我未識做，你講第二樣啦。",
+      "呢樣嘢我未學識，對唔住。",
+      "呢樣我未識搞，你叫屋企人幫你啦。",
     ],
     failed: [
       "有啲做唔到，你試多次或者叫屋企人幫手。",
@@ -176,6 +181,11 @@ const COPY: Record<Locale, { refusedFallback: string[]; notWired: string[]; fail
       "呢樣嘢我暫時做唔到，已經記低咗。",
       "呢個掣仲未駁通，你遲啲再叫我試。",
     ],
+    unknownTool: [
+      "呢樣我未識做，你講第二樣啦。",
+      "呢樣嘢我未學識，對唔住。",
+      "呢樣我未識搞，你叫屋企人幫你啦。",
+    ],
     failed: [
       "有啲做唔到，你試多次或者叫屋企人幫手。",
       "今次差少少，再講一次好嗎？",
@@ -197,6 +207,11 @@ const COPY: Record<Locale, { refusedFallback: string[]; notWired: string[]; fail
       "这个功能还没接好，我记下来了，回头再试。",
       "这个我暂时做不到，已经记下来了。",
       "这个按钮还没接好，您晚点再叫我试。",
+    ],
+    unknownTool: [
+      "这个我不会做，您说别的吧。",
+      "这个我还没学会，对不起。",
+      "这个我不会弄，您让家里人帮您吧。",
     ],
     failed: [
       "有些没做成，你再试一次或者让家里人帮忙。",
@@ -424,9 +439,12 @@ export interface ReplyParts {
  *      "有啲做唔到" 只会让他再问一次。
  *   ③ 他自己说了"唔使" → **不说话**。刚刚做完决定的人不需要被告知他做过决定。
  *   ④ 会做但这台机没接 → 说实话。绝不念规划器的"好，我幫你做咗"。
- *   ⑤ 规划器只是聊天 / 只推卡 → 用它那句，压成一句。
- *   ⑥ 有计划但一句都没说成 → 沉默（卡片会解释）。
- *   ⑦ 完全没有计划 → "我未聽得明"，这就是 `nothing`；但如果他上一轮也没被听懂
+ *   ⑤ 模型乱来（工具名不存在 / 参数坏）→ "呢樣我未識做"。同样绝不念规划器的
+ *      "好，我幫你記住咗"——那件事根本没有发生；也**不能**落到 `nothing` 池，
+ *      那是把机器的错记到长者头上（他会以为自己讲错了，然后换种说法再试）。
+ *   ⑥ 规划器只是聊天 / 只推卡 → 用它那句，压成一句。
+ *   ⑦ 有计划但一句都没说成 → 沉默（卡片会解释）。
+ *   ⑧ 完全没有计划 → "我未聽得明"，这就是 `nothing`；但如果他上一轮也没被听懂
  *      （`confusedStreak`），就不再要求他重说，直接给出口：叫屋企人帮。
  */
 export function composeReply(p: ReplyParts): string {
@@ -436,6 +454,7 @@ export function composeReply(p: ReplyParts): string {
   if (p.executed.length > 0) return pick(copy.failed);
   if (p.skipped.some((s) => s.reason === "declined")) return "";
   if (p.skipped.some((s) => s.reason === "no_executor")) return pick(copy.notWired);
+  if (p.skipped.some((s) => s.reason === "invalid")) return pick(copy.unknownTool);
   if (p.plannerReply) return fitUtterance(p.plannerReply);
   if (p.hadSteps) return "";
   if ((p.confusedStreak ?? 0) >= CONFUSED_ESCALATE_AFTER) return ESCAPE[p.locale];

@@ -17,10 +17,29 @@ from ..store import store
 from ..timeutil import day_key
 
 DAY_MS = 86_400_000
+# Kinds A writes locally and reports through `POST /records/summary` (issue #7).
+_RECORD_KINDS = ("med", "alarm", "measure", "card")
 
 
 def _day(ms: int) -> str:
     return day_key(ms)
+
+
+def records_today(store: object, device_id: str, now_ms: int | None = None) -> dict:
+    """Today's coarse on-device record counts for the family screen.
+
+    Only kinds the device actually reported appear: an absent kind means "not
+    reported", never 0 — same rule as the behaviour rollup. No medication name,
+    note or transcript is stored on this side.
+    """
+    day = _day(int(time.time() * 1000) if now_ms is None else now_ms)
+    kinds: dict[str, dict] = {}
+    for kind in _RECORD_KINDS:
+        document = store.get_doc(device_id, f"records_summary:{day}:{kind}")
+        if not document:
+            continue
+        kinds[kind] = {"count": document.get("count"), "lastAt": document.get("lastAt")}
+    return {"day": day, "kinds": kinds}
 
 
 def interaction_trend(store: object, device_id: str, now_ms: int | None = None) -> dict | None:
@@ -125,6 +144,8 @@ def overview(
         # rows predate the flag, so `None` means "unknown", never "sufficient".
         "sufficient": usable[-1].get("baselineSufficient") if usable else None,
         "interactionTrend": interaction_trend(store, device),
+        # "今日记录咗未" without shipping the readable records: coarse counts only.
+        "recordsToday": records_today(store, device),
         "screeningSessions": store.history(device, "screening_sessions")[-30:],
         "activityTrend": store.history(device, "gait")[-30:],
         "alerts": alerts[-30:],

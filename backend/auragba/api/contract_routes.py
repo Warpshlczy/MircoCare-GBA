@@ -28,6 +28,7 @@ from ..contract import (
     HealthCard,
     MedicationPlan,
     MedicationPlanRequest,
+    RecordSummary,
     ReminderEscalation,
     ScreeningSession,
     SosEvent,
@@ -319,6 +320,19 @@ def post_task_event(event: TaskEvent, dev: str = Depends(device_id)) -> None:
     """
     store.set_doc(dev, f"task_event:{event.id}", event.model_dump())
     logger.info("task_event %s state=%s source=%s", event.id, event.state, event.source)
+
+
+@router.post("/records/summary", status_code=204)
+def post_records_summary(body: RecordSummary, dev: str = Depends(device_id)) -> None:
+    """Coarse daily count for one record kind (issue #7).
+
+    The senior's readable records stay in the device's IndexedDB; this endpoint
+    receives only `{day, kind, count, lastAt}` — no medication name, note or
+    transcript. Keyed by (device, day, kind), so an at-least-once replay replaces
+    the same aggregate instead of adding a second count. The family screen reads
+    it through `/caregiver/overview#recordsToday`.
+    """
+    store.set_doc(dev, f"records_summary:{body.day}:{body.kind}", body.model_dump())
 
 
 # --------------------------------------------------------------------------- #

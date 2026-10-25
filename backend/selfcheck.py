@@ -43,8 +43,8 @@ from auragba.config import settings, validate_runtime  # noqa: E402
 from auragba.contract import (  # noqa: E402
     AgentCard, AgentIntentRequest, AgentTool, AgentTurnRequest, AssistantChatRequest,
     BehaviourDaily, BehaviourDailyEnvelope, Contact, ContactsRequest, ConversationTurn,
-    GaitWindow, GeofenceEvent, HealthCardUpdate, ReminderEscalation, ScreeningSession,
-    SosEvent, StreamScore, TaskEvent, TelemetryEvent, ToolCall,
+    GaitWindow, GeofenceEvent, HealthCardUpdate, ReminderEscalation, RecordSummary,
+    ScreeningSession, SosEvent, StreamScore, TaskEvent, TelemetryEvent, ToolCall,
 )
 from auragba.crypto import decrypt_text, encrypt_text  # noqa: E402
 from auragba.economics import estimate as economics  # noqa: E402
@@ -202,6 +202,20 @@ for _phrase in ("畀钱阿明", "买股票", "transfer money", "password"):
 
 no_registry = plan_turn(_turn("帮我记住", tools=[_TURN_TOOLS[0]]))
 assert no_registry.calls == [] and no_registry.reply, "no create_task in registry -> no call"
+
+# Issue #7: the two new tools' boundaries are taught only when registered, so an
+# older client cannot trigger an unknown-name call and lose the whole plan.
+from auragba.llm import prompts as prompts_mod  # noqa: E402
+
+_sys_new = prompts_mod.agent_turn_messages(
+    _turn("我食咗藥", tools=[AgentTool(name="log_medication"), AgentTool(name="compose_card")])
+)[0]["content"]
+assert "工具边界" in _sys_new and "log_medication" in _sys_new and "compose_card" in _sys_new
+assert "提醒（提醒我食藥）用 create_task" in _sys_new, (
+    "reported-taken vs reminder must be explicit"
+)
+_sys_old = prompts_mod.agent_turn_messages(_turn("帮我记住", tools=[_TURN_TOOLS[1]]))[0]["content"]
+assert "工具边界" not in _sys_old, "hints must not mention tools the caller never registered"
 
 assert _TURN_TOOLS[2].normalized()[0] == "call_contact", "OpenAI wrapper must normalise"
 
@@ -1140,6 +1154,42 @@ with tempfile.TemporaryDirectory() as tmp:
         contract_routes.store = _real_contract_store
     assert len(st.history("dev-t", "telemetry")) == 1, "replayed telemetry must be ingested once"
 
+# --- records summary: coarse daily aggregate only, replay-safe (issue #7) -----
+with tempfile.TemporaryDirectory() as tmp:
+    st = Store(Path(tmp))
+    _real_records_store = contract_routes.store
+    contract_routes.store = st
+    _rs_day = day_key(int(time.time() * 1000))
+    _rs_now = int(time.time() * 1000)
+    try:
+        contract_routes.post_records_summary(
+            RecordSummary(day=_rs_day, kind="med", count=2, lastAt=_rs_now), "dev-rs"
+        )
+        contract_routes.post_records_summary(  # outbox replay: replace, never add
+            RecordSummary(day=_rs_day, kind="med", count=2, lastAt=_rs_now), "dev-rs"
+        )
+        _rs_doc = st.get_doc("dev-rs", f"records_summary:{_rs_day}:med")
+        assert _rs_doc["count"] == 2 and _rs_doc["kind"] == "med"
+    finally:
+        contract_routes.store = _real_records_store
+
+    for _bad in (
+        {"day": _rs_day, "kind": "med", "count": -1},
+        {"day": "2026/10/25", "kind": "med", "count": 1},
+        {"day": _rs_day, "kind": "unknown", "count": 1},
+    ):
+        try:
+            RecordSummary(**_bad)
+        except Exception:
+            pass
+        else:
+            raise AssertionError(f"invalid RecordSummary accepted: {_bad}")
+    _record_card = AgentCard(
+        id="rec-1", kind="record", title="今日記錄", createdAt=0,
+        data={"headline": "食藥 08:12"},
+    )
+    assert _record_card.kind == "record", "CardKind must accept `record` (issue #7)"
+
 # --- geofence: `alert=false` stays silent but still feeds the weekly count ----
 with tempfile.TemporaryDirectory() as tmp:
     st = Store(Path(tmp))
@@ -1336,6 +1386,32 @@ with tempfile.TemporaryDirectory() as tmp:
     finally:
         (caregiver_routes.store, caregiver_routes.family_relations,
          caregiver_routes.require_role) = _real
+
+# --- caregiver overview: today's coarse record summary, absent kinds stay absent
+with tempfile.TemporaryDirectory() as tmp:
+    st = Store(Path(tmp))
+    import auragba.api.caregiver_routes as caregiver_routes  # noqa: E402
+
+    _real = (caregiver_routes.store, caregiver_routes.family_relations,
+             caregiver_routes.require_role, contract_routes.store)
+    caregiver_routes.store = contract_routes.store = st
+    caregiver_routes.family_relations = lambda p: [{"seniorDeviceId": "dev-rs"}]
+    caregiver_routes.require_role = lambda p, role: p
+    _rs_day_ov = day_key(int(time.time() * 1000))
+    try:
+        contract_routes.post_records_summary(
+            RecordSummary(day=_rs_day_ov, kind="med", count=2,
+                          lastAt=int(time.time() * 1000)), "dev-rs"
+        )
+        _ov_rs = caregiver_routes.overview(principal=SimpleNamespace(account_id="fam-rs"))
+        assert _ov_rs["recordsToday"]["day"] == _rs_day_ov
+        assert _ov_rs["recordsToday"]["kinds"]["med"]["count"] == 2
+        assert "alarm" not in _ov_rs["recordsToday"]["kinds"], (
+            "unreported kinds must be absent, never 0"
+        )
+    finally:
+        (caregiver_routes.store, caregiver_routes.family_relations,
+         caregiver_routes.require_role, contract_routes.store) = _real
 
 # Account deletion erases the account row and the senior's device store.
 from auragba.auth_store import AuthStore  # noqa: E402
