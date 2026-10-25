@@ -720,7 +720,20 @@ assert.equal(magnitude(3, 4, 0), 5);
   // Barge-in must not self-wake: the spoken greeting contains 「忆伴」.
   const speakNames = wake.slice(wake.indexOf("SPEAK_WAKE_NAMES"));
   assert.ok(!speakNames.includes('"忆伴"') && !speakNames.includes('"憶伴"'), "speak-time names must exclude 忆伴");
-  assert.ok(speakNames.includes('"小忆"'), "the senior can still interrupt by name");
+  // 2026-10-25 真机回归：朗读期间不再重新武装唤醒词（小米 ASR 重启会抢走 TTS 的
+  // 音频通路 → 时有时无），打断改为按「講嘢」按钮。这里断言的是**需求**而不是
+  // 旧机制 —— 旧版本断的是「叫名字仍能打断」，而那条能力在真机上已经关掉了，
+  // 留着它等于让测试替一个不存在的功能背书。
+  //
+  // 具体到点：讲的必须是 onTalk（長者唯一按得到的大按鈕）开头就打断，
+  // 而不是 page.tsx 里随便哪一处出现 interrupt()。
+  const talkAt = page.indexOf("const onTalk");
+  assert.ok(talkAt > 0, "onTalk must still exist — it is the only barge-in path");
+  assert.ok(
+    /const onTalk\s*=[\s\S]{0,240}?interrupt\(\)/.test(page.slice(talkAt, talkAt + 400)),
+    "the 講嘢 button must stop the reply before it opens the mic"
+  );
+  assert.ok(speakNames.includes('"小忆"'), "the narrow name set stays ready for the native AEC path");
   const sayable = readFileSync(new URL("./lib/i18n.ts", import.meta.url), "utf8") + readFileSync(new URL("./lib/interview.ts", import.meta.url), "utf8");
   for (const w of ["傻", "蠢", "笨", "又唔記得", "又忘了", "你問過", "你问过", "痴呆", "失智", "阿尔茨海默", "阿茲海默"]) {
     assert.ok(!sayable.includes(w), `no blaming / diagnostic word "${w}" in anything the assistant says`);
