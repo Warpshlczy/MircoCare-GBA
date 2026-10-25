@@ -343,6 +343,13 @@ export function planLocal(utterance: string): ToolCall[] {
   const text = (utterance ?? "").trim();
   if (!text) return [];
 
+  // SOS: an emergency must never wait for a model. Only the explicit cries map
+  // here — a fuzzy "救" would turn 救火/救援 into a page. The fuller emergency
+  // list lives in the backend `safety._EMERGENCY` and in `intent.ts#parseIntent`.
+  if (/(救救我|救我|救命|叫救護車|叫救护车|叫白車|叫白车|sos)/i.test(text)) {
+    return [{ name: "sos", args: { reason: "voice_emergency" } }];
+  }
+
   const destination = routeDestination(text);
   if (destination !== null) {
     return [{ name: "plan_route", args: destination ? { destination } : {} }];

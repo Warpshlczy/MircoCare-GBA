@@ -16,7 +16,8 @@ from ..contract import AgentCard, CardAction, CardData
 # Cantonese / Mandarin / English emergency markers. Deliberately conservative:
 # a false positive only shows the SOS card, which is safe.
 _EMERGENCY = (
-    "胸痛", "心口痛", "透唔到氣", "透唔到气", "呼吸困難", "呼吸困难", "抖唔到氣",
+    "救救我", "救我", "救命", "救命呀", "叫救護車", "叫救护车",
+    "胸痛", "心口痛", "胸口痛", "透唔到氣", "透唔到气", "呼吸困難", "呼吸困难", "抖唔到氣",
     "半邊身無力", "半边身无力", "半身不遂", "講唔到話", "讲不到话", "口齒不清",
     "暈低", "晕倒", "意識不清", "意识不清", "昏迷", "流血不止", "起唔到身",
     "跌倒", "跌低", "跌親", "仆低", "仆親", "仆亲", "摔親", "摔亲", "起不了身",

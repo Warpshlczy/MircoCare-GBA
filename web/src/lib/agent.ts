@@ -13,7 +13,7 @@
 // regression against the behaviour the app already had.
 
 import { localCardsFor } from "./cards.ts";
-import { isQuestion, parseIntent } from "./intent.ts";
+import { parseIntent } from "./intent.ts";
 import { fitUtterance } from "./speech.ts";
 import { planCalls, planLocal, refuseReason } from "./toolrun.ts";
 import { TOOLS } from "./tools.ts";
@@ -114,9 +114,10 @@ export interface AgentDeps {
    * this hook and that one together cover a turn exactly once — no path records
    * the same action twice, and none is silently missing.
    *
-   * `outOfScope` replies are deliberately NOT audited: "can you make me a PDF"
-   * produces no action at all, and filling the family's report with 「做唔到」
-   * for questions would bury the refusals that actually matter.
+   * A chat-only reply (no tool planned or executed) is deliberately NOT audited:
+   * a capability question like "can you make me a PDF" produces no action at all,
+   * and filling the family's report with refusals for questions would bury the
+   * refusals that actually matter.
    */
   onAudit?: (input: {
     tool: string;
@@ -162,7 +163,7 @@ export interface TurnOutcome {
  */
 const COPY: Record<
   Locale,
-  { refusedFallback: string[]; notWired: string[]; unknownTool: string[]; outOfScope: string[]; failed: string[]; nothing: string[] }
+  { refusedFallback: string[]; notWired: string[]; unknownTool: string[]; failed: string[]; nothing: string[] }
 > = {
   "zh-HK": {
     refusedFallback: [
@@ -179,12 +180,6 @@ const COPY: Record<
       "呢樣我未識做，你講第二樣啦。",
       "呢樣嘢我未學識，對唔住。",
       "呢樣我未識搞，你叫屋企人幫你啦。",
-    ],
-    // 能力边界：设备上真的没有这个工具。说"做不到"，并给一个人，不建待办。
-    outOfScope: [
-      "呢樣我真係做唔到，你叫屋企人幫你。",
-      "我未識做呢樣，要屋企人幫手。",
-      "呢件事超出我能力，你同屋企人講。",
     ],
     failed: [
       "有啲做唔到，你試多次或者叫屋企人幫手。",
@@ -213,11 +208,6 @@ const COPY: Record<
       "呢樣嘢我未學識，對唔住。",
       "呢樣我未識搞，你叫屋企人幫你啦。",
     ],
-    outOfScope: [
-      "呢樣我真係做唔到，你叫屋企人幫你。",
-      "我未識做呢樣，要屋企人幫手。",
-      "呢件事超出我能力，你同屋企人講。",
-    ],
     failed: [
       "有啲做唔到，你試多次或者叫屋企人幫手。",
       "今次差少少，再講一次好嗎？",
@@ -245,11 +235,6 @@ const COPY: Record<
       "这个我还没学会，对不起。",
       "这个我不会弄，您让家里人帮您吧。",
     ],
-    outOfScope: [
-      "这个我真的做不了，您让家里人帮您。",
-      "这个我不会做，得家里人帮忙。",
-      "这件事超出我的能力，您跟家里人说。",
-    ],
     failed: [
       "有些没做成，你再试一次或者让家里人帮忙。",
       "这次差一点，再说一次好吗？",
@@ -264,96 +249,6 @@ const COPY: Record<
 };
 
 const pick = (pool: string[]): string => pool[Math.floor(Math.random() * pool.length)];
-
-/**
- * Requests this device has NO tool for.
- *
- * Why this exists: the offline fallback turns "any utterance" into a todo, so
- * 「你能帮我做个 PDF 吗」used to answer 「好，幫你記低咗」 — a capability QUESTION
- * was silently turned into a promise nothing would ever fulfil. The senior
- * cannot tell the difference, and the family report gains a chore that does not
- * exist.
- *
- * The rule is an explicit allow-list of things we genuinely cannot do, never a
- * "unknown verb" guess: a false negative (we miss one) costs nothing, while a
- * false positive tells him "I can't" about something the app actually does.
- * Supported asks (call someone, set an alarm, remember a chore, plan a route)
- * are matched by `planLocal` first and never reach this check.
- */
-const OUT_OF_SCOPE: readonly RegExp[] = [
-  // Documents / files we cannot read, write or export.
-  /(?:做|整|寫|写|印|生成|製作|制作|導出|导出|下載|下载).{0,8}(?:pdf|word|excel|ppt|文檔|文档|文件|檔案|档案|表格|簡報|简报|幻灯片|圖片|图片)/i,
-  // Mail is a free-text channel; we only share whitelisted templates.
-  /(?:發|发|寫|写|回|寄).{0,6}(?:郵件|邮件|電郵|电邮|email|e-mail)/i,
-  // Hardware we do not drive.
-  /(?:打印|列印|掃描|扫描|傳真|传真)/,
-  // Bookings / commerce / clinical appointments: a wrong action is irreversible.
-  /(?:掛號|挂号|掛.{0,2}號|挂.{0,2}号)/,
-  /(?:網購|网购|落單|下单|購物|购物)/,
-  // Video calls and programming are outside an elder-care assistant.
-  /(?:視頻通話|视频通话|視像通話|视像通话)/,
-  /(?:寫程式|写程序|寫代碼|写代码|編程|编程)/,
-];
-
-/** Non-null = this request is outside the product's capability set. */
-export function outOfScopeRequest(utterance: string): boolean {
-  const text = utterance ?? "";
-  // A supported local action claims the turn first: 「帶我去打印店」 mentions 打印
-  // but is a ROUTE request, and answering "I can't print" would be a regression.
-  if (planLocal(text).length > 0) return false;
-  return OUT_OF_SCOPE.some((re) => re.test(text));
-}
-
-// ---------------------------------------------------------------------------
-// Talking TO the assistant is not a task.
-//
-// 「能听到我说话吗」used to reach the offline todo fallback and answer
-// 「好，幫你記低咗」 — a question about whether the device can hear was filed as
-// a chore. These patterns are deliberately narrow (the assistant's own hearing /
-// presence / identity), so a real request that merely contains 你 or 聽 is not
-// swallowed.
-// ---------------------------------------------------------------------------
-
-const SOCIAL: { re: RegExp; reply: Record<Locale, string> }[] = [
-  {
-    re: /(?:你|妳).{0,4}(?:聽|听)(?:得)?(?:到|見|见|明)|(?:能|可以|可否).{0,3}(?:聽|听)(?:得)?(?:到|見|见).{0,4}我/,
-    reply: {
-      "zh-HK": "我聽到，你慢慢講。",
-      "zh-MO": "我聽到，你慢慢講。",
-      "zh-CN": "我听到了，您慢慢说。",
-    },
-  },
-  {
-    re: /(?:你|妳).{0,2}(?:喺|在)(?:唔|不)?(?:喺|在)度|你在吗|你還喺度/,
-    reply: {
-      "zh-HK": "我喺度，你講。",
-      "zh-MO": "我喺度，你講。",
-      "zh-CN": "我在，您说。",
-    },
-  },
-  {
-    re: /你(?:係|是)(?:咪|不是)?(?:人|機械|机械|機械人|机器人|ai|AI)|你叫咩名|你叫什么/,
-    reply: {
-      "zh-HK": "我係憶伴，陪你講嘢嘅。",
-      "zh-MO": "我係憶伴，陪你講嘢嘅。",
-      "zh-CN": "我是忆伴，陪您说话的。",
-    },
-  },
-];
-
-/** A direct answer to "can you hear me / are you there / who are you", or null. */
-export function socialReply(utterance: string, locale: Locale): string | null {
-  const text = utterance ?? "";
-  for (const s of SOCIAL) {
-    if (s.re.test(text)) return s.reply[locale] ?? s.reply["zh-HK"];
-  }
-  return null;
-}
-
-/** "提醒我…" / "記住…" turn a question INTO an action; nothing else does. */
-const REMEMBER_CUE = /(記住|记住|記得|记得|提醒|提我|叫我|幫我記|帮我记)/;
-/** Tools that CREATE something. For a plain question they are never right. */
-const MUTATING_CALLS = new Set(["create_task", "log_medication", "compose_card", "defer_task"]);
 
 /**
  * 连续第几次"没听懂"之后不再要求他重说，而是给他一个人。
@@ -426,25 +321,10 @@ export async function runTurn(utterance: string, deps: AgentDeps): Promise<TurnO
     return { ...emptyOutcome(), handled: true, refused: true, reply: refuse };
   }
 
-  // 1b. "Can you hear me?" is a question about the assistant, not a chore.
-  //     Answer it here so it can never reach the tool planner or the todo
-  //     fallback ("好，幫你記低咗" was the reported failure).
-  const social = socialReply(text, deps.locale);
-  if (social) {
-    return { ...emptyOutcome(), handled: true, reply: social };
-  }
-
   // 2. Local tool intent first: "我食咗藥" reports a dose and must WRITE a
-  // record, not render the medication checklist card. Only when no tool can
-  // act do we fall back to the local card for the same utterance.
+  // record, not render the medication checklist card; SOS maps here too. Only
+  // when no tool could act do we fall back to the local card for the utterance.
   const localCalls = planLocal(text).filter((c) => (deps.canRun ? deps.canRun(c.name) : true));
-
-  // 2b. Capability boundary: what the device cannot do is said out loud and is
-  // NEVER filed as a todo (see OUT_OF_SCOPE). Checked only when no local tool
-  // claimed the turn, so 「帶我去打印店」 still plans a route.
-  if (localCalls.length === 0 && outOfScopeRequest(text)) {
-    return { ...emptyOutcome(), handled: true, reply: pick(COPY[deps.locale].outOfScope) };
-  }
 
   const intent = parseIntent(text);
   if (localCalls.length === 0 && LOCAL_CARD_INTENTS.has(intent)) {
@@ -471,11 +351,6 @@ export async function runTurn(utterance: string, deps: AgentDeps): Promise<TurnO
 
   const modelCalls = res?.calls ?? [];
   const modelCards = res?.cards ?? [];
-  // A plain QUESTION must not create anything. The model (and the mock) reach
-  // for `create_task` as a catch-all, which is how 「能听到我说话吗」became
-  // 「幫你記住咗」. Drop mutating calls unless he actually asked to remember.
-  const askOnly = isQuestion(text) && !REMEMBER_CUE.test(text);
-  const cleanModelCalls = askOnly ? modelCalls.filter((c) => !MUTATING_CALLS.has(c.name)) : modelCalls;
 
   // A medication REPORT is deterministic: "我食咗藥" must write a record.
   // The backend mock (and any planner that has not learned the tool yet) still
@@ -483,19 +358,13 @@ export async function runTurn(utterance: string, deps: AgentDeps): Promise<TurnO
   // reach `records`. The device plan wins unless the model itself chose
   // `log_medication` — then the model's richer args (name/note) are kept.
   const medReport = localCalls.some((c) => c.name === "log_medication");
-  const modelLoggedMed = cleanModelCalls.some((c) => c.name === "log_medication");
+  const modelLoggedMed = modelCalls.some((c) => c.name === "log_medication");
   const calls =
     medReport && !modelLoggedMed
       ? localCalls
-      : cleanModelCalls.length > 0 || modelCards.length > 0
-        ? cleanModelCalls
+      : modelCalls.length > 0 || modelCards.length > 0
+        ? modelCalls
         : localCalls;
-
-  // Everything the model proposed was a mutation on a plain question, and it
-  // said nothing useful: hand the turn back so A's chat path can answer it.
-  if (askOnly && cleanModelCalls.length === 0 && !(res?.reply ?? "").trim() && modelCards.length === 0) {
-    return emptyOutcome();
-  }
 
   if (!res && calls.length === 0) {
     // No answer from the model AND nothing this device can plan: not ours.

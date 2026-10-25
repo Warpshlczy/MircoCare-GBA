@@ -133,8 +133,6 @@ import {
   appendTurn,
   isLlmReady,
   composeReply,
-  outOfScopeRequest,
-  socialReply,
   CONFUSED_ESCALATE_AFTER,
   MAX_RECENT_TURNS,
 } from "./lib/agent.ts";
@@ -1105,43 +1103,26 @@ assert.equal(magnitude(3, 4, 0), 5);
     ...extra,
   });
 
-  // --- capability boundary: say "can't", never file a todo --------------
+  // --- model-first tool routing; no hardcoded capability/small-talk filters ---
   {
-    // Requests the device genuinely has no tool for.
-    for (const text of [
-      "你能帮我做个pdf吗",
-      "幫我印份文件出嚟",
-      "帮我发封邮件畀个仔",
-      "帮我挂个号",
-      "帮我网购一箱水",
-      "帮我写代码",
-    ]) {
-      assert.equal(outOfScopeRequest(text), true, `out of scope: ${text}`);
-    }
-    // Everything the app CAN do must never be caught by this rule.
-    for (const text of [
-      "帮我记住听日覆诊",
-      "提醒我食藥",
-      "帮我打电话畀阿明",
-      "帶我去打印店", // a ROUTE to a print shop is a supported ask
-      "帶我去街市",
-      "我食咗藥",
-      "帮我做张卡记低血压",
-      "我喺邊",
-    ]) {
-      assert.equal(outOfScopeRequest(text), false, `must stay supported: ${text}`);
-    }
+    // SOS is recognized offline, before any model or chat path.
+    assert.equal(parseIntent("救救我"), "sos");
+    assert.equal(parseIntent("救命呀"), "sos");
+    assert.deepEqual(planLocal("救救我"), [{ name: "sos", args: { reason: "voice_emergency" } }]);
+    assert.deepEqual(planLocal("救命"), [{ name: "sos", args: { reason: "voice_emergency" } }]);
+    assert.deepEqual(planLocal("我好悶"), [], "chit-chat must still not invent an action");
 
-    const reply = await runTurn("你能帮我做个pdf吗", baseDeps());
-    assert.equal(reply.handled, true, "a capability question is answered, not handed back to the todo path");
-    assert.equal(reply.executed.length, 0, "no tool ran");
-    assert.equal(reply.cards.length, 0, "no todo card is created");
-    assert.ok(reply.reply.length > 0, "he hears an answer");
-    assert.equal(
-      /記低|記住|记住|记下/.test(reply.reply),
-      false,
-      `must not claim it was recorded: ${reply.reply}`
-    );
+    const sosTurn = await runTurn("救救我", baseDeps({ canRun: () => true }));
+    assert.deepEqual(sosTurn.steps.map((s) => s.name), ["sos"], "a cry for help plans sos first");
+
+    // With no model and no local plan, the turn is handed back so the caller's
+    // chat path can answer — arbitrary speech is NOT turned into a todo.
+    const chatOnly = await runTurn("你能帮我做个pdf吗", baseDeps());
+    assert.equal(chatOnly.handled, false, "hand back to the chat path");
+
+    const heardQ = await runTurn("能听到我说话吗", baseDeps());
+    assert.equal(heardQ.handled, false, "small talk is handed to the chat path");
+    assert.equal(heardQ.executed.length, 0);
 
     // The route case still plans a real action even though it mentions 打印.
     const route = await runTurn("帶我去打印店", baseDeps({ canRun: () => true }));
@@ -1164,7 +1145,7 @@ assert.equal(magnitude(3, 4, 0), 5);
       ["log_medication"],
       "the device plan wins for a medication report"
     );
-    // But when the model DOES pick log_medication, its richer args survive.
+    // When the model DOES pick log_medication, its richer args survive.
     const richer = await runTurn(
       "我食咗藥",
       baseDeps({
@@ -1175,50 +1156,22 @@ assert.equal(magnitude(3, 4, 0), 5);
         }),
       })
     );
-    // A question about the assistant is answered, never filed as a chore.
-    for (const text of ["能听到我说话吗", "你听得明吗", "你在吗"]) {
-      assert.ok(socialReply(text, "zh-HK"), `social reply expected: ${text}`);
-    }
-    assert.equal(socialReply("我食咗藥", "zh-HK"), null, "a report is not small talk");
-    assert.equal(socialReply("帮我把药盒放好", "zh-HK"), null, "a real request must not be swallowed");
+    assert.equal(richer.steps[0].name, "log_medication");
+    assert.equal(richer.steps[0].args.name, "降壓藥", "the model's richer args are kept");
 
-    const heard = await runTurn("能听到我说话吗", baseDeps());
-    assert.equal(heard.handled, true);
-    assert.equal(heard.executed.length, 0, "no tool ran");
-    assert.equal(heard.cards.length, 0, "no todo card");
-    assert.equal(
-      /記低|記住|记住|记下/.test(heard.reply),
-      false,
-      `must not claim it was recorded: ${heard.reply}`
-    );
-    assert.ok(spokenLength(heard.reply) <= SPEECH_BUDGET, `reply too long: ${heard.reply}`);
-
-    // The model reaching for create_task on a plain question is ignored.
-    const questionMock = await runTurn(
-      "今天天气怎么样",
+    // Model-first: whatever tool the model calls is what runs — the prompt, not
+    // a stacked filter, is the guard against miscalls.
+    const modelDriven = await runTurn(
+      "帮我记住听日覆诊",
       baseDeps({
         requestTurn: async () => ({
           reply: "",
-          calls: [{ name: "create_task", args: { text: "今天天气怎么样" } }],
+          calls: [{ name: "create_task", args: { text: "听日覆诊" } }],
           cards: [],
         }),
       })
     );
-    assert.equal(questionMock.handled, false, "hand back for the chat path");
-    assert.equal(questionMock.executed.length, 0);
-
-    // …but an explicit "remind me" question may still create a task.
-    const remindAsk = await runTurn(
-      "可唔可以提醒我食藥？",
-      baseDeps({
-        requestTurn: async () => ({
-          reply: "",
-          calls: [{ name: "create_task", args: { text: "食藥" } }],
-          cards: [],
-        }),
-      })
-    );
-    assert.deepEqual(remindAsk.steps.map((s) => s.name), ["create_task"]);
+    assert.deepEqual(modelDriven.steps.map((s) => s.name), ["create_task"]);
   }
 
   // refusal short-circuits even when a backend is available

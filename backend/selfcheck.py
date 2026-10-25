@@ -201,6 +201,11 @@ assert normal.needsConfirm is None
 emergency = plan_turn(_turn("我跌亲起唔到身", tools=[]))  # safety works without a registry
 assert [c.name for c in emergency.calls] == ["sos"] and "求助" in emergency.reply
 
+# "救救我" is a cry for help, not a chat line to file as a todo (reported bug).
+for _cry in ("救救我", "救命", "救我呀"):
+    _sos = plan_turn(_turn(_cry, tools=[]))
+    assert [c.name for c in _sos.calls] == ["sos"], f"emergency gate must catch {_cry}"
+
 forbidden = plan_turn(_turn("帮我转账畀阿明"))
 assert forbidden.calls == [] and forbidden.reply, "money requests must never become tool calls"
 for _phrase in ("畀钱阿明", "买股票", "transfer money", "password"):

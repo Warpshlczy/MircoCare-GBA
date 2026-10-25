@@ -30,7 +30,6 @@ import {
   photoCard,
   recordsCard,
   tasksCard,
-  todoCardFromUtterance,
   weatherSpoken,
 } from "@/lib/cards";
 import { latestNote, noteCard, noteFromUtterance, recallCard } from "@/lib/notes";
@@ -611,8 +610,9 @@ export default function Page() {
       }
     }
 
-    // The agent plans the cards (API first, local fallback). An unrecognized but
-    // real utterance becomes a todo — "say anything → a todo".
+    // The agent plans the cards (API first, local fallback). If nothing can
+    // plan a card and no earlier branch answered, we stay in chat mode: an
+    // unrecognized sentence is conversation, never a silently-filed promise.
     let next: AgentCard[] = [];
     let mode: "agent" | "local" = "agent";
     try {
@@ -623,11 +623,6 @@ export default function Page() {
     if (!next.length) {
       mode = "local";
       next = localCardsFor(intent, locale, { reminders: reminder.items, now });
-      // A QUESTION is never filed as a chore: with the model unavailable this
-      // was 「能听到我说话吗」→「好，幫你記低咗」. Ask him to say it again instead.
-      if (!next.length && utterance.trim() && !isQuestion(utterance)) {
-        next = [todoCardFromUtterance(utterance, locale, now)];
-      }
     }
     pushCards(next);
     track("card_shown", locale, { intent, mode });

@@ -9,7 +9,7 @@ import type { Intent } from "./types";
 
 // Order matters: more specific intents first (sos before help).
 const RULES: { intent: Intent; words: string[] }[] = [
-  { intent: "sos", words: ["救命", "唔舒服", "不舒服", "嗌人", "求助", "急", "sos"] },
+  { intent: "sos", words: ["救命", "救我", "叫救护车", "叫救護車", "叫白车", "叫白車", "唔舒服", "不舒服", "嗌人", "求助", "透唔到气", "透唔到氣", "心口痛", "胸口痛", "呼吸困难", "呼吸困難", "急", "sos"] },
   // Abort and "say that again" must precede everything else: "取消聽日覆診"
   // contains the follow-up keyword, and "再講一次食藥" would otherwise hit med.
   { intent: "cancel", words: ["取消", "唔使", "唔驶", "唔駛", "算了", "算啦", "唔要", "cancel", "never mind"] },
