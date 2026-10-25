@@ -6,6 +6,7 @@
 // `node src/selfcheck.ts` never touches this file.
 
 import { all, put } from "./db.ts";
+import { enqueueRecordSummary } from "./recordSync.ts";
 import { dayKey } from "./tasks.ts";
 import type { RecordEntry, RecordKind } from "./types.ts";
 
@@ -34,6 +35,15 @@ export function newRecord(input: NewRecord): RecordEntry {
 
 export async function saveRecord(entry: RecordEntry): Promise<RecordEntry> {
   await put("records", entry);
+  // The readable record stays here; only the coarse daily count is uploaded, so
+  // the family screen can answer "今日食咗藥未" without receiving health text.
+  // A failed upload must never fail the write — hence the catch, not await-throw.
+  try {
+    const rows = await recordsForDay(entry.day);
+    await enqueueRecordSummary(rows, entry.day, entry.kind);
+  } catch {
+    /* offline / no DB: the record is already durable, the aggregate retries later */
+  }
   return entry;
 }
 

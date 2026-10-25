@@ -61,6 +61,7 @@ import type { InterviewHistory, InterviewState } from "./lib/interview.ts";
 import { visemeFromText, FRAMES_PER_CHAR, VISEME_FRAME_MS } from "./lib/viseme.ts";
 import { parseManifest } from "./lib/live2d.ts";
 import { nextDueAt } from "./lib/datetime.ts";
+import { summarizeRecords, summarizeAll, recordSummaryId } from "./lib/recordSync.ts";
 import {
   homeWidgetPayload,
   homeWidgetRecord,
@@ -2318,6 +2319,53 @@ assert.equal(magnitude(3, 4, 0), 5);
   assert.equal(shouldUploadDay(fromAcc, false), true, "a measured gait day uploads without any chat");
 }
 
+// --- records → /records/summary (issue #7) ----------------------------------
+// What leaves the phone is a count, never the medication name.
+{
+  const day = "2026-10-24";
+  const row = (over: Partial<RecordEntry>): RecordEntry => ({
+    id: "r1",
+    kind: "med",
+    title: "食降壓藥",
+    at: 1000,
+    day,
+    source: "voice",
+    ...over,
+  });
+
+  const rows: RecordEntry[] = [
+    row({ id: "a", at: 1000 }),
+    row({ id: "b", at: 5000 }),
+    row({ id: "c", kind: "alarm", at: 2000, dueAt: 9000 }), // rings later, done now
+    row({ id: "d", kind: "card", at: 3000, title: "倒垃圾" }),
+    row({ id: "e", at: 9999, day: "2026-10-23" }), // another day
+  ];
+
+  assert.deepEqual(summarizeRecords(rows, day, "med"), {
+    day,
+    kind: "med",
+    count: 2,
+    lastAt: 5000,
+  });
+  // An alarm that has not rung is not something he did — `at`, never `dueAt`.
+  assert.equal(summarizeRecords(rows, day, "alarm")?.lastAt, 2000);
+  assert.equal(summarizeRecords(rows, day, "screening" as never), null, "no rows -> no upload");
+  assert.deepEqual(
+    summarizeAll(rows, day).map((s) => `${s.kind}:${s.count}`),
+    ["med:2", "alarm:1", "card:1"],
+    "empty kinds are skipped, not reported as 0"
+  );
+
+  // The queue id carries the STATE: keyed on day+kind alone, `enqueue` would
+  // keep the first dose of the day and silently drop every later one.
+  const first = summarizeRecords(rows.filter((r) => r.id !== "b"), day, "med");
+  const second = summarizeRecords(rows, day, "med");
+  assert.notEqual(recordSummaryId(first!), recordSummaryId(second!));
+  assert.equal(recordSummaryId(second!), recordSummaryId({ ...second! }), "a replay still dedupes");
+  // No health text may ride along.
+  assert.equal(JSON.stringify(second).includes("降壓"), false);
+}
+
 // --- outbox senders: every queued kind must have a route ---------------------
 {
   const seen: string[] = [];
@@ -2331,6 +2379,7 @@ assert.equal(magnitude(3, 4, 0), 5);
     telemetry: async (ev) => void seen.push(`telemetry:${ev.length}`),
     reminder: async (e) => void seen.push(`reminder:${e.id}`),
     conversation: async (t) => void seen.push(`conversation:${t.id}`),
+    recordSummary: async (b) => void seen.push(`recordSummary:${b.day}:${b.kind}:${b.count}`),
   };
   const send = makeSender(fake);
   const NOW = Date.UTC(2026, 9, 24, 3, 0, 0);
@@ -2354,6 +2403,7 @@ assert.equal(magnitude(3, 4, 0), 5);
   await send(queued("telemetry", { id: "e1", name: "tap", at: NOW, locale: "zh-HK" }));
   await send(queued("reminder", { id: "r1", at: NOW, locale: "zh-HK", kind: "medication", stage: "notify-caregiver" }));
   await send(queued("conversation", { id: "c1", at: NOW, role: "user", text: "", locale: "zh-HK" }));
+  await send(queued("recordSummary", { day: "2026-10-24", kind: "med", count: 2, lastAt: NOW }));
 
   assert.deepEqual(seen, [
     "sos:sos-1",
@@ -2365,6 +2415,7 @@ assert.equal(magnitude(3, 4, 0), 5);
     "telemetry:1",
     "reminder:r1",
     "conversation:c1",
+    "recordSummary:2026-10-24:med:2",
   ]);
 
   // Payload normalisation: two callers, two shapes, one endpoint.

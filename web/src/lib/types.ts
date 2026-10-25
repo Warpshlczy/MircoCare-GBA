@@ -426,8 +426,14 @@ export type OutboxKind =
   | "behaviour"
   | "taskEvent"
   | "conversation"
-  /** geofence exit/enter — no backend route yet (issue #2), enqueue only in W4 */
-  | "geofence";
+  /** geofence exit/enter — idempotent server-side by `id` (issue #2) */
+  | "geofence"
+  /**
+   * Coarse `{day,kind,count,lastAt}` aggregate of on-device records. The only
+   * thing about `records` that ever leaves the phone (issue #7); idempotent
+   * server-side by (device, day, kind).
+   */
+  | "recordSummary";
 
 /**
  * One entry in the offline replay queue. Replay is at-least-once, so every
