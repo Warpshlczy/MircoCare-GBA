@@ -305,9 +305,17 @@ public final class NeuralTts {
                 0.667f,
                 0.8f,
                 1.0f);
-        OfflineTtsModelConfig model = new OfflineTtsModelConfig(
-                vits, null, null, null, null, null, null,
-                2, false, "cpu");
+        // sherpa-onnx 2.0.0 added Matcha / Kokoro / ZipVoice / Kitten / Pocket /
+        // Supertonic configs as non-null Kotlin constructor parameters. Passing
+        // nulls threw "Parameter specified as non-null is null: parameter matcha"
+        // and the bundled child voice never loaded at all (silently fell back to
+        // the system engine). The no-arg constructor fills every engine config
+        // with its own default; set only the VITS fields we actually use.
+        OfflineTtsModelConfig model = new OfflineTtsModelConfig();
+        model.setVits(vits);
+        model.setNumThreads(2);
+        model.setDebug(false);
+        model.setProvider("cpu");
         OfflineTtsConfig cfg = new OfflineTtsConfig(model, ruleFsts(am, d), "", 1, 0.12f);
         OfflineTts engine = new OfflineTts(am, cfg);
         if (engine.sampleRate() <= 0) throw new IllegalStateException("model has no sample rate");
