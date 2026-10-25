@@ -18,6 +18,10 @@ next-env.d.ts
 *.log
 logs/
 
+# Bundled neural voice (~127 MB of VITS weights). scripts/fetch-tts.sh
+# restores them; the lexicons/tokens/FSTs stay in git.
+web/android/app/src/main/assets/tts/*/model.onnx
+
 # Android / Capacitor build artifacts
 web/android/.gradle/
 web/android/build/

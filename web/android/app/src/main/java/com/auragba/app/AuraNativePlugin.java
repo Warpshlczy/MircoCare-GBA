@@ -43,11 +43,16 @@ import com.getcapacitor.annotation.PermissionCallback;
  *   OS timer           scheduleDaily / cancelDaily              -> AlarmScheduler
  *   coarse position    getLocation                              -> LocationManager
  *   permissions        openAccessibilitySettings                -> Settings
- *   voice out          speak / stopSpeak                        -> TextToSpeech
+ *   voice out          speak / stopSpeak / warmTts               -> NeuralTts, then TextToSpeech
  *
  * `speak` is owned by workflow A (audio.ts#speak asks it first, Web Speech is the
  * fallback); the rest are B's. Keeping both in one plugin is what lets a single
  * WebView seam cover the whole shell.
+ *
+ * Voice: a bundled VITS model (sherpa-onnx, NeuralTts) speaks first. Android's
+ * own TextToSpeech is the fallback for the first line of a cold start (while
+ * the model loads) and for builds where the assets are absent. Both stay on the
+ * phone — nothing is sent to a cloud synthesiser (PDPO data minimisation).
  *
  * Plus `consumePendingReason()`, which is not a capability but a delivery
  * patch: `onCreate` can run before the WebView has a listener, so the launch
@@ -90,11 +95,40 @@ public class AuraNativePlugin extends Plugin {
     private Runnable initWatchdog;
     private Runnable startWatchdog;
     private Runnable doneWatchdog;
+    private Runnable neuralWatchdog;
+    private Runnable neuralGrace;
     private boolean focusHeld;
     /** Volume we borrowed from: -1 means "we did not touch STREAM_MUSIC". */
     private int savedVolume = -1;
     private final AudioManager.OnAudioFocusChangeListener focusListener = change -> {};
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
+
+    /** The bundled neural child voice; null-ish when assets are absent. */
+    private NeuralTts neural;
+    private String queuedPreset = "warm";
+
+    /**
+     * Model load is ~1–3 s on a handset. A line must not wait that long: give it
+     * a short grace window, then speak through the system engine and use the
+     * neural voice from the next line on. Never silence.
+     */
+    private static final long NEURAL_GRACE_MS = 1600L;
+
+    @Override
+    public void load() {
+        ensureNeural();
+    }
+
+    /** Lazily created, so an older shell or a bad context never breaks speech. */
+    private NeuralTts ensureNeural() {
+        if (neural != null) return neural;
+        try {
+            neural = new NeuralTts(getContext());
+        } catch (Throwable e) {
+            Log.w(TAG, "neural voice unavailable in this build", e);
+        }
+        return neural;
+    }
 
     // --- wake word while backgrounded/locked ---------------------------------
 
@@ -363,6 +397,18 @@ public class AuraNativePlugin extends Plugin {
         mainHandler.post(() -> handleSpeak(call));
     }
 
+    /**
+     * Warms the neural voice at app start, for the locale the UI is in, so the
+     * first line the senior hears is already the good voice. No-op on the web.
+     */
+    @PluginMethod
+    public void warmTts(PluginCall call) {
+        String locale = call.getString("locale", "zh-HK");
+        NeuralTts n = ensureNeural();
+        if (n != null) n.prepare(locale);
+        call.resolve();
+    }
+
     private void handleSpeak(PluginCall call) {
         String text = call.getString("text", "");
         if (text == null || text.trim().isEmpty()) {
@@ -375,23 +421,110 @@ public class AuraNativePlugin extends Plugin {
         Double rate = call.getDouble("rate", 0.9);
         queuedPitch = clamp(pitch == null ? 1.35f : pitch.floatValue(), 0.5f, 2.0f);
         queuedRate = clamp(rate == null ? 0.9f : rate.floatValue(), 0.5f, 2.0f);
+        queuedPreset = call.getString("preset", "warm");
         Log.i(TAG, "speak " + text.length() + " chars locale=" + queuedLocale
-                + " thread=" + Thread.currentThread().getName());
+                + " preset=" + queuedPreset + " thread=" + Thread.currentThread().getName());
 
-        // New speech wins: tell the previous JS caller it was interrupted.
+        // New speech wins: stop whatever is playing and tell the previous JS
+        // caller it was interrupted (not failed).
         if (pendingSpeak != null) {
             resolveSpeak(pendingSpeak, false, true, "interrupted");
             pendingSpeak = null;
         }
+        if (neural != null) neural.stop();
         cancelWatchdogs();
         requestAudioFocus();
-        if (tts == null) {
+
+        // 1) the neural child voice, when the model for this locale is loaded
+        NeuralTts n = ensureNeural();
+        if (n != null && n.isReadyFor(queuedLocale)) {
+            speakNeural(call);
+            return;
+        }
+        // 2) still loading: a short grace, then the system engine for THIS line
+        if (n != null && !n.isFailed()) {
+            n.prepare(queuedLocale);
             pendingSpeak = call;
+            armNeuralGrace(call);
+            return;
+        }
+        // 3) no neural assets in this build: the old path, unchanged
+        speakWithSystem(call);
+    }
+
+    private void armNeuralGrace(PluginCall call) {
+        neuralGrace = () -> {
+            if (pendingSpeak != call) return;
+            if (neural != null && neural.isReadyFor(queuedLocale)) {
+                pendingSpeak = null;
+                speakNeural(call);
+                return;
+            }
+            Log.i(TAG, "neural not ready within " + NEURAL_GRACE_MS + "ms; system engine speaks this line");
+            pendingSpeak = null;
+            speakWithSystem(call);
+        };
+        mainHandler.postDelayed(neuralGrace, NEURAL_GRACE_MS);
+    }
+
+    private void speakNeural(PluginCall call) {
+        pendingSpeak = call;
+        cancelWatchdogs();
+        armNeuralWatchdog(call);
+        neural.speak(queuedLocale, queuedText, queuedPreset, (ok, reason) -> mainHandler.post(() -> {
+            if (pendingSpeak != call) return; // interrupted or stopped already
+            cancelNeuralWatchdog();
+            if (ok) {
+                pendingSpeak = null;
+                abandonFocus();
+                resolveSpeak(call, true, false, null);
+                return;
+            }
+            if ("stopped".equals(reason)) {
+                pendingSpeak = null;
+                abandonFocus();
+                resolveSpeak(call, false, true, "stopped");
+                return;
+            }
+            // The neural engine refused (missing lib, bad model, OOM): say the
+            // same line through the system engine rather than go silent.
+            Log.w(TAG, "neural failed (" + reason + "), falling back to system TTS");
+            pendingSpeak = null;
+            speakWithSystem(call);
+        }));
+    }
+
+    /**
+     * Hard ceiling for one neural line. If the generator wedges, resolve as a
+     * failure so the UI leaves "speaking" (a stuck state locks the senior out).
+     */
+    private void armNeuralWatchdog(PluginCall call) {
+        cancelNeuralWatchdog();
+        long budget = Math.min(40_000L, Math.max(12_000L, queuedText.length() * 450L + 8_000L));
+        neuralWatchdog = () -> {
+            if (pendingSpeak != call) return;
+            Log.w(TAG, "neural engine exceeded " + budget + "ms");
+            if (neural != null) neural.stop();
+            pendingSpeak = null;
+            abandonFocus();
+            resolveSpeak(call, false, false, "neural_timeout");
+        };
+        mainHandler.postDelayed(neuralWatchdog, budget);
+    }
+
+    private void cancelNeuralWatchdog() {
+        if (neuralWatchdog != null) mainHandler.removeCallbacks(neuralWatchdog);
+        neuralWatchdog = null;
+    }
+
+    /** Steps 3+ of the old path: Android TextToSpeech. */
+    private void speakWithSystem(PluginCall call) {
+        pendingSpeak = call;
+        if (tts == null) {
             initTts();
             return;
         }
         if (!ttsReady) {
-            pendingSpeak = call;
             armInitWatchdog();
             return;
         }
@@ -401,6 +534,7 @@ public class AuraNativePlugin extends Plugin {
     @PluginMethod
     public void stopSpeak(PluginCall call) {
         mainHandler.post(() -> {
+            if (neural != null) neural.stop();
             if (tts != null) tts.stop();
             cancelWatchdogs();
             abandonFocus();
@@ -595,10 +729,17 @@ public class AuraNativePlugin extends Plugin {
         doneWatchdog = null;
     }
 
+    private void cancelNeuralGrace() {
+        if (neuralGrace != null) mainHandler.removeCallbacks(neuralGrace);
+        neuralGrace = null;
+    }
+
     private void cancelWatchdogs() {
         cancelInitWatchdog();
         cancelStartWatchdog();
         cancelDoneWatchdog();
+        cancelNeuralWatchdog();
+        cancelNeuralGrace();
     }
 
     private void shutdownTts() {
@@ -723,6 +864,10 @@ public class AuraNativePlugin extends Plugin {
         cancelWatchdogs();
         abandonFocus();
         shutdownTts();
+        if (neural != null) {
+            neural.release();
+            neural = null;
+        }
         super.handleOnDestroy();
     }
 

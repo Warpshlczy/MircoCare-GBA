@@ -1,4 +1,4 @@
-// tools.ts — the 10 agent tools, declared as DATA. PURE: zero imports, no DOM.
+// tools.ts — the agent tools, declared as DATA. PURE: zero imports, no DOM.
 //
 // Why data and not code: this file is the contract three parties share.
 //   - C turns `openAiTools()` into the `tools` array of POST /agent/turn, so the
@@ -165,6 +165,27 @@ export const TOOLS: readonly ToolDecl[] = [
     schema: {
       type: "object",
       properties: {},
+      required: [],
+      additionalProperties: false,
+    },
+    risk: "safe",
+    permissions: [],
+  },
+  {
+    name: "plan_route",
+    description:
+      "Plan how the senior gets somewhere they want to go ('帶我去街市', '點去公園', '規劃路線返屋企'). " +
+      "There is no map SDK, so the plan is a short ordered checklist spoken aloud, saved as a task " +
+      "that can be ticked off, and — for home — the actual distance. " +
+      "Pass the destination in the senior's own words; omit it when they just want to go home.",
+    schema: {
+      type: "object",
+      properties: {
+        destination: {
+          type: "string",
+          description: "Where they want to go, in their own words. Omit for home.",
+        },
+      },
       required: [],
       additionalProperties: false,
     },

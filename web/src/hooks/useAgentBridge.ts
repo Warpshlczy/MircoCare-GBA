@@ -47,7 +47,7 @@ const PROBE_INTERVAL_MS = 30_000;
  * Tools whose success changes the local task list. The bridge re-reads the
  * store only for these — a `locate` must not trigger a disk read on every turn.
  */
-const MUTATING_TOOLS = new Set(["create_task", "complete_task", "defer_task"]);
+const MUTATING_TOOLS = new Set(["create_task", "complete_task", "defer_task", "plan_route"]);
 
 export interface AgentBridgeDeps {
   locale: Locale;

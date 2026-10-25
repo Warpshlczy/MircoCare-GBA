@@ -22,6 +22,12 @@ android {
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }
     }
+    // The VITS model is read through AssetManager by sherpa-onnx. Compressing
+    // a ~100 MB onnx makes every load a full decompress on the phone, which
+    // costs seconds of latency the senior can hear.
+    androidResources {
+        noCompress 'onnx', 'fst'
+    }
 }
 
 repositories {
@@ -32,6 +38,12 @@ repositories {
 
 dependencies {
     implementation fileTree(include: ['*.jar'], dir: 'libs')
+    // On-box VITS (sherpa-onnx): the child voice. The .aar stays out of git
+    // (47 MB); run `web/scripts/fetch-tts.sh` once before the first build.
+    implementation(name: 'sherpa-onnx-2.0.0', ext: 'aar')
+    // sherpa-onnx's Java API is written in Kotlin; these classes need the
+    // stdlib even though all of our own code is Java.
+    implementation 'org.jetbrains.kotlin:kotlin-stdlib:1.9.10'
     implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
     implementation "androidx.coordinatorlayout:coordinatorlayout:$androidxCoordinatorLayoutVersion"
     implementation "androidx.core:core-splashscreen:$coreSplashScreenVersion"

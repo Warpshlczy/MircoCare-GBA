@@ -39,7 +39,7 @@ export function ScreeningOverlay({ open, locale, onClose }: Props) {
     void (async () => {
       try {
         await ensureAudioUnlocked();
-        await speak(t(locale, "screeningPrompt"), locale);
+        await speak(t(locale, "screeningPrompt"), locale, undefined, "gentle");
         if (!alive) return;
         const deadline = Date.now() + DURATION_MS;
         tick = window.setInterval(() => {
@@ -53,7 +53,7 @@ export function ScreeningOverlay({ open, locale, onClose }: Props) {
         if (!alive) return;
         setPhase("done");
         track("screening_done", locale);
-        void speak(t(locale, "screeningDone"), locale);
+        void speak(t(locale, "screeningDone"), locale, undefined, "gentle");
       } catch (error) {
         if (tick !== null) window.clearInterval(tick);
         if (!alive) return;

@@ -912,6 +912,12 @@ export default function Page() {
     };
   }, []);
 
+  // Load the bundled neural voice for this language at start-up, so the very
+  // first line is not spoken by the fallback engine while the model loads.
+  useEffect(() => {
+    void bridge()?.warmTts(locale);
+  }, [locale]);
+
   // Native shell brought us forward (B, W3). `planForeground` is B's decision
   // table (lib/foreground.ts) — A only executes the planned kind.
   useEffect(

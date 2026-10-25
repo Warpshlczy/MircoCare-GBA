@@ -252,6 +252,23 @@ export function alarmCard(info: AlarmInfo, locale: Locale, now: number): AgentCa
 }
 
 /**
+ * A walking plan: ordered steps on one screen, tickable, text only (§3.4 B3 —
+ * we ship no map SDK). `title` is the destination in the senior's own words.
+ */
+export function routePlanCard(title: string, steps: string[], now: number): AgentCard {
+  return {
+    id: `route-${now}`,
+    kind: "agentPlan",
+    title,
+    createdAt: now,
+    data: {
+      icon: "🧭",
+      checklist: steps.map((text, i) => ({ id: `route-${now}-${i}`, text, done: false })),
+    },
+  };
+}
+
+/**
  * "I'm about to do these 3 things" — shown BEFORE any `confirm` tool runs, so
  * the senior can veto the whole plan with one word.
  */

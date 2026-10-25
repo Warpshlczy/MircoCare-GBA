@@ -15,7 +15,7 @@
 import { localCardsFor } from "./cards.ts";
 import { parseIntent } from "./intent.ts";
 import { fitUtterance } from "./speech.ts";
-import { planCalls, refuseReason } from "./toolrun.ts";
+import { planCalls, planLocal, refuseReason } from "./toolrun.ts";
 import { TOOLS } from "./tools.ts";
 import type { PlannedStep } from "./toolrun.ts";
 import type {
@@ -78,6 +78,8 @@ export interface ToolExecResult {
   ok: boolean;
   /** spoken after the call; must be senior-legible, never an error code */
   message?: string;
+  /** cards the tool itself produced (a route plan, a place…) */
+  cards?: AgentCard[];
 }
 
 export interface AgentDeps {
@@ -265,7 +267,6 @@ function buildTurnRequest(utterance: string, deps: AgentDeps): AgentTurnRequest 
  */
 export async function runTurn(utterance: string, deps: AgentDeps): Promise<TurnOutcome> {
   const text = (utterance ?? "").trim();
-  const copy = COPY[deps.locale];
   if (!text) return emptyOutcome();
 
   // 1. Refusal beats everything — including a backend that would happily act.
@@ -284,24 +285,42 @@ export async function runTurn(utterance: string, deps: AgentDeps): Promise<TurnO
   }
 
   // 3. Backend turn (optional).
-  if (!deps.requestTurn) return emptyOutcome();
-
+  //
+  // The model is tried first, but it is not the only planner: `planLocal` below
+  // is what makes the agent work when the model is off, slow, or answers a route
+  // request with "好，我幫你記住" and no call at all. That asymmetry — talking
+  // about the plan but doing nothing — is the exact failure this guards.
   let res: AgentTurnResponse | null = null;
-  try {
-    res = await deps.requestTurn(buildTurnRequest(text, deps));
-  } catch {
-    res = null;
+  if (deps.requestTurn) {
+    try {
+      res = await deps.requestTurn(buildTurnRequest(text, deps));
+    } catch {
+      res = null;
+    }
   }
-  if (!res) {
-    // Backend timeout / 501 / network down. `handled: false` returns the
-    // utterance to the caller's original `runIntent` path — the behaviour the
-    // app shipped with. Claiming `true` here would swallow that path and leave
-    // the senior hearing "I didn't catch that" instead of the old answer.
+
+  const modelCalls = res?.calls ?? [];
+  const modelCards = res?.cards ?? [];
+  // Only locally plan what this build can actually perform: planning an
+  // `open_app` on the web build would answer "仲未接好" instead of A's own path.
+  const localCalls = planLocal(text).filter((c) => (deps.canRun ? deps.canRun(c.name) : true));
+  const calls = modelCalls.length > 0 || modelCards.length > 0 ? modelCalls : localCalls;
+
+  if (!res && calls.length === 0) {
+    // No answer from the model AND nothing this device can plan: not ours.
+    // `handled: false` returns the utterance to the caller's original
+    // `runIntent` path — the behaviour the app shipped with. Claiming `true`
+    // here would swallow that path and leave the senior hearing "I didn't
+    // catch that" instead of the old answer.
+    //
+    // Note the distinction: a backend that DID answer with an empty reply is
+    // not the same as no backend. That turn is ours, and `composeReply` picks
+    // "我未聽得明" / the caregiver escape from it (see the confused-streak test).
     return emptyOutcome();
   }
 
   // 4. Validate the calls against OUR registry — never trust the model's names.
-  const plan = planCalls(res.calls ?? [], deps.locale);
+  const plan = planCalls(calls, deps.locale);
   const skipped: SkippedCall[] = plan.rejected.map((r) => ({
     name: r.name,
     // unknown tool / bad args / too many calls are all "this cannot run".
@@ -311,6 +330,7 @@ export async function runTurn(utterance: string, deps: AgentDeps): Promise<TurnO
 
   // 5. Confirm + execute, in the planner's order (sos first).
   const executed: ExecutedCall[] = [];
+  const toolCards: AgentCard[] = [];
   for (const step of plan.steps) {
     if (deps.canRun && !deps.canRun(step.name)) {
       // Cannot be performed in this build — skip it silently rather than
@@ -331,6 +351,7 @@ export async function runTurn(utterance: string, deps: AgentDeps): Promise<TurnO
     }
     try {
       const out = await deps.runTool(step);
+      if (out.cards?.length) toolCards.push(...out.cards);
       executed.push({ name: step.name, ok: out.ok, message: out.message });
     } catch {
       executed.push({ name: step.name, ok: false });
@@ -351,7 +372,7 @@ export async function runTurn(utterance: string, deps: AgentDeps): Promise<TurnO
     failLines,
     executed,
     skipped,
-    plannerReply: res.reply ?? "",
+    plannerReply: res?.reply ?? "",
     hadSteps: plan.steps.length > 0,
     locale: deps.locale,
     confusedStreak: deps.confusedStreak,
@@ -360,15 +381,16 @@ export async function runTurn(utterance: string, deps: AgentDeps): Promise<TurnO
   // "Did we actually understand him?" — a tool plan, a card or a real answer
   // all mean yes. Nothing at all means the turn went nowhere; the bridge counts
   // those, because two in a row is when the app should stop asking him to repeat.
+  const cards = [...modelCards, ...toolCards];
   const understood =
-    plan.steps.length > 0 || (res.cards ?? []).length > 0 || (res.reply ?? "").trim().length > 0;
+    plan.steps.length > 0 || cards.length > 0 || (res?.reply ?? "").trim().length > 0;
 
   return {
     handled: true,
     refused: false,
     understood,
     reply,
-    cards: res.cards ?? [],
+    cards,
     steps: plan.steps,
     executed,
     skipped,

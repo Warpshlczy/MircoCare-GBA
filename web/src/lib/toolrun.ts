@@ -10,7 +10,7 @@
 //   2. validation— unknown tool or bad args are dropped, never "best effort"
 //   3. confirmation — `risk: "confirm"` needs a spoken yes before it runs
 
-import { TOOLS, toolByName, type ToolDecl, type ToolRisk } from "./tools.ts";
+import { toolByName, type ToolDecl, type ToolRisk } from "./tools.ts";
 import type { Locale, ToolCall } from "./types";
 
 /** The backend contract caps a turn at 3 calls (docs/dev.md §3.5). */
@@ -176,6 +176,11 @@ const SAY: Record<string, Record<Locale, string>> = {
     "zh-MO": "我睇下你離屋企幾遠。",
     "zh-CN": "我看一下你离家多远。",
   },
+  plan_route: {
+    "zh-HK": "我同你諗下點行。",
+    "zh-MO": "我同你諗下點行。",
+    "zh-CN": "我帮你想想怎么走。",
+  },
 };
 
 function confirmQuestion(call: ToolCall, locale: Locale): string {
@@ -238,4 +243,65 @@ export function dryRun(calls: ToolCall[], locale: Locale): string {
   const lines = steps.map((s, i) => `${i + 1}. ${s.name} ${JSON.stringify(s.args)} → ${s.say}`);
   if (rejected.length) lines.push(`略過：${rejected.map((r) => `${r.name}(${r.reason})`).join("、")}`);
   return lines.join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// 4. Local planning — the same agent loop, with no model in it.
+// ---------------------------------------------------------------------------
+
+/**
+ * The route cues we trust. A bare "去" is deliberately absent: "我去咗街市"
+ * is a report, not a request, and planning a route for it would be nonsense.
+ * "路線" alone is absent for the same reason ("呢條路線好好" is a comment).
+ */
+const ROUTE_CUE =
+  /(?:帶我去|带我去|帶我行|带我行|帶我走|带我走|點樣去|点样去|點去|点去|怎麼去|怎么去|怎樣去|怎样去|規劃路線|规划路线|規劃行程|规划行程)/;
+const HOME_WORD = /(屋企|返家|回家|歸家|归家)/;
+
+/**
+ * "帶我去街市" → "街市"; "" → home; null → this is not a route request.
+ *
+ * Three outcomes, because "where" and "whether" are different questions: an
+ * empty destination that also mentions 屋企 is the way home, while an empty
+ * destination on its own ("帶我去") is too vague to plan and must fall through.
+ */
+export function routeDestination(utterance: string): string | null {
+  const text = (utterance ?? "").trim();
+  const m = ROUTE_CUE.exec(text);
+  if (!m) return null;
+  let rest = text.slice(m.index + m[0].length).replace(/^[，,。.：:\s]+/, "");
+  rest = rest.replace(/^(去|到|返|往|行去|行到)/, "");
+  rest = rest.replace(/[呀啦喇嘅呢嘛囉㗎。.！!？?~～\s]+$/g, "").trim();
+  if (rest) return rest;
+  return HOME_WORD.test(text) ? "" : null;
+}
+
+/**
+ * What the DEVICE can plan with no model and no network.
+ *
+ * This is not a second agent: it is the same tool contract (`planCalls`
+ * validates every argument below), so a locally planned turn runs through the
+ * identical confirm → execute → speak path. Without it, a route request is
+ * answered "好，我幫你記住" with nothing behind it — the exact complaint that
+ * the assistant talks about the plan and then does nothing.
+ *
+ * Deliberately narrow. Weather is A's path (real data, answer sheet), and
+ * `open_app`/`call_contact` stay model-driven because guessing a contact or an
+ * app from a keyword is how a wrong person gets dialled.
+ */
+export function planLocal(utterance: string): ToolCall[] {
+  const text = (utterance ?? "").trim();
+  if (!text) return [];
+
+  const destination = routeDestination(text);
+  if (destination !== null) {
+    return [{ name: "plan_route", args: destination ? { destination } : {} }];
+  }
+  if (/(我喺邊|我在哪|喺邊度|在边度|係邊度|where am i)/i.test(text)) {
+    return [{ name: "locate", args: {} }];
+  }
+  if (/(返屋企|回家|離屋企幾遠|离家多远|离家几远|幾遠|几远|how far)/i.test(text)) {
+    return [{ name: "navigate_home", args: {} }];
+  }
+  return [];
 }

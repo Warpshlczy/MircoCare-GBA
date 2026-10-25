@@ -29,7 +29,7 @@ export default function CaregiverPage() {
     try {
       await redeemPairingCode(code);
       setCode("");
-      await speak("绑定成功，之后可以帮助查看长者的健康情况。", "zh-CN");
+      await speak("绑定成功，之后可以帮助查看长者的健康情况。", "zh-CN", undefined, "cheerful");
       await refresh();
     }
     catch (error) { setMessage(error instanceof Error ? error.message : "配对失败"); }

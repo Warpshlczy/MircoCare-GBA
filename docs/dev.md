@@ -146,7 +146,7 @@ grep -rl "auragba" backend --include=*.py --include=*.txt --include=*.md | \
 | 能力 | 位置 | 现状 |
 |---|---|---|
 | 数字人 Canvas-2D + 口型 | [Avatar.tsx](https://github.com/Warpshlczy/MircoCare-GBA/blob/main/web/src/components/Avatar.tsx) | 眨眼/呼吸/嘴高 = `level`；props 仅 `state`/`level`/`size` |
-| 语音 TTS/STT/振幅表 | [audio.ts](https://github.com/Warpshlczy/MircoCare-GBA/blob/main/web/src/lib/audio.ts) | 原生 `AuraNative.speak` 优先、Web Speech 回退；小男孩音色 `BOY_VOICE = { pitch 1.35, rate 0.9 }`；请求 `zh-HK`，引擎不支持时回落 `zh-CN` 保证有声（见 §2.3 A3） |
+| 语音 TTS/STT/振幅表 | [audio.ts](https://github.com/Warpshlczy/MircoCare-GBA/blob/main/web/src/lib/audio.ts) | 端内 VITS 童声（sherpa-onnx）优先 → 系统 TTS → Web Speech；`BOY_VOICE` 仅用于回退路径；四个语气 preset 随 `speak(text, locale, onViseme?, preset)` 传入（见 §2.3 A3） |
 | 前台唤醒词 | [useWakeWord.ts](https://github.com/Warpshlczy/MircoCare-GBA/blob/main/web/src/hooks/useWakeWord.ts) | 命中即停识别并回调 |
 | 后台上锁唤醒 | [WakeListenService.java](https://github.com/Warpshlczy/MircoCare-GBA/blob/main/web/android/app/src/main/java/com/auragba/app/WakeListenService.java) | 前台服务 + `SpeechRecognizer` 循环 |
 | 四条主动开口 | [page.tsx](https://github.com/Warpshlczy/MircoCare-GBA/blob/main/web/src/app/page.tsx) | 唤醒回调 / boot 每日签到 / 回前台 20s 冷却 / 提醒到期 |
@@ -273,7 +273,7 @@ grep -rl "auragba" backend --include=*.py --include=*.txt --include=*.md | \
 | `components/Avatar.tsx` | 重写 | 对外 `{ state, level, size, label, onTap?, onLongPress? }`。外层是 `<button>`（可交互，所以不是 `role="img"`，见 §2.8 D-6）；内部 L1/L2/L3。L3 用内联字符头像，不新增 PNG |
 | `lib/live2d.ts` | 新增 | `parseManifest(json)` 纯函数（自检覆盖）+ `mountLive2D(el, manifest)` 浏览器侧；**唯一**与 Live2D 耦合的文件 |
 | `lib/viseme.ts` | 新增 | `visemeFromText(text)` 纯函数：每字固定 4 帧 × 65ms，标点为闭口 |
-| `lib/audio.ts` | 增强 | `speak(text, locale, onViseme?)`；`cancelSpeech()`；`listenOnce(locale, timeoutMs)` 返回 `{ text, confidence, durationMs }` |
+| `lib/audio.ts` | 增强 | `speak(text, locale, onViseme?, preset)`；`cancelSpeech()`；`listenOnce(locale, timeoutMs)` 返回 `{ text, confidence, durationMs }` |
 | `lib/proactive.ts` | 新增 | `planProactive(ctx)` 纯函数 + `dayKey` 复用 `checkin.ts` 的本地日历日判定 |
 | `lib/interview.ts` | 新增 | 题库 15 条 + `pickNext` / `shouldStop` / `careCue` 纯函数 |
 | `lib/signal.ts` | 增函数 | `snrDb(rmsDb[])`、`qualityOf({ speechRatio, snrDb, durationMs }, minMs)` |
@@ -447,16 +447,19 @@ mv public/live2d/model.manifest.json /tmp/ && npm run build; mv /tmp/model.manif
 
 1. `lib/live2d.ts`：`fetch("/live2d/model.manifest.json")` → `parseManifest()` → `model` 为空直接返回 `null` → 否则按 `runtime` 顺序注入 `<script>` → `PIXI.live2d.Live2DModel.from(modelPath)` → 整体 3s 超时，任何异常返回 `null`。
 2. L1 下 `level` 在 `beforeModelUpdate` 里写入 `params.mouthOpen`；聆听时 `model.focus()` 朝屏幕中心；单击播 `motionGroups.tap`。
-3. 口型：`visemeFromText` 每字 4 帧 × 65ms（0.85 语速下粤语约 260ms/字），帧形为「开-全开-半开-收」，标点为闭口停顿；`speak()` 用 `setInterval(65)` 推进，Web Speech 的 `SpeechSynthesisUtterance.onboundary` 到来时**按 `charIndex×4` 跳帧校准**（平台事件，零依赖）；原生 TTS（Android `TextToSpeech` / `UtteranceProgressListener`）**不回调 boundary 也不输出 PCM**，因此原生路径只做纯时间推进；`frameMs` 按 `0.85 / rate` 拉伸，保证语速变了嘴形不脱节。不支持 boundary 的设备同样退化为纯时间推进（`ponytail:` 注明天花板）。
-4. **TTS 双路径（A3 新增）**：`audio.ts#speak` 先问 `bridge()`：
-   - **原生优先**：`AuraNative.speak(text, locale, BOY_VOICE)` → Android `TextToSpeech`，`setPitch(1.35)` / `setSpeechRate(0.9)`；Promise 一直持有到 `UtteranceProgressListener.onDone/onError`，所以嘴型时间线与真实播报同起同止。
-   - **线程**：`TextToSpeech` 的构造与全部 `PluginCall` 回调都 `post` 到主线程（`Handler(Looper.getMainLooper())`）。在 Capacitor 的插件线程里构造会让初始化回调永远不回，`speak` 的 Promise 挂死、前端永久停在 `speaking`——这是真机无声的第一层原因。
-   - **语言协商**：MIUI 自带引擎（`com.xiaomi.mibrain.speech`）对 `zh-HK` / `zh-TW` 均返回 `LANG_NOT_SUPPORTED(-2)`，只有 `zh-CN` 可用。`applyBestLocale()` 在请求不可用时回退到另一支中文，粤语请求**优先回退 `zh-CN`**——宁可用普通话音色念粤语书面文本，也不静默。旧版回退到 `zh-TW` → `lang_missing` → 落到 WebView 的 Web Speech（Android WebView 无本地合成）→ 双重静默。
-   - **看门狗（保证必有结果）**：5s 初始化看门狗、4s `onStart` 看门狗、`max(8s, 文字数×700ms+6s)` 的 `onDone` 看门狗。任何一个超时都以 `{ok:false, reason}` resolve，绝不挂死 Promise；`reason` 取值 `empty_text / init_failed / init_timeout / lang_missing / speak_error / no_start / engine_error / stopped / interrupted`，真机排查直接看 `adb logcat -s AuraTTS`。
-   - **出声链路**：`AudioAttributes(USAGE_MEDIA, CONTENT_TYPE_SPEECH)` + `AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK`；媒体音量低于 60% 时临时抬到 60%（**记住原值，一句说完立刻还原**）。真机实测 10/30 档只有 −29 dB（`dumpsys media.audio_flinger` 的 `PortVol dB`），老人听感等同无声；抬到 18/30 后同一句是 −14 dB（+15 dB）。真机验证以引擎进程出现 `AudioTrack usage=USAGE_MEDIA content=CONTENT_TYPE_SPEECH … OUT_SPEAKER` 且 `Underruns 0`、`FrmRdy>0`、PortVol 明显高于 −29 dB 为准，不以 `onDone` 为准。
-   - **Web Speech 回退**：无原生桥、`ok:false`（无引擎/无该语言）、抛异常时走 `SpeechSynthesisUtterance`，`rate/pitch` 用同一份 `BOY_VOICE`，音色在候选里优先挑 `child/kid/girl/female/…` 的年轻嗓音。
-   - **打断**：`cancelSpeech()` 同时 `speechSynthesis.cancel()` 与 `stopSpeak()`；原生返回 `{ok:false, stopped:true}` 表示「是我们主动打断」，JS **不得**回退去重说（`ponytail:` 已在 `native.ts` 注释）。
-   - **隐私**：TTS 文本全程留在端上，不接任何云端童声 API。**已知风险**：小米引擎 `TtsEngineProcessor` 会先试云端合成（`onlyOffline: 1500` 超时）再回落本地，联网时长者文本可能经过小米云 TTS；符合 PDPO 数据最小化需后续强制离线或换成纯端内引擎（B/C 侧评估）。
+3. 口型：`visemeFromText` 每字 4 帧 × 65ms（0.85 语速下粤语约 260ms/字），帧形为「开-全开-半开-收」，标点为闭口停顿；`speak()` 用 `setInterval(65)` 推进，Web Speech 的 `SpeechSynthesisUtterance.onboundary` 到来时**按 `charIndex×4` 跳帧校准**（平台事件，零依赖）；原生路径（系统 `TextToSpeech` 与神经童声）**都不回调 boundary**：系统引擎不输出 PCM，神经引擎虽有 PCM 但未做音素对齐，因此原生路径仍只做纯时间推进；`frameMs` 按 `0.85 / rate` 拉伸，保证语速变了嘴形不脱节。不支持 boundary 的设备同样退化为纯时间推进（`ponytail:` 注明天花板）。
+4. **TTS 三路径（按实际实现勘误）**：`audio.ts#speak(text, locale, onViseme?, preset)` 先问 `bridge()`：
+   - **端内神经童声（首选）**：APK 内置 `sherpa-onnx` + VITS 模型（`android/app/src/main/assets/tts/{yue,cmn}`，22.05 kHz 单说话人），`NeuralTts.java` 在 CPU 上推理，`AudioTrack` 直接播放 PCM。粤语用 `vits-cantonese-hf-xiaomaiiwn`（108 MB fp32，上游没有 int8），普通话用 `vits-piper-zh_CN-xiao_ya-medium-int8`（18 MB）。模型与 47 MB 的 `sherpa-onnx-2.0.0.aar` **不入库**（`.gitignore` + 单文件体积限制），首次构建前执行 `web/scripts/fetch-tts.sh`；未执行时 Gradle 解析不到 AAR，属于硬依赖。
+   - **童声与语气**：模型本身是成年女声，`NeuralTts` 用重采样把音高与共振峰一起上移（preset `lift` 1.05–1.15），同时把合成语速除以 `lift`，让「更年轻」不等于「更快」。四个 preset（warm / gentle / cheerful / urgent）分别控制 lift、语速与句间停顿；VITS 没有情感 embedding，这是离线条件下能做到的「带语气」。接线：SOS/跌倒 → `urgent`，吃药提醒/筛查 → `gentle`，绑定成功 → `cheerful`，其余 `warm`。
+   - **繁→简**：粤语模型 lexicon 里约 7.9k 繁体字只有字头、没有音素（例如「帶」），直接合成会被静默吞掉。`assets/tts/t2s.txt`（由 OpenCC `TSCharacters` 生成，4105 对）在合成前逐字映射，实测「帶我去街市」不再 `OOV`，简繁混排同样安全。音素/词表/FST/t2s 随仓库提交，只有 `model.onnx` 被忽略。
+   - **首句不等模型**：`load()` 只创建对象；语言确定后 JS 调 `warmTts(locale)` 预载。首句若模型尚未就绪，最多等 `NEURAL_GRACE_MS=1600ms`，随后由系统 TTS 说这一句，下一句起改用神经童声；神经引擎报错（缺 ABI、OOM、模型损坏）同样回落到系统 TTS，绝不静默。
+   - **音频细节**：输出统一 24 kHz PCM16 单声道；逐句合成（≤6 句，长句 34 字按逗号再切），句间插静音；峰值约 0.45 的输出归一到 0.9（增益上限 3×），8 ms 淡入淡出防爆音；`getPlaybackHeadPosition()` 轮询到写完的帧数才释放 `AudioTrack`，否则句尾会被切掉。`AudioTrack` 用 API 21 构造器和三参 `write()`，兼容 `minSdk 22`。
+   - **看门狗与回退**：神经路径 `max(12s, 字数×450ms+8s)`，超时 `neural_timeout`；系统 TTS 路径保留 5s 初始化、4s `onStart`、`max(8s, 字数×700ms+6s)` 的 `onDone` 看门狗。所有超时都以 `{ok:false, reason}` resolve；`reason` 取值 `empty_text / no_model / init_failed / init_timeout / lang_missing / speak_error / no_start / engine_error / neural_timeout / stopped / interrupted`。系统 TTS 仍走 `USAGE_MEDIA + CONTENT_TYPE_SPEECH` 与 60% 音量地板（说完还原）。
+   - **系统 TTS 细节**：构造与全部 `PluginCall` 回调都 `post` 到主线程（`Handler(Looper.getMainLooper())`），在 Capacitor 插件线程构造会让初始化回调永不回、Promise 挂死；MIUI 引擎对 `zh-HK/zh-TW` 返回 `LANG_NOT_SUPPORTED`，`applyBestLocale()` 粤语请求优先回落 `zh-CN`。
+   - **Web Speech 回退**：无原生桥或原生 `ok:false` 时用 `SpeechSynthesisUtterance`，`pitch/rate` 按 preset 取值（warm 1.35/0.9、gentle 1.3/0.84、cheerful 1.45/1.02、urgent 1.28/1.05），候选音色优先 `child/kid/girl/female/…`。
+   - **打断**：`cancelSpeech()` 同时 `speechSynthesis.cancel()` 与 `stopSpeak()`；后者会 `neural.stop()` 立即 `pause/flush` `AudioTrack`。`{ok:false, stopped:true}` 表示主动打断，JS **不得**回退重说。
+   - **隐私**：模型与推理都在端上，`NeuralTts` 内无任何网络调用（自检断言），TTS 文本不出设备。系统 TTS 仍是回退路径，MIUI `TtsEngineProcessor` 有云端优先的已知风险（`onlyOffline:1500` 超时后回落本地），强制纯离线需换引擎，记录在案（B/C 评估）。
+   - **真机自查**：`adb logcat -s AuraTTS` 应出现 `neural model ready dir=tts/yue sr=22050`；`dumpsys media.audio_flinger` 的 `AudioTrack` 行应为 24 kHz、`Underruns 0`；模型加载完成前第一句由系统引擎播出属于预期。
 5. L2 Canvas 修复：`reduced-motion` 只关掉位移（呼吸、前倾），**眨眼与嘴照常**（修 §2.0 缺陷①）；聆听时轻微前倾 + 瞳孔朝中心。
 6. 单击数字人 = 重说上一句（适老化高频需求）；长按 1s = 取消播报并进入聆听，播报「你想講咩？」；长按期间不触发任何播报（issue #1 第 2 问）。
 
@@ -697,7 +700,7 @@ done; echo "PASS: 运行时与模型齐备"
 | `web/src/lib/outbox.ts` | 新增 | 指数退避重放：`enqueue` / `drain`（上限 500 条、7 天过期） |
 | [intent.ts](https://github.com/Warpshlczy/MircoCare-GBA/blob/main/web/src/lib/intent.ts) | 扩充 | 保留关键词兜底；新增 `navigate / call / alarm / message / repeat / cancel` |
 | [cards.ts](https://github.com/Warpshlczy/MircoCare-GBA/blob/main/web/src/lib/cards.ts) | 扩充 | `taskCard()`、`placeCard()`、`alarmCard()`、`agentPlanCard()`（展示「我准备做这 3 件事」） |
-| [native.ts](https://github.com/Warpshlczy/MircoCare-GBA/blob/main/web/src/lib/native.ts) | 扩充 | 新增 8 个方法（见 §3.5）；另有 A 侧已落地的 `speak` / `stopSpeak`（原生 TTS，见 §2.3 A3） |
+| [native.ts](https://github.com/Warpshlczy/MircoCare-GBA/blob/main/web/src/lib/native.ts) | 扩充 | 新增 8 个方法（见 §3.5）；另有 A 侧已落地的 `speak` / `stopSpeak` / `warmTts`（原生 TTS，见 §2.3 A3） |
 | [api.ts](https://github.com/Warpshlczy/MircoCare-GBA/blob/main/web/src/lib/api.ts) | 接线 | `getAgentCards` / `assistantChat` / `getMedicationPlan` 接真后端；新增 `postAgentTurn`、`postTaskEvent`、`postBehaviorDaily` |
 | `AuraNativePlugin.java` | 重命名 + 补实现 | → `MemoNativePlugin.java`；`updateHomeWidget`、`bringToForeground`、`scheduleDaily`、`getLocation`、`openAccessibilitySettings`；保留 A 的 `speak` / `stopSpeak`（`TextToSpeech`，`UtteranceProgressListener` 持有 `PluginCall`） |
 | `HomeWidgetProvider.java` | 新增 | `AppWidgetProvider`：读 `SharedPreferences` → 渲染提醒清单 |
@@ -717,7 +720,7 @@ done; echo "PASS: 运行时与模型齐备"
 
 **步骤**
 
-1. 定义 10 个工具（见 §3.5 表），每个都写 `risk: "safe" | "confirm" | "forbidden"`。
+1. 定义 12 个工具（见 §3.5 表），每个都写 `risk: "safe" | "confirm" | "forbidden"`。
 2. `toolrun` 固定五步：**校验 → 风险确认 → 执行 → 记录 → 播报结果**。任何一步失败都要给出**长者能听懂的一句话**（不是 error code）。
 3. `dryRun` 模式：只返回「我将要做什么」，用于答辩演示与测试。
 4. 所有执行写 `agent_audit`（时间、工具名、参数摘要、结果、是否确认），本地保留 30 天。
@@ -822,14 +825,18 @@ done; echo "PASS: 运行时与模型齐备"
 |---|---|---|---|---|---|
 | `create_task` | safe | 无 | `{text, dueAt?}` | `{taskId}` | 说啥记啥 |
 | `complete_task` | safe | 无 | `{taskId \| query}` | `{taskId, delayMin}` | 语音勾销 |
+| `defer_task` | safe | 无 | `{taskId \| query, minutes?}` | `{taskId, dueAt}` | 推迟提醒 |
 | `set_alarm` | safe | `SCHEDULE_EXACT_ALARM` | `{at, label}` | `{alarmId}` | 本地闹钟 |
 | `call_contact` | **confirm** | `CALL_PHONE` | `{name}` | `{number}` | 必须先复述姓名 |
 | `send_message` | **confirm** | 无（走系统分享） | `{name, text}` | `{ok}` | 只允许预设模板句 |
 | `locate` | safe | `ACCESS_FINE_LOCATION` | `{}` | `{lat,lng,accuracy}` | 前台取点 |
 | `navigate_home` | safe | 无 | `{}` | `{distanceM}` | 文本 + 静态图 |
+| `plan_route` | safe | 无 | `{destination?}` | `{card}` | 出行路线：给步骤卡 + 建「去 X」任务；离线本地规划器也能触发（见 §3.5 说明） |
 | `open_app` | confirm | 无障碍 | `{app}` | `{ok}` | 白名单 App |
 | `ui_tap_text` | confirm | 无障碍 | `{text}` | `{ok, bounds}` | 当前页面内点一次 |
 | `sos` | safe（最高优先） | 无 | `{reason}` | `{}` | 立即升级 |
+
+> **离线规划器（勘误）**：`toolrun.ts#planLocal` 在没有模型/后端时也能把明确的出行请求变成真实动作：`帶我去街市` → `plan_route`、`點返屋企` → `navigate_home`、`我喺邊` → `locate`。它刻意**不**猜天气/App/联系人——猜错的代价（开错应用、打错电话）比不行动高。模型给出的计划优先；模型只回话不调工具时，本地计划仍然执行，避免「说了规划却没有下文」。
 
 ```ts
 // lib/tools.ts

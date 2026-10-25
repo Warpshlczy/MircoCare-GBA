@@ -46,12 +46,17 @@ export interface ForegroundEvent {
   at: number;
 }
 
+/** Tone presets understood by the on-box neural voice (NeuralTts.java). */
+export type VoicePreset = "warm" | "gentle" | "cheerful" | "urgent";
+
 /** TTS timbre knobs, passed through unchanged to Android TextToSpeech. */
 export interface VoiceProfile {
   /** 1.0 = engine default; >1 is higher/smaller. Android clamps at 2.0. */
   pitch: number;
   /** 1.0 = engine default; <1 is slower. */
   rate: number;
+  /** Which tone to speak with; the neural voice honours it fully. */
+  preset?: VoicePreset;
 }
 
 export interface NativeSpeechResult {
@@ -94,6 +99,11 @@ export interface AuraNativeBridge {
    */
   speak(text: string, locale: string, voice: VoiceProfile): Promise<NativeSpeechResult>;
   stopSpeak(): Promise<void>;
+  /**
+   * Asks the shell to load the neural voice for `locale` now, so the first
+   * spoken line does not pay the model-load latency. No-op in a browser.
+   */
+  warmTts(locale: string): Promise<void>;
   /** Opens the system accessibility list so the senior's family can enable it.
    *  An accessibility service can NEVER be enabled programmatically. */
   openAccessibilitySettings(): Promise<boolean>;
@@ -131,10 +141,11 @@ interface AuraNativePlugin {
   dial(o: { phone: string }): Promise<{ ok?: boolean }>;
   openApp(o: { app: string }): Promise<{ ok?: boolean }>;
   getLocation(): Promise<Partial<NativeLocation> | void>;
-  speak(o: { text: string; locale: string; pitch: number; rate: number }): Promise<
+  speak(o: { text: string; locale: string; pitch: number; rate: number; preset?: VoicePreset }): Promise<
     { ok?: boolean; stopped?: boolean; reason?: string } | void
   >;
   stopSpeak(): Promise<void>;
+  warmTts(o: { locale: string }): Promise<void>;
   openAccessibilitySettings(): Promise<{ ok?: boolean }>;
   consumePendingReason(): Promise<{ reason?: string; at?: number; sos?: boolean } | void>;
   addListener?(
@@ -181,6 +192,7 @@ function withDefaults(src: Partial<AuraNativeBridge>): AuraNativeBridge {
         .catch(() => ({ ok: false })),
     stopSpeak: () =>
       Promise.resolve(src.stopSpeak?.()).then(() => undefined).catch(() => undefined),
+    warmTts: () => Promise.resolve(),
     openAccessibilitySettings: () =>
       Promise.resolve(src.openAccessibilitySettings?.()).then((v) => !!v).catch(() => false),
     consumePendingReason: () =>
@@ -228,10 +240,11 @@ export function bridge(): AuraNativeBridge | null {
       return r && typeof r.lat === "number" ? (r as NativeLocation) : null;
     },
     speak: async (text, locale, voice) => {
-      const r = await p.speak({ text, locale, pitch: voice.pitch, rate: voice.rate });
+      const r = await p.speak({ text, locale, pitch: voice.pitch, rate: voice.rate, preset: voice.preset });
       return { ok: !!r?.ok, stopped: !!r?.stopped, reason: r?.reason };
     },
     stopSpeak: () => p.stopSpeak(),
+    warmTts: (locale) => p.warmTts({ locale }).then(() => undefined),
     openAccessibilitySettings: () => p.openAccessibilitySettings().then((r) => !!r?.ok),
     consumePendingReason: async () => {
       const r = await p.consumePendingReason();
@@ -331,3 +344,4 @@ export function homeWidgetPayload(
     topCard: top ? { kind: top.kind, headline: top.data?.headline ?? top.title } : undefined,
   };
 }
+

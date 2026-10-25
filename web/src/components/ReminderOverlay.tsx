@@ -30,7 +30,7 @@ export function ReminderOverlay({ item, locale, escalation, onTaken, onSnooze }:
       escalation === "notify-caregiver"
         ? t(locale, isFollowup ? "followupEscalation" : "caregiverEscalation")
         : t(locale, isFollowup ? "followupConfirm" : "medConfirm");
-    void speak(prompt, locale);
+    void speak(prompt, locale, undefined, "gentle");
     // haptic alert — Android Chrome only (iOS Safari has no vibrate); optional call is the guard
     navigator.vibrate?.([200, 100, 200]);
   }, [locale, escalation, isFollowup]);

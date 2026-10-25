@@ -59,11 +59,11 @@ export function SosOverlay({ open, locale, onClose, reason = "button", source = 
       setAck(res);
       setPhase("sent");
       navigator.vibrate?.(600); // long haptic = the request was accepted
-      void speak(t(locale, res?.notified?.length ? "sosNotified" : "sosNoFamily"), locale);
+      void speak(t(locale, res?.notified?.length ? "sosNotified" : "sosNoFamily"), locale, undefined, "urgent");
     } catch {
       setPhase("failed");
       navigator.vibrate?.([500, 150, 500]);
-      void speak(t(locale, "sosFailed"), locale);
+      void speak(t(locale, "sosFailed"), locale, undefined, "urgent");
     }
   }, [locale, reason, source]);
 
@@ -79,7 +79,7 @@ export function SosOverlay({ open, locale, onClose, reason = "button", source = 
     setPhase("confirm");
     setSeconds(15);
     navigator.vibrate?.([300, 100, 300]); // recognizable "attention" pattern
-    void speak(t(locale, reason === "fall" ? "fallDetected" : "sosConfirmQuestion"), locale);
+    void speak(t(locale, reason === "fall" ? "fallDetected" : "sosConfirmQuestion"), locale, undefined, "urgent");
   }, [open, locale, reason]);
 
   useEffect(() => {

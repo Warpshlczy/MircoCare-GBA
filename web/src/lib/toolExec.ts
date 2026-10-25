@@ -35,6 +35,7 @@ import {
   taskTextFromUtterance,
 } from "./tasks.ts";
 import { formatDistance } from "./geofence.ts";
+import { routePlanCard } from "./cards.ts";
 // 回读长者自己的话必须截断：任务文本长度由他决定，整句回读可以轻易超过
 // 一个呼吸（speech.ts 的第 4 条理由）。
 import { clip } from "./speech.ts";
@@ -55,6 +56,7 @@ const LOCAL_TOOLS = new Set([
   "defer_task",
   "locate",
   "navigate_home",
+  "plan_route",
   "call_contact",
   "open_app",
   "set_alarm",
@@ -143,6 +145,19 @@ interface Copy {
   deferNoMatch: string;
   appOpened: (key: string) => string;
   appFailed: string;
+  /** plan_route: the card's title, e.g. "去街市嘅路線" */
+  routeTitle: (destination: string) => string;
+  routeHomeTitle: string;
+  /** the one line spoken right after a plan is made (≤ SPEECH_BUDGET) */
+  routeLead: (destination: string) => string;
+  routeHomeLead: (distance: string | null) => string;
+  /** the task text saved so the plan has a "next" the senior can tick off */
+  routeTaskAway: (destination: string) => string;
+  routeTaskHome: string;
+  /** away-from-home plan steps, `d` = the destination */
+  routeStepsAway: (destination: string) => string[];
+  /** home plan steps, `d` = formatted distance or null */
+  routeStepsHome: (distance: string | null) => string[];
 }
 
 // Cantonese for HK/MO, plain Mandarin for the mainland. Short sentences, no
@@ -177,6 +192,17 @@ const COPY: Record<Locale, Copy> = {
     deferNoMatch: "我唔知你講邊件事，你話我知係邊件？",
     appOpened: (k) => `好，幫你開咗${k}。`,
     appFailed: "我開唔到，你睇下手機。",
+    routeTitle: (d) => `去${clip(d, 8)}嘅路線`,
+    routeHomeTitle: "返屋企嘅路線",
+    routeLead: (d) => `好，去${clip(d, 4)}嘅路線：先帶鎖匙同電話。`,
+    routeHomeLead: (dist) => (dist ? `你離屋企大約${dist}，行返平日條路就得。` : "好，我陪你行返屋企，唔認得路就企定定同我講。"),
+    routeTaskAway: (d) => `去${d}`,
+    routeTaskHome: "返屋企",
+    routeStepsAway: (d) => [`帶鎖匙、電話同身份證`, `行平日去${clip(d, 6)}嗰條路，慢慢行`, "到咗同我講一聲"],
+    routeStepsHome: (dist) =>
+      dist
+        ? [`你而家離屋企大約 ${dist}`, "行返平日條路返去", "唔認得路就企定定，同我講"]
+        : ["行返頭先行過嗰條路", "唔認得路就企定定，同我講", `要就打電話畀屋企人`],
   },
   "zh-MO": {
     taskSaved: (t) => `好，我記低咗：${clip(t, 8)}`,
@@ -207,6 +233,17 @@ const COPY: Record<Locale, Copy> = {
     deferNoMatch: "我唔知你講邊件事，你話我知係邊件？",
     appOpened: (k) => `好，幫你開咗${k}。`,
     appFailed: "我開唔到，你睇下手機。",
+    routeTitle: (d) => `去${clip(d, 8)}嘅路線`,
+    routeHomeTitle: "返屋企嘅路線",
+    routeLead: (d) => `好，去${clip(d, 4)}嘅路線：先帶鎖匙同電話。`,
+    routeHomeLead: (dist) => (dist ? `你離屋企大約${dist}，行返平日條路就得。` : "好，我陪你行返屋企，唔認得路就企定定同我講。"),
+    routeTaskAway: (d) => `去${d}`,
+    routeTaskHome: "返屋企",
+    routeStepsAway: (d) => [`帶鎖匙、電話同身份證`, `行平日去${clip(d, 6)}嗰條路，慢慢行`, "到咗同我講一聲"],
+    routeStepsHome: (dist) =>
+      dist
+        ? [`你而家離屋企大約 ${dist}`, "行返平日條路返去", "唔認得路就企定定，同我講"]
+        : ["行返頭先行過嗰條路", "唔認得路就企定定，同我講", "要就打電話畀屋企人"],
   },
   "zh-CN": {
     taskSaved: (t) => `好，我记下了：${clip(t, 8)}`,
@@ -237,6 +274,17 @@ const COPY: Record<Locale, Copy> = {
     deferNoMatch: "我不知道你说的是哪一件，你告诉我是哪件？",
     appOpened: (k) => `好，帮你打开了${k}。`,
     appFailed: "我打不开，你看看手机。",
+    routeTitle: (d) => `去${clip(d, 8)}的路线`,
+    routeHomeTitle: "回家的路线",
+    routeLead: (d) => `好，去${clip(d, 4)}的路线：先带钥匙和手机。`,
+    routeHomeLead: (dist) => (dist ? `你离家大约${dist}，走平时那条路就行。` : "好，我陪你走回家，不认得路就站定跟我说。"),
+    routeTaskAway: (d) => `去${d}`,
+    routeTaskHome: "回家",
+    routeStepsAway: (d) => ["带上钥匙、手机和身份证", `走平时去${clip(d, 6)}的那条路，慢慢走`, "到了跟我说一声"],
+    routeStepsHome: (dist) =>
+      dist
+        ? [`你现在离家大约 ${dist}`, "走平时那条路回去", "不认得路就站定，跟我说"]
+        : ["沿刚才走过的路回去", "不认得路就站定，跟我说", "需要就打给家里人"],
   },
 };
 
@@ -506,6 +554,38 @@ export function createToolRunner(deps: ToolRunnerDeps): ToolRunner {
     return { ok: true, message: copy.homeFar(formatDistance(distance)) };
   }
 
+  /**
+   * A walking plan, not a map: no SDK, no coordinates, no invented landmarks.
+   *
+   * Three ordered things he can actually do, the real distance when the goal is
+   * home, and a saved task — so the plan has a "next" he can tick off instead of
+   * ending at "好，我記住". The task is also what lets the family see that he
+   * intended to go out, which is a real signal, not decoration.
+   */
+  async function planRoute(args: Record<string, unknown>): Promise<ToolExecResult> {
+    const destination = norm(args.destination);
+    const home = !destination || /(屋企|返家|回家|歸家|归家)/.test(destination);
+    const distance = deps.homeDistanceM ? await deps.homeDistanceM().catch(() => null) : null;
+    const dist = distance === null ? "" : formatDistance(distance);
+
+    const title = home ? copy.routeHomeTitle : copy.routeTitle(destination);
+    const steps = home ? copy.routeStepsHome(dist || null) : copy.routeStepsAway(destination);
+    const text = home ? copy.routeTaskHome : copy.routeTaskAway(destination);
+
+    // Same text twice is him repeating himself, not a second outing.
+    if (!deps.tasks.some((t) => !t.done && t.text === text)) {
+      const task = newTask({ text, now: deps.now, source: "voice" });
+      await deps.saveTask(task);
+      if (deps.recordEvent) await deps.recordEvent(taskEventFor(task, "created", deps.now));
+    }
+
+    return {
+      ok: true,
+      cards: [routePlanCard(title, steps, deps.now)],
+      message: home ? copy.routeHomeLead(dist || null) : copy.routeLead(destination),
+    };
+  }
+
   async function deferTaskExec(args: Record<string, unknown>): Promise<ToolExecResult> {
     const query = norm(args.query);
     const id = norm(args.taskId);
@@ -559,6 +639,8 @@ export function createToolRunner(deps: ToolRunnerDeps): ToolRunner {
         return deferTaskExec(args);
       case "navigate_home":
         return navigateHome();
+      case "plan_route":
+        return planRoute(args);
       case "call_contact":
         return callContact(args);
       case "open_app":

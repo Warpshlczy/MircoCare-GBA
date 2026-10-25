@@ -59,7 +59,16 @@ import {
   onFailure,
   OUTBOX_MAX_ITEMS,
 } from "./lib/outbox.ts";
-import { refuseReason, riskOf, validateArgs, planCalls, dryRun, MAX_CALLS_PER_TURN } from "./lib/toolrun.ts";
+import {
+  refuseReason,
+  riskOf,
+  validateArgs,
+  planCalls,
+  planLocal,
+  routeDestination,
+  dryRun,
+  MAX_CALLS_PER_TURN,
+} from "./lib/toolrun.ts";
 import {
   newTask,
   taskTextFromUtterance,
@@ -506,13 +515,20 @@ assert.equal(magnitude(3, 4, 0), 5);
   assert.ok(pitch > 1 && pitch <= 2, `pitch=${pitch}`);
   assert.ok(rate > 0.5 && rate <= 1.2, `rate=${rate}`);
 
-  assert.ok(audio.includes(".speak(text, locale, BOY_VOICE)"), "native TextToSpeech is asked BEFORE Web Speech");
+  assert.ok(audio.includes(".speak(text, locale, voice)"), "native TTS is asked BEFORE Web Speech");
+  // The four tones must exist on the web path too, or a barge-in line would
+  // change character depending on which engine spoke it.
+  for (const preset of ["warm", "gentle", "cheerful", "urgent"]) {
+    assert.ok(audio.includes(`${preset}:`), `audio.ts maps the ${preset} preset`);
+  }
   assert.ok(audio.includes("r.ok || r.stopped"), "a barge-in resolves normally instead of replaying via Web Speech");
   assert.ok(audio.includes("bridge()?.stopSpeak()"), "cancelSpeech also stops the native engine");
 
   const seam = readFileSync(new URL("./lib/native.ts", import.meta.url), "utf8");
   assert.ok(seam.includes("speak(text: string, locale: string, voice: VoiceProfile)"), "the bridge exposes speak()");
   assert.ok(seam.includes("stopSpeak"), "the bridge exposes stopSpeak()");
+  assert.ok(seam.includes("warmTts"), "the shell can warm the neural voice before the first line");
+  assert.ok(seam.includes("preset: voice.preset"), "the tone preset crosses the native seam");
 
   const java = readFileSync(
     new URL("../android/app/src/main/java/com/auragba/app/AuraNativePlugin.java", import.meta.url),
@@ -522,6 +538,21 @@ assert.equal(magnitude(3, 4, 0), 5);
   assert.ok(java.includes("public void stopSpeak("), "Android implements stopSpeak()");
   assert.ok(java.includes("UtteranceProgressListener"), "the JS promise resolves on onDone/onError, not on speak() return");
   assert.ok(java.includes("tts.setPitch"), "the boy timbre reaches the native engine");
+  // The neural voice must be tried BEFORE the system engine, and the system
+  // engine must remain as the fallback (a missing model may never mean silence).
+  assert.ok(java.includes("neural.isReadyFor"), "a loaded neural voice is used first");
+  assert.ok(java.includes("speakWithSystem"), "the system engine stays as the fallback");
+  assert.ok(java.includes("NEURAL_GRACE_MS"), "the first line does not wait seconds for the model");
+  const neural = readFileSync(
+    new URL("../android/app/src/main/java/com/auragba/app/NeuralTts.java", import.meta.url),
+    "utf8"
+  );
+  assert.ok(neural.includes("com.k2fsa.sherpa.onnx.OfflineTts"), "the child voice is an on-box VITS model");
+  assert.ok(neural.includes('"tts/t2s.txt"'), "traditional characters are mapped before synthesis");
+  assert.ok(neural.includes("AudioTrack"), "generated PCM is played on the phone");
+  assert.ok(!neural.includes("http"), "no network path in the voice: PDPO data minimisation");
+  const assets = readFileSync(new URL("../android/app/src/main/assets/tts/t2s.txt", import.meta.url), "utf8");
+  assert.ok(assets.includes("帶 带"), "the t2s map covers the Cantonese lexicon gap");
 
   const manifest = readFileSync(
     new URL("../android/app/src/main/AndroidManifest.xml", import.meta.url),
@@ -617,7 +648,7 @@ assert.equal(magnitude(3, 4, 0), 5);
 
 // --- agent tool registry (B contract, docs/dev.md §3.5) ----------------------
 {
-  assert.equal(TOOLS.length, 11, "exactly 11 tools are declared");
+  assert.equal(TOOLS.length, 12, "exactly 12 tools are declared");
   const names = TOOLS.map((x) => x.name);
   assert.equal(new Set(names).size, names.length, "tool names must be unique");
 
@@ -638,7 +669,7 @@ assert.equal(magnitude(3, 4, 0), 5);
     "send_message",
     "ui_tap_text",
   ]);
-  assert.equal(TOOLS.filter((x) => x.risk === "safe").length, 7);
+  assert.equal(TOOLS.filter((x) => x.risk === "safe").length, 8);
 
   // "forbidden" is an utterance-level refusal in agent.ts, never a callable tool.
   assert.equal(names.some((n) => n.includes("transfer") || n.includes("pay")), false);
@@ -662,6 +693,34 @@ assert.equal(magnitude(3, 4, 0), 5);
   assert.deepEqual(toolByName("call_contact")?.permissions, []);
   // Opening an app is a launch, not a click, so it must not need accessibility.
   assert.deepEqual(toolByName("open_app")?.permissions, []);
+}
+
+// --- local planner: the agent still acts with no model in the loop -----------
+{
+  // Three outcomes for "where": a destination, "" (home), null (not a request).
+  assert.equal(routeDestination("帶我去街市"), "街市");
+  assert.equal(routeDestination("点去公园呀"), "公园");
+  assert.equal(routeDestination("規劃路線返屋企"), "屋企");
+  assert.equal(routeDestination("帶我去"), null, "vague cue with no destination is not a plan");
+  assert.equal(routeDestination("我去咗街市"), null, "a report is not a request");
+  assert.equal(routeDestination("呢條路線好好"), null, "a comment about a route is not a request");
+
+  assert.deepEqual(planLocal("帶我去街市"), [{ name: "plan_route", args: { destination: "街市" } }]);
+  assert.deepEqual(planLocal("規劃路線返屋企"), [{ name: "plan_route", args: { destination: "屋企" } }]);
+  assert.deepEqual(planLocal("點返屋企"), [{ name: "navigate_home", args: {} }]);
+  assert.deepEqual(planLocal("我喺邊"), [{ name: "locate", args: {} }]);
+  assert.deepEqual(planLocal("我好悶"), [], "chit-chat must not invent an action");
+  // Weather is A's real-data path. Guessing it here would speak a made-up sky.
+  assert.deepEqual(planLocal("听日天气点呀"), []);
+  assert.deepEqual(planLocal("打开微信"), [], "guessing an app is how the wrong thing opens");
+  assert.deepEqual(planLocal("帮我打电话畀阿明"), [], "guessing a contact is how the wrong person is dialled");
+
+  // A local plan is the same contract as a model plan: identical validation.
+  for (const text of ["帶我去街市", "規劃路線返屋企", "點返屋企", "我喺邊"]) {
+    const { steps, rejected } = planCalls(planLocal(text), "zh-HK");
+    assert.equal(rejected.length, 0, `${text}: local args must validate`);
+    assert.equal(steps.length, 1, `${text}: exactly one local step`);
+  }
 }
 
 // --- geofence: distance, hysteresis, alert policy (B / W1) -------------------
@@ -1080,6 +1139,52 @@ assert.equal(magnitude(3, 4, 0), 5);
   );
   assert.equal(bogus.steps.length, 0);
   assert.equal(bogus.skipped.length, 1);
+
+  // --- local plan must have a "next": talking is not an answer --------------
+  // No backend at all, yet the agent still acts.
+  const routed = await runTurn(
+    "帶我去街市",
+    baseDeps({
+      canRun: () => true,
+      runTool: async (s) => ({ ok: true, message: `route:${s.name}` }),
+    })
+  );
+  assert.equal(routed.handled, true);
+  assert.deepEqual(routed.steps.map((s) => s.name), ["plan_route"]);
+  assert.equal(routed.executed.length, 1);
+  assert.equal(routed.reply, "route:plan_route");
+
+  // The exact failure this guards: the model answers "好，我幫你記住" with no
+  // call. That reply must not swallow the local plan and end the turn in talk.
+  const talkedOnly = await runTurn(
+    "帶我去街市",
+    baseDeps({
+      canRun: () => true,
+      runTool: async () => ({ ok: true, message: "好，路線如下。" }),
+      requestTurn: async () => ({ reply: "好，我幫你記住。", calls: [], cards: [] }),
+    })
+  );
+  assert.deepEqual(talkedOnly.steps.map((s) => s.name), ["plan_route"], "a reply with no call must not swallow the plan");
+  assert.equal(talkedOnly.executed.length, 1);
+  assert.equal(talkedOnly.reply, "好，路線如下。", "the executor's line wins over the planner's filler");
+  assert.equal(talkedOnly.reply.includes("我幫你記住"), false);
+
+  // A build that cannot perform the tool must not plan it: answering "仲未接好"
+  // after promising a route is exactly the dead end we are removing.
+  const cannot = await runTurn("帶我去街市", baseDeps({ canRun: () => false }));
+  assert.equal(cannot.handled, false);
+
+  // The model's own plan still wins when it has one — local is a floor, not a
+  // replacement for a richer planner.
+  const modelFirst = await runTurn(
+    "帶我去街市",
+    baseDeps({
+      canRun: () => true,
+      runTool: async () => ({ ok: true, message: "done" }),
+      requestTurn: async () => ({ reply: "", calls: [{ name: "locate", args: {} }], cards: [] }),
+    })
+  );
+  assert.deepEqual(modelFirst.steps.map((s) => s.name), ["locate"]);
 }
 
 // --- native seam contract (B / W3) -------------------------------------------
@@ -1395,6 +1500,62 @@ assert.equal(magnitude(3, 4, 0), 5);
   assert.equal(localOnly.ok, true);
   assert.ok(localOnly.message?.includes("999"), `message=${localOnly.message}`);
   assert.equal(emergencyNumber("zh-CN"), "120");
+
+  // --- plan_route: a plan that ends somewhere he can tick off ----------------
+  const routeSaves: Task[] = [];
+  const routeEvents: TaskEvent[] = [];
+  const routeDeps = (extra: Record<string, unknown> = {}) =>
+    deps({
+      saveTask: async (t: Task) => {
+        routeSaves.push(t);
+      },
+      recordEvent: async (e: TaskEvent) => {
+        routeEvents.push(e);
+      },
+      ...extra,
+    });
+
+  // "好，我幫你記住" with nothing behind it is the complaint this tool exists
+  // for: a route answer must render steps AND leave a task he can act on.
+  const walk = await createToolRunner(routeDeps()).run(step("plan_route", { destination: "街市" }));
+  assert.equal(walk.ok, true);
+  assert.equal(walk.cards?.length, 1, "a plan must render a next step, not end in talk");
+  assert.equal(walk.cards?.[0].kind, "agentPlan");
+  assert.ok((walk.cards?.[0].data?.checklist ?? []).length >= 2, "at least two tickable steps");
+  assert.equal(walk.cards?.[0].title, "去街市嘅路線");
+  assert.equal(routeSaves.length, 1, "the outing becomes a task the family can see");
+  assert.equal(routeSaves[0].text, "去街市");
+  assert.equal(routeEvents.length, 1, "the task is a recorded intention, not decoration");
+  assert.ok(walk.message?.includes("街市"), `message=${walk.message}`);
+  assert.ok(spokenLength(walk.message ?? "") <= SPEECH_BUDGET, `超预算：${walk.message}`);
+
+  // Saying the same destination again is him repeating himself, not a second outing.
+  const again = await createToolRunner(routeDeps({ tasks: routeSaves })).run(
+    step("plan_route", { destination: "街市" })
+  );
+  assert.equal(again.ok, true);
+  assert.equal(routeSaves.length, 1, "no duplicate outing");
+  assert.equal(again.cards?.length, 1, "he still sees the plan he asked for again");
+
+  // Home: the real distance when we have it; never an invented landmark.
+  const home = await createToolRunner(routeDeps({ homeDistanceM: async () => 1240 })).run(
+    step("plan_route", { destination: "屋企" })
+  );
+  assert.equal(home.ok, true);
+  assert.equal(home.cards?.[0].title, "返屋企嘅路線");
+  assert.ok(home.message?.includes("1.2 公里"), `message=${home.message}`);
+  assert.ok(spokenLength(home.message ?? "") <= SPEECH_BUDGET, `超预算：${home.message}`);
+  const homeStep = (home.cards?.[0].data?.checklist ?? [])[0]?.text ?? "";
+  assert.ok(homeStep.includes("1.2 公里"), `step=${homeStep}`);
+
+  // No distance source and no destination word: still a plan, no coordinates,
+  // no fake "100 metres".
+  const homeBlind = await createToolRunner(routeDeps({ homeDistanceM: async () => null })).run(
+    step("plan_route", {})
+  );
+  assert.equal(homeBlind.ok, true);
+  assert.equal(homeBlind.cards?.length, 1);
+  assert.equal(/公里|米/.test(homeBlind.message ?? ""), false, `message=${homeBlind.message}`);
 
   // --- canRun: never ask a question we cannot follow through on ------------
   const runner = createToolRunner(deps());
