@@ -33,7 +33,20 @@ import {
   DEFAULT_OPERATING_POINT,
 } from "./lib/riskExplain.ts";
 import { parseIntent, isQuestion } from "./lib/intent.ts";
-import { localCardsFor, followupCard, todoCardFromUtterance, taskCard, placeCard, alarmCard, agentPlanCard } from "./lib/cards.ts";
+import {
+  localCardsFor,
+  followupCard,
+  todoCardFromUtterance,
+  taskCard,
+  placeCard,
+  alarmCard,
+  agentPlanCard,
+  parseCardScript,
+  cardFromScript,
+  recordsCard,
+  medRecordCard,
+  tasksCard,
+} from "./lib/cards.ts";
 import {
   latestNote,
   noteCard,
@@ -153,12 +166,12 @@ import {
   requiredPermissions,
   toolByName,
 } from "./lib/tools.ts";
-import type { GaitWindow, OutboxItem, ReminderItem, SosEvent, Task, TaskEvent } from "./lib/types.ts";
+import type { GaitWindow, OutboxItem, RecordEntry, ReminderItem, SosEvent, Task, TaskEvent } from "./lib/types.ts";
 
 // --- magnitude ---------------------------------------------------------------
 assert.equal(magnitude(3, 4, 0), 5);
 
-// --- fall detector: free-fall -> impact -> stillness fires -------------------
+// --- fall detector: free-fall -> heavy impact -> long stillness fires -------
 {
   const det = createFallDetector();
   const at = (t: number, az: number) => ({
@@ -174,17 +187,37 @@ assert.equal(magnitude(3, 4, 0), 5);
     at(0, G),
     at(100, G),
     at(200, G),
-    at(300, 2), // free-fall (|a| < 0.5g)
+    at(300, 2), // free-fall (|a| < 0.35g)
     at(400, 2),
-    at(500, 45), // impact spike
-    at(600, G),
-    at(700, G),
-    at(800, G),
-    at(900, G), // >= 300ms stillness -> confirm
+    at(500, 45), // heavy impact spike
+    ...Array.from({ length: 20 }, (_, i) => at(600 + i * 100, G)), // 2s still
   ];
   const hits = seq.map((s) => det.push(s)).filter((r) => r.fall);
   assert.equal(hits.length, 1, "fall should fire exactly once");
   assert.equal(hits[0].reason, "free-fall+impact");
+}
+
+// --- fall detector: a light knock / dropped phone stays silent ---------------
+{
+  const det = createFallDetector();
+  const at = (t: number, az: number, gx = 0.1) => ({ t, ax: 0, ay: 0, az, gx, gy: 0.1, gz: 0.1 });
+  let fired = false;
+  // 12 m/s² knock, no airborne phase, phone comes to rest: NOT a person falling.
+  for (const s of [at(0, G), at(100, G + 12), at(200, G), at(300, G), at(500, G), at(1800, G)]) {
+    if (det.push(s).fall) fired = true;
+  }
+  assert.equal(fired, false, "a light knock must not page the family");
+}
+
+// --- fall detector: impact with no free-fall and no violent rotation ---------
+{
+  const det = createFallDetector();
+  const at = (t: number, az: number) => ({ t, ax: 0, ay: 0, az, gx: 1, gy: 1, gz: 1 });
+  let fired = false;
+  for (const s of [at(0, G), at(100, G + 40), at(200, G), at(400, G), at(2000, G)]) {
+    if (det.push(s).fall) fired = true;
+  }
+  assert.equal(fired, false, "a table knock (no airborne phase, no rotation) must not fire");
 }
 
 // --- fall detector: walking stays silent -------------------------------------
@@ -649,7 +682,7 @@ assert.equal(magnitude(3, 4, 0), 5);
 
 // --- agent tool registry (B contract, docs/dev.md §3.5) ----------------------
 {
-  assert.equal(TOOLS.length, 12, "exactly 12 tools are declared");
+  assert.equal(TOOLS.length, 14, "exactly 14 tools are declared");
   const names = TOOLS.map((x) => x.name);
   assert.equal(new Set(names).size, names.length, "tool names must be unique");
 
@@ -670,7 +703,7 @@ assert.equal(magnitude(3, 4, 0), 5);
     "send_message",
     "ui_tap_text",
   ]);
-  assert.equal(TOOLS.filter((x) => x.risk === "safe").length, 8);
+  assert.equal(TOOLS.filter((x) => x.risk === "safe").length, 10);
 
   // "forbidden" is an utterance-level refusal in agent.ts, never a callable tool.
   assert.equal(names.some((n) => n.includes("transfer") || n.includes("pay")), false);
@@ -711,6 +744,19 @@ assert.equal(magnitude(3, 4, 0), 5);
   assert.deepEqual(planLocal("點返屋企"), [{ name: "navigate_home", args: {} }]);
   assert.deepEqual(planLocal("我喺邊"), [{ name: "locate", args: {} }]);
   assert.deepEqual(planLocal("我好悶"), [], "chit-chat must not invent an action");
+  // A report of a dose is an ACTION (write a record), never the med checklist.
+  assert.deepEqual(planLocal("我食咗藥"), [{ name: "log_medication", args: {} }]);
+  assert.deepEqual(planLocal("我啱啱食咗降壓藥"), [{ name: "log_medication", args: { name: "降壓藥" } }]);
+  assert.deepEqual(planLocal("吃了药"), [{ name: "log_medication", args: {} }]);
+  // A question / a denial is not a dose: logging it would invent medication.
+  assert.deepEqual(planLocal("我食咗藥未呀"), [], "a question must never log a dose");
+  assert.deepEqual(planLocal("我未食藥"), [], "a denial must never log a dose");
+  // "remind me" is a task, not a dose.
+  assert.deepEqual(planLocal("提醒我食藥"), [{ name: "create_task", args: { text: "提醒我食藥" } }]);
+  // The agent also writes its own record card when a measurement is dictated.
+  const scriptPlan = planLocal("記低我血壓 128/82");
+  assert.equal(scriptPlan[0]?.name, "compose_card");
+  assert.ok(String(scriptPlan[0]?.args.script).includes("128/82"), "the measured value reaches the card");
   // Weather is A's real-data path. Guessing it here would speak a made-up sky.
   assert.deepEqual(planLocal("听日天气点呀"), []);
   assert.deepEqual(planLocal("打开微信"), [], "guessing an app is how the wrong thing opens");
@@ -1557,6 +1603,149 @@ assert.equal(magnitude(3, 4, 0), 5);
   assert.equal(homeBlind.ok, true);
   assert.equal(homeBlind.cards?.length, 1);
   assert.equal(/公里|米/.test(homeBlind.message ?? ""), false, `message=${homeBlind.message}`);
+
+  // --- log_medication: a report becomes a durable record + a card ---------
+  {
+    const records: RecordEntry[] = [];
+    const medTask = newTask({ text: "食血壓藥", now: NOW - 600_000, id: "task-med" });
+    let cleared: string | null = null;
+    const medRunner = createToolRunner(
+      deps({
+        tasks: [medTask],
+        records,
+        saveRecord: async (r: RecordEntry) => {
+          records.push(r);
+        },
+        onMedTaken: (n: string) => {
+          cleared = n;
+        },
+      })
+    );
+    const logged = await medRunner.run(step("log_medication", {}));
+    assert.equal(logged.ok, true, logged.message);
+    assert.equal(records.length, 1, "one dose = one durable record");
+    assert.equal(records[0].kind, "med");
+    assert.equal(records[0].day, "2026-10-24", "the record carries its local calendar day");
+    assert.equal(logged.cards?.[0].kind, "record", "the senior sees a record card");
+    assert.ok(logged.cards?.[0].data?.checklist?.length === 1);
+    assert.equal(cleared, "藥", "the reminder is cleared through the injected hook");
+
+    // The same dose said twice must not double-count in the family report.
+    const twice = await createToolRunner(
+      deps({
+        tasks: [],
+        records: [records[0]],
+        saveRecord: async (r: RecordEntry) => {
+          records.push(r);
+        },
+      })
+    ).run(step("log_medication", {}));
+    assert.equal(records.length, 1, "a repeated report writes no second record");
+    assert.ok(twice.message?.includes("已經") || twice.message?.includes("已经"), twice.message);
+
+    // A named dose clears only the matching chore.
+    const other = newTask({ text: "食胃藥", now: NOW - 60_000, id: "task-other" });
+    const named = await createToolRunner(
+      deps({
+        tasks: [other],
+        records: [],
+        saveRecord: async () => {},
+      })
+    ).run(step("log_medication", { name: "血壓藥" }));
+    assert.equal(named.ok, true);
+  }
+
+  // --- compose_card: the agent's script DSL, never HTML --------------------
+  {
+    const records: RecordEntry[] = [];
+    const cardRunner = createToolRunner(
+      deps({
+        records,
+        saveRecord: async (r: RecordEntry) => {
+          records.push(r);
+        },
+      })
+    );
+    const cardOut = await cardRunner.run(
+      step("compose_card", { script: "title: 血壓記錄\nicon: 🩺\nheadline: 今日量咗血壓\nrow: 血壓 = 128/82\ncheck: [x] 早上量" })
+    );
+    assert.equal(cardOut.ok, true, cardOut.message);
+    const card = cardOut.cards?.[0];
+    assert.equal(card?.kind, "record");
+    assert.equal(card?.data?.icon, "🩺");
+    assert.equal(card?.data?.rows?.[0]?.value, "128/82");
+    assert.equal(card?.data?.checklist?.[0]?.done, true);
+    assert.equal(records.length, 1, "the composed card is also persisted");
+    assert.equal(records[0].kind, "measure", "default record category is a measurement");
+
+    // HTML/JS never reaches the renderer: tags are stripped, not executed.
+    const hostile = await cardRunner.run(
+      step("compose_card", { script: "title: <script>alert(1)</script>好\nheadline: <img src=x onerror=alert(2)>" })
+    );
+    assert.equal(hostile.ok, true);
+    assert.equal(/<script|<img/i.test(JSON.stringify(hostile.cards ?? [])), false, "markup must not survive");
+
+    // An empty script is a failure the senior hears, not a blank card.
+    const empty = await cardRunner.run(step("compose_card", { script: "   " }));
+    assert.equal(empty.ok, false);
+    assert.equal((empty.cards ?? []).length, 0);
+  }
+
+  // --- set_alarm also leaves a record (an alarm survives a restart) --------
+  {
+    const records: RecordEntry[] = [];
+    const alarmRunner = createToolRunner(
+      deps({
+        setAlarm: async () => true,
+        saveRecord: async (r: RecordEntry) => {
+          records.push(r);
+        },
+      })
+    );
+    const armed = await alarmRunner.run(step("set_alarm", { time: "08:00", label: "覆診" }));
+    assert.equal(armed.ok, true, armed.message);
+    assert.equal(records.length, 1);
+    assert.equal(records[0].kind, "alarm");
+    assert.ok(records[0].detail?.includes("點") || records[0].detail?.includes("点"), String(records[0].detail));
+    assert.equal(armed.cards?.[0].kind, "alarm", "the senior sees the alarm card");
+  }
+
+  // --- records card: today's durable list, and a truthful empty state ------
+  {
+    const rows: RecordEntry[] = [
+      { id: "r1", kind: "med", title: "食藥：降壓藥", at: new Date(2026, 9, 24, 8, 5).getTime(), day: "2026-10-24", source: "voice" },
+      { id: "r2", kind: "alarm", title: "覆診", detail: "今日8點", at: new Date(2026, 9, 24, 7, 0).getTime(), day: "2026-10-24", source: "voice" },
+    ];
+    const card = recordsCard(rows, "zh-HK", NOW);
+    assert.equal(card.kind, "record");
+    assert.equal(card.data?.checklist?.length, 2);
+    assert.ok(card.data?.checklist?.[0]?.text.includes("08:05"), String(card.data?.checklist?.[0]?.text));
+    const none = recordsCard([], "zh-HK", NOW);
+    assert.equal(none.data?.headline, t("zh-HK", "recordsEmpty"));
+
+    const med = medRecordCard("降壓藥", NOW, "zh-HK");
+    assert.equal(med.data?.headline, t("zh-HK", "medLogged"));
+
+    const chores = tasksCard(
+      [newTask({ text: "買藥", now: NOW, id: "t1" })],
+      "zh-HK",
+      NOW
+    );
+    assert.equal(chores.data?.checklist?.[0]?.done, false, "an open chore is tickable, not ticked");
+  }
+
+  // --- card script parser: directives only, markup stripped ----------------
+  {
+    const parsed = parseCardScript("title: 記錄\nrow: 血壓 = 128/82\ncheck: [ ] 晚上再量");
+    assert.equal(parsed?.title, "記錄");
+    assert.equal(parsed?.data.rows?.[0]?.label, "血壓");
+    assert.equal(parsed?.data.checklist?.[0]?.done, false);
+    assert.equal(parseCardScript("完全冇指令"), null, "free text is not a card");
+    assert.equal(parseCardScript(""), null);
+    const built = cardFromScript(parsed!, NOW);
+    assert.equal(built.kind, "record");
+    assert.equal(built.createdAt, NOW);
+  }
 
   // --- canRun: never ask a question we cannot follow through on ------------
   const runner = createToolRunner(deps());

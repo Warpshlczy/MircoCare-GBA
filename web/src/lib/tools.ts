@@ -90,12 +90,35 @@ export const TOOLS: readonly ToolDecl[] = [
   {
     name: "complete_task",
     description:
-      "Mark a task done by id or by a spoken query ('我食咗药'). Returns the confirm delay in minutes.",
+      "Mark a non-medication task done by id or by a spoken query ('我做咗啦'). " +
+      "For medication, use log_medication instead — it also writes the durable record.",
     schema: {
       type: "object",
       properties: {
         taskId: { type: "string", description: "Exact task id when known." },
         query: { type: "string", description: "Spoken words to match when the id is unknown." },
+      },
+      required: [],
+      additionalProperties: false,
+    },
+    risk: "safe",
+    permissions: [],
+  },
+  {
+    name: "log_medication",
+    description:
+      "Record that the senior has TAKEN their medication ('我食咗藥', '吃了药', '食完藥'). " +
+      "Writes a durable on-device medication record, ticks off the matching medication task and " +
+      "clears today's medication reminder. Use only when they report having taken it — never for " +
+      "'提醒我食藥' (that is create_task) or a question ('食咗藥未呀').",
+    schema: {
+      type: "object",
+      properties: {
+        name: {
+          type: "string",
+          description: "Medication name in the senior's own words. Omit when they did not say one.",
+        },
+        note: { type: "string", description: "Optional short note (dose, how they feel)." },
       },
       required: [],
       additionalProperties: false,
@@ -187,6 +210,33 @@ export const TOOLS: readonly ToolDecl[] = [
         },
       },
       required: [],
+      additionalProperties: false,
+    },
+    risk: "safe",
+    permissions: [],
+  },
+  {
+    name: "compose_card",
+    description:
+      "Compose a small plain-text card for the senior when a result deserves to stay on screen " +
+      "(a record, a summary, a checklist). Write ONE directive per line: 'title: …', 'icon: …', " +
+      "'headline: …', 'row: label = value', 'check: [x] text' or 'check: [ ] text'. " +
+      "Plain text only — no HTML, no JavaScript, no URLs. The card is also saved as a local record.",
+    schema: {
+      type: "object",
+      properties: {
+        script: {
+          type: "string",
+          description:
+            "Card script, one directive per line. Example: 'title: 血压记录\\nicon: 🩺\\nrow: 血压 = 128/82'.",
+        },
+        kind: {
+          type: "string",
+          description: "Record category: measure (default), med, alarm or card.",
+          enum: ["measure", "med", "alarm", "card"],
+        },
+      },
+      required: ["script"],
       additionalProperties: false,
     },
     risk: "safe",

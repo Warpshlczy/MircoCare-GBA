@@ -11,8 +11,6 @@ export interface MedItem {
   id: string;
   name: string;
   dosage: string;
-  /** "碰一碰打卡" NFC tag text written onto the box/tag. */
-  nfcTag?: string;
 }
 
 export type ReminderKind = "med" | "followup";
@@ -211,7 +209,8 @@ export type CardKind =
   // never by `kind`, so these need no renderer branch — only a card factory.
   | "place" // geofence / whereabouts ("你而家喺街市附近")
   | "alarm" // time-based ("聽日十點覆診")
-  | "agentPlan"; // multi-step preview ("我準備做呢三件事")
+  | "agentPlan" // multi-step preview ("我準備做呢三件事")
+  | "record"; // durable on-device record ("今日食藥 08:12")
 
 export interface CardRow {
   label: string;
@@ -236,6 +235,24 @@ export interface CardAction {
   id: string;
   label: string;
   intent: Intent;
+}
+
+// ---------------------------------------------------------------------------
+// Durable on-device records (medication / alarms / measurements).
+// The senior's own record, kept locally only — never uploaded with free text.
+// ---------------------------------------------------------------------------
+export type RecordKind = "med" | "alarm" | "measure" | "card";
+
+export interface RecordEntry {
+  id: string;
+  kind: RecordKind;
+  title: string;
+  /** short detail shown on the card; never a raw audio transcript */
+  detail?: string;
+  at: number;
+  /** local calendar day, `YYYY-MM-DD` — lets the app re-show today after a restart */
+  day: string;
+  source: "voice" | "reminder" | "agent";
 }
 
 export interface AgentCard {

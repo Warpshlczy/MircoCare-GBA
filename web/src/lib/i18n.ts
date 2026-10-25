@@ -8,9 +8,16 @@ export type MsgKey =
   | "medConfirm"
   | "medTaken"
   | "medSnooze"
-  | "nfcTapHint"
-  | "nfcScanning"
-  | "nfcUnavailable"
+  | "medLogged"
+  | "medAskDaily"
+  | "medDailyAck"
+  | "medTodayDone"
+  | "medTodayNone"
+  | "tasksOpenCount"
+  | "recordsTitle"
+  | "recordsEmpty"
+  | "tasksPending"
+  | "taskTicked"
   | "sosConfirmQuestion"
   | "sosDialing"
   | "sosSending"
@@ -102,7 +109,7 @@ export type MsgKey =
   | "careLost"
   | "silenceCare"
   | "quickTitle"
-  | "quickMed"
+  | "quickRecords"
   | "quickToday"
   | "quickCallFamily"
   | "toolsClose"
@@ -123,12 +130,19 @@ type Dict = Record<MsgKey, string>;
 const zhHK: Dict = {
   greeting: "阿婆／阿伯你好，我係憶伴，有事隨時叫我。",
   medReminder: "夠鐘食藥喇，記得食埋枱面嗰盒藥。",
-  medConfirm: "你食咗藥未呀？食咗就撳一撳，或者攞個藥盒碰一碰。",
+  medConfirm: "你食咗藥未呀？食咗就撳個大掣，或者直接話我知「食咗」。",
   medTaken: "好，知道喇，已幫你記低。",
   medSnooze: "得，陣間再提你。",
-  nfcTapHint: "攞個藥盒喺手機背面碰一碰，就當打卡。",
-  nfcScanning: "等一等，聽緊藥盒…",
-  nfcUnavailable: "呢部手機冇碰一碰，撳下面個大掣都得。",
+  medLogged: "好，我記低咗你食咗藥。",
+  medAskDaily: "今日食咗藥未呀？食咗就話我知。",
+  medDailyAck: "好，幫你記低咗，藥單已經劃走。",
+  medTodayDone: "今日已記錄",
+  medTodayNone: "今日未記錄",
+  tasksOpenCount: "仲有 {n} 件",
+  recordsTitle: "今日記錄",
+  recordsEmpty: "今日仲未有記錄。",
+  tasksPending: "仲有 {n} 件未做嘅事，做完話我知，我幫你劃走。",
+  taskTicked: "好，幫你劃走咗。",
   sosConfirmQuestion: "你係咪唔舒服？需要我幫你嗌人嗎？",
   sosDialing: "好，我即刻幫你通知屋企人同社區照顧員。",
   sosSending: "正在發出求助…",
@@ -220,7 +234,7 @@ const zhHK: Dict = {
   careLost: "唔緊要，慢慢搵。如果之前叫我記低過，你可以問我「我記低咗咩」。",
   silenceCare: "阿婆／阿伯，兩日冇聽到你把聲，掛住你呀。今日點呀？",
   quickTitle: "常用",
-  quickMed: "食藥",
+  quickRecords: "今日記錄",
   quickToday: "今日安排",
   quickCallFamily: "打畀屋企人",
   toolsClose: "收埋",
@@ -240,12 +254,19 @@ const zhHK: Dict = {
 const zhCN: Dict = {
   greeting: "奶奶／爷爷您好，我是忆伴，有事随时叫我。",
   medReminder: "到点吃药啦，记得把桌上那盒药吃了。",
-  medConfirm: "您吃药了吗？吃了就点一下，或者拿药盒来碰一碰。",
+  medConfirm: "您吃药了吗？吃了就点大按钮，或者直接告诉我「吃了」。",
   medTaken: "好，知道啦，已经帮您记下了。",
   medSnooze: "好的，等会儿再提醒您。",
-  nfcTapHint: "把药盒在手机背面碰一碰，就算打卡。",
-  nfcScanning: "稍等，正在听药盒…",
-  nfcUnavailable: "这台手机没有碰一碰，点下面的大按钮也可以。",
+  medLogged: "好，我记下您吃过药了。",
+  medAskDaily: "今天吃药了吗？吃了就告诉我。",
+  medDailyAck: "好，帮您记下了，吃药日程已经划掉。",
+  medTodayDone: "今天已记录",
+  medTodayNone: "今天未记录",
+  tasksOpenCount: "还有 {n} 件",
+  recordsTitle: "今日记录",
+  recordsEmpty: "今天还没有记录。",
+  tasksPending: "还有 {n} 件没做完的事，做完告诉我，我帮您划掉。",
+  taskTicked: "好，帮您划掉了。",
   sosConfirmQuestion: "您是不是不舒服？需要我帮您叫人吗？",
   sosDialing: "好，我马上帮您通知家人和社区照护员。",
   sosSending: "正在发出求助…",
@@ -337,7 +358,7 @@ const zhCN: Dict = {
   careLost: "没关系，慢慢找。如果之前让我记过，您可以问我「我记了什么」。",
   silenceCare: "奶奶／爷爷，两天没听到您的声音，挺想您的。今天怎么样？",
   quickTitle: "常用",
-  quickMed: "吃药",
+  quickRecords: "今日记录",
   quickToday: "今天安排",
   quickCallFamily: "打给家人",
   toolsClose: "收起",

@@ -1,6 +1,6 @@
 // Offline-first IndexedDB wrapper. ~30 lines, promise-based, no library.
 // Stores: reminders | gait | screening | meta | events | conversation | notes
-//       | tasks | outbox | agent_audit
+//       | tasks | outbox | agent_audit | records
 // Records use an `id` key.
 
 export type Store =
@@ -14,14 +14,16 @@ export type Store =
   // v5 (agent layer, B): local tasks, offline replay queue, tool audit trail.
   | "tasks"
   | "outbox"
-  | "agent_audit";
+  | "agent_audit"
+  // v6: durable medication / alarm / measurement records.
+  | "records";
 
 const DB_NAME = "auragba"; // FROZEN: renaming opens an empty DB (docs/dev.md §1.3)
-// v4 adds `notes`; v5 adds `tasks` / `outbox` / `agent_audit`.
+// v4 adds `notes`; v5 adds `tasks` / `outbox` / `agent_audit`; v6 adds `records`.
 // Bumping the version is REQUIRED when adding a store: `onupgradeneeded` only
 // runs on a version change, so an existing install would otherwise open fine
 // and then throw NotFoundError on the first `objectStore("tasks")` call.
-const DB_VERSION = 5;
+const DB_VERSION = 6;
 const STORES: Store[] = [
   "reminders",
   "gait",
@@ -33,6 +35,7 @@ const STORES: Store[] = [
   "tasks",
   "outbox",
   "agent_audit",
+  "records",
 ];
 
 let dbPromise: Promise<IDBDatabase> | null = null;

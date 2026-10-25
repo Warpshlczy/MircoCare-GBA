@@ -86,6 +86,42 @@ export function useReminder(initial: ReminderItem[] = [], options: ReminderOptio
     clear();
   }, [update, clear]);
 
+  /**
+   * Tick one reminder without waiting for it to be due. Used when the senior
+   * says "食咗" or taps the item on a card, so the schedule is cleared even if
+   * the reminder never reached the full-screen prompt.
+   */
+  const takeById = useCallback((id: string): boolean => {
+    const active = dueRef.current;
+    if (active?.id === id) {
+      update({ ...active, status: "taken" });
+      clear();
+      return true;
+    }
+    const target = items.find((r) => r.id === id && r.status !== "taken");
+    if (!target) return false;
+    update({ ...target, status: "taken" });
+    return true;
+  }, [items, update, clear]);
+
+  /** "我食咗藥": clear the live med prompt, or the latest pending med reminder. */
+  const takeMedication = useCallback((name?: string) => {
+    const active = dueRef.current;
+    if (active && active.kind === "med") {
+      update({ ...active, status: "taken" });
+      clear();
+      return;
+    }
+    const pending = items
+      .filter((r) => r.kind === "med" && r.status === "pending")
+      .sort((a, b) => b.dueAt - a.dueAt);
+    const named = name
+      ? pending.find((r) => (r.med?.name ?? r.title).includes(name))
+      : undefined;
+    const target = named ?? pending[0];
+    if (target) update({ ...target, status: "taken" });
+  }, [items, update, clear]);
+
   const snooze = useCallback(() => {
     const active = dueRef.current;
     if (!active) return;
@@ -100,5 +136,5 @@ export function useReminder(initial: ReminderItem[] = [], options: ReminderOptio
     clear();
   }, [update, clear]);
 
-  return { due, escalation, items, schedule, confirmTaken, snooze, dismiss };
+  return { due, escalation, items, schedule, confirmTaken, takeById, takeMedication, snooze, dismiss };
 }

@@ -24,9 +24,11 @@
 | 能力 | 现状 |
 |---|---|
 | 语音入口 | 前台唤醒词、主动问候、每日签到、回到前台续聊；Android 壳内已实现后台唤醒前台服务 |
-| 用药与复诊 | 吃药提醒 + 10/30 分钟升级；复诊提醒表单（`kind: followup`）；升级事件写入家属 outbox |
+| 用药与复诊 | 无吃药按钮：老人说「我食咗藥」即由 Agent 记录并弹出记录卡片；每日主动问药；点卡片或说「吃了」即划走日程；到点提醒 + 10/30 分钟升级；复诊提醒表单（`kind: followup`） |
+| 本机记录 | 吃药、闹钟、自述测量等写入 IndexedDB `records`（v6）；重启后「今日記錄」仍在，首页常驻一行摘要 |
+| Agent 工具链 | 14 个声明式工具，含 `log_medication`（记录吃药）与 `compose_card`（Agent 用纯文本脚本自建卡片，不执行 HTML/JS）；未配置模型时本地规划器接管 |
 | 记忆辅助 | 「记住…」保存到本机 IndexedDB；「我记低咗咩」读回最近一条；**笔记不上传** |
-| 健康与安全 | 1 分钟语音筛查（仅上报派生特征）、前台跌倒检测、SOS 三态（发送中/已记录/失败）+ 急救拨号兜底 |
+| 健康与安全 | 1 分钟语音筛查（仅上报派生特征）、前台跌倒检测（只认「失重 + 重撞 + 1.5 秒静止」的重摔）、SOS 三态（发送中/已记录/失败）+ 急救拨号兜底 |
 | 健康卡与家属端 | 后端健康卡 + 二维码；家属配对、风险/活动趋势、筛查次数、SOS 确认、通知记录 |
 | Agent 卡片 | 后端 Agent 可选（OpenAI-compatible）；未配置时回退本地卡片工厂 / 原话成待办卡；天气走 Open-Meteo 实时数据 |
 
@@ -84,7 +86,7 @@ npm run android      # cap open android（Android Studio 构建 APK）
 # 或命令行：cd android && ./gradlew assembleDebug
 ```
 
-> 真机验证需 **HTTPS 或 localhost**（麦克风、摄像头、`DeviceMotionEvent`、Web NFC 均要求安全上下文）。
+> 真机验证需 **HTTPS 或 localhost**（麦克风、摄像头、`DeviceMotionEvent` 均要求安全上下文）。
 
 ---
 
@@ -97,7 +99,7 @@ npm run android      # cap open android（Android Studio 构建 APK）
 ```
 
 - **纯函数层**：`signal.ts` / `intent.ts` / `cards.ts` / `notes.ts` / `datetime.ts` / `native.ts` / `checkin.ts` —— 不触碰 `window`，可被 node 直接断言。
-- **浏览器胶水层**：`audio.ts` / `vad.ts` / `motion.ts` / `nfc.ts` / `camera.ts`。
+- **浏览器胶水层**：`audio.ts` / `vad.ts` / `motion.ts` / `camera.ts` / `recordStore.ts`。
 - **后端唯一入口**：`web/src/lib/api.ts`（10 个契约函数全部接线；3 个 LLM 端点默认关闭，未配置/失败时返回 501/503 → 前端自动兜底）。
 - **原生接缝**：`lib/native.ts` + Capacitor `AuraNative` 插件（后台唤醒已实现；桌面小组件、自动前置仍为桩）。
 
@@ -115,7 +117,7 @@ npm run android      # cap open android（Android Studio 构建 APK）
 ## 隐私与合规
 
 - 原始音频 / 原始传感器流**不得出端**；只上传 VAD 裁剪后的派生特征与粗粒度、无自由文本的埋点。
-- 随手记（`notes` store）与提醒数据**只保存在本机 IndexedDB**，不上传后端；埋点只记录粗粒度计数。
+- 随手记（`notes` store）、记录（`records` store）与提醒数据**只保存在本机 IndexedDB**，不上传后端；埋点只记录粗粒度计数。
 - 仅使用假名 `DeviceId`，禁用 IDFA / AAID / IMEI / MAC。
 - LLM 端点默认关闭；启用时只发送 PII 擦除后的最近对话文本，不发送音频、设备标识或健康卡。使用第三方模型前需完成数据出境与同意评估。
 - Web 会话使用 HttpOnly `aura_session` Cookie；原生/CLI 可用 `Authorization: Bearer`。身份校验通过后才解析 `X-Device-Id`。
@@ -134,7 +136,7 @@ npm run android      # cap open android（Android Studio 构建 APK）
 | 系统桌面小组件 | ❌ 网页不能写系统桌面 | 原生 AppWidget |
 | 后台 / 息屏传感器采样 | ⚠️ 锁屏即停采 | 原生壳 / BLE 穿戴 |
 | 准时提醒（吃药 / 复诊） | ⚠️ App 关闭时不会到点弹窗；下次打开补提醒 | 原生定时通知 |
-| 震动、Web NFC | ⚠️ 仅 Android Chrome | 原生 |
+| 震动反馈 | ⚠️ 仅 Android Chrome | 原生 |
 
 所有「有已知天花板的简化」在源码中以 `ponytail:` 注释标注（共 15 处），每处都写明天花板与升级路径。
 

@@ -275,9 +275,12 @@ export async function runTurn(utterance: string, deps: AgentDeps): Promise<TurnO
     return { ...emptyOutcome(), handled: true, refused: true, reply: refuse };
   }
 
-  // 2. Local card: fast, offline, and identical to what the app already does.
+  // 2. Local tool intent first: "我食咗藥" reports a dose and must WRITE a
+  // record, not render the medication checklist card. Only when no tool can
+  // act do we fall back to the local card for the same utterance.
+  const localCalls = planLocal(text).filter((c) => (deps.canRun ? deps.canRun(c.name) : true));
   const intent = parseIntent(text);
-  if (LOCAL_CARD_INTENTS.has(intent)) {
+  if (localCalls.length === 0 && LOCAL_CARD_INTENTS.has(intent)) {
     const cards = localCardsFor(intent, deps.locale, { reminders: deps.reminders, now: deps.now });
     if (cards.length > 0) {
       return { ...emptyOutcome(), handled: true, cards };
@@ -301,9 +304,7 @@ export async function runTurn(utterance: string, deps: AgentDeps): Promise<TurnO
 
   const modelCalls = res?.calls ?? [];
   const modelCards = res?.cards ?? [];
-  // Only locally plan what this build can actually perform: planning an
-  // `open_app` on the web build would answer "仲未接好" instead of A's own path.
-  const localCalls = planLocal(text).filter((c) => (deps.canRun ? deps.canRun(c.name) : true));
+  // `localCalls` was computed above (only tools this build can actually run).
   const calls = modelCalls.length > 0 || modelCards.length > 0 ? modelCalls : localCalls;
 
   if (!res && calls.length === 0) {

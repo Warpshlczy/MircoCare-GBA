@@ -27,6 +27,7 @@
 
 import {
   DUPLICATE_WINDOW_MS,
+  dayKey,
   deferTask,
   latestOpenTask,
   markDone,
@@ -35,13 +36,13 @@ import {
   taskTextFromUtterance,
 } from "./tasks.ts";
 import { formatDistance } from "./geofence.ts";
-import { routePlanCard } from "./cards.ts";
+import { alarmCard, cardFromScript, medRecordCard, parseCardScript, routePlanCard } from "./cards.ts";
 // 回读长者自己的话必须截断：任务文本长度由他决定，整句回读可以轻易超过
 // 一个呼吸（speech.ts 的第 4 条理由）。
 import { clip } from "./speech.ts";
 import type { ToolExecResult } from "./agent.ts";
 import type { PlannedStep } from "./toolrun.ts";
-import type { Locale, SosEvent, Task, TaskEvent } from "./types";
+import type { Locale, RecordEntry, RecordKind, SosEvent, Task, TaskEvent } from "./types";
 
 /**
  * Tools this runner can actually perform. Everything else (navigate_home,
@@ -53,6 +54,8 @@ const LOCAL_TOOLS = new Set([
   "sos",
   "create_task",
   "complete_task",
+  "log_medication",
+  "compose_card",
   "defer_task",
   "locate",
   "navigate_home",
@@ -90,6 +93,12 @@ export interface ToolRunnerDeps {
   homeDistanceM?: () => Promise<number | null>;
   /** launch one whitelisted app ('wechat' | 'phone' | 'camera' | 'settings') */
   openApp?: (key: string) => Promise<boolean>;
+  /** durable on-device record write (medication / alarm / measurement) */
+  saveRecord?: (entry: RecordEntry) => Promise<void>;
+  /** snapshot of today's records, used to refuse a double dose log */
+  records?: RecordEntry[];
+  /** clear the medication reminder the senior just confirmed */
+  onMedTaken?: (name: string) => void;
 }
 
 export interface ToolRunner {
@@ -153,6 +162,13 @@ interface Copy {
   /** the one line spoken right after a plan is made (≤ SPEECH_BUDGET) */
   routeLead: (destination: string) => string;
   routeHomeLead: (distance: string | null) => string;
+  /** medication really logged; the card stays on screen */
+  medLogged: (name: string) => string;
+  medLoggedPlain: string;
+  /** the same dose was already logged minutes ago */
+  medAlready: (min: number) => string;
+  /** compose_card got a script with nothing renderable in it */
+  cardNoContent: string;
   /** the task text saved so the plan has a "next" the senior can tick off */
   routeTaskAway: (destination: string) => string;
   routeTaskHome: string;
@@ -202,6 +218,10 @@ const COPY: Record<Locale, Copy> = {
     routeHomeTitle: "返屋企嘅路線",
     routeLead: (d) => `好，去${clip(d, 4)}嘅路線：先帶鎖匙同電話。`,
     routeHomeLead: (dist) => (dist ? `你離屋企大約${dist}，行返平日條路就得。` : "好，我陪你行返屋企，唔認得路就企定定同我講。"),
+    medLogged: (n) => `好，我記低咗你食咗${clip(n, 6)}。`,
+    medLoggedPlain: "好，我記低咗你食咗藥。",
+    medAlready: (m) => (m <= 0 ? "你呢次已經記低咗喇。" : `你 ${m} 分鐘前已經記低咗食藥喇。`),
+    cardNoContent: "我寫唔到呢張卡，你再講一次？",
     routeTaskAway: (d) => `去${d}`,
     routeTaskHome: "返屋企",
     routeStepsAway: (d) => [`帶鎖匙、電話同身份證`, `行平日去${clip(d, 6)}嗰條路，慢慢行`, "到咗同我講一聲"],
@@ -247,6 +267,10 @@ const COPY: Record<Locale, Copy> = {
     routeHomeTitle: "返屋企嘅路線",
     routeLead: (d) => `好，去${clip(d, 4)}嘅路線：先帶鎖匙同電話。`,
     routeHomeLead: (dist) => (dist ? `你離屋企大約${dist}，行返平日條路就得。` : "好，我陪你行返屋企，唔認得路就企定定同我講。"),
+    medLogged: (n) => `好，我記低咗你食咗${clip(n, 6)}。`,
+    medLoggedPlain: "好，我記低咗你食咗藥。",
+    medAlready: (m) => (m <= 0 ? "你呢次已經記低咗喇。" : `你 ${m} 分鐘前已經記低咗食藥喇。`),
+    cardNoContent: "我寫唔到呢張卡，你再講一次？",
     routeTaskAway: (d) => `去${d}`,
     routeTaskHome: "返屋企",
     routeStepsAway: (d) => [`帶鎖匙、電話同身份證`, `行平日去${clip(d, 6)}嗰條路，慢慢行`, "到咗同我講一聲"],
@@ -292,6 +316,10 @@ const COPY: Record<Locale, Copy> = {
     routeHomeTitle: "回家的路线",
     routeLead: (d) => `好，去${clip(d, 4)}的路线：先带钥匙和手机。`,
     routeHomeLead: (dist) => (dist ? `你离家大约${dist}，走平时那条路就行。` : "好，我陪你走回家，不认得路就站定跟我说。"),
+    medLogged: (n) => `好，我记下您吃过${clip(n, 6)}了。`,
+    medLoggedPlain: "好，我记下您吃过药了。",
+    medAlready: (m) => (m <= 0 ? "这次已经记下了。" : `您 ${m} 分钟前已经记下吃过药了。`),
+    cardNoContent: "我写不出这张卡，您再说一次？",
     routeTaskAway: (d) => `去${d}`,
     routeTaskHome: "回家",
     routeStepsAway: (d) => ["带上钥匙、手机和身份证", `走平时去${clip(d, 6)}的那条路，慢慢走`, "到了跟我说一声"],
@@ -393,6 +421,7 @@ export function createToolRunner(deps: ToolRunnerDeps): ToolRunner {
     if (name === "call_contact") return typeof deps.contacts === "function" && typeof deps.dial === "function";
     if (name === "navigate_home") return typeof deps.homeDistanceM === "function";
     if (name === "open_app") return typeof deps.openApp === "function";
+    if (name === "log_medication" || name === "compose_card") return true;
     return true; // create_task / complete_task need nothing but storage
   }
 
@@ -507,8 +536,107 @@ export function createToolRunner(deps: ToolRunnerDeps): ToolRunner {
     } catch {
       return { ok: false, message: copy.alarmFailed };
     }
+    const when = alarmWhenLabel(at, deps.now, deps.locale);
+    // The alarm is a record too: a restart must still show "聽日八點 覆診".
+    if (deps.saveRecord) {
+      await deps.saveRecord({
+        id: `rec-alarm-${at}`,
+        kind: "alarm",
+        title: label,
+        detail: when,
+        at: deps.now,
+        day: dayKey(deps.now),
+        source: "voice",
+      });
+    }
     // Say WHICH day it landed on: "八點" at 9am means tomorrow, and he must hear that.
-    return { ok: true, message: copy.alarmSet(alarmWhenLabel(at, deps.now, deps.locale)) };
+    return { ok: true, cards: [alarmCard({ at, label }, deps.locale, deps.now)], message: copy.alarmSet(when) };
+  }
+
+  /**
+   * "我食咗藥" → one durable record, the matching chore ticked, today's reminder
+   * cleared, and a card that stays on screen. A report is not a request, so
+   * nothing here needs confirmation.
+   */
+  async function logMedication(args: Record<string, unknown>): Promise<ToolExecResult> {
+    const name = norm(args.name).slice(0, 16);
+    const note = norm(args.note).slice(0, 30);
+
+    // Same dose logged twice in the duplicate window: say it was already
+    // recorded instead of inflating the family report with a second dose.
+    const recent = (deps.records ?? [])
+      .filter((r) => r.kind === "med" && deps.now - r.at <= DUPLICATE_WINDOW_MS)
+      .sort((a, b) => b.at - a.at)[0];
+    if (recent) {
+      return { ok: true, message: copy.medAlready(Math.round((deps.now - recent.at) / 60_000)) };
+    }
+
+    // Only medication chores, and only when the words identify exactly one.
+    const medTasks = deps.tasks.filter((t) => !t.done && /(藥|药)/.test(t.text));
+    const target = name ? matchTask(medTasks, name, deps.now) : medTasks.length === 1 ? medTasks[0] : null;
+    if (target) {
+      const done = markDone(target, deps.now);
+      if (!done.alreadyDone) {
+        await deps.saveTask(done.task);
+        if (deps.recordEvent) await deps.recordEvent(taskEventFor(done.task, "completed", deps.now));
+      }
+    }
+
+    const title = name ? `食藥：${name}` : "食藥";
+    if (deps.saveRecord) {
+      await deps.saveRecord({
+        id: `rec-med-${deps.now}`,
+        kind: "med",
+        title,
+        detail: note || undefined,
+        at: deps.now,
+        day: dayKey(deps.now),
+        source: "voice",
+      });
+    }
+    try {
+      deps.onMedTaken?.(name || "藥");
+    } catch {
+      /* the reminder overlay must never block the record */
+    }
+
+    return {
+      ok: true,
+      cards: [medRecordCard(name || "藥", deps.now, deps.locale)],
+      message: name ? copy.medLogged(name) : copy.medLoggedPlain,
+    };
+  }
+
+  /**
+   * The agent's own card script — plain text, never HTML. Rendering happens in
+   * CardRenderer's structured branch, so a hostile model cannot inject script.
+   */
+  async function composeCard(args: Record<string, unknown>): Promise<ToolExecResult> {
+    // NOT `norm()`: that collapses whitespace and would fold every directive
+    // into the first line. The parser needs the real newlines.
+    const script = typeof args.script === "string" ? args.script.trim() : "";
+    const parsed = parseCardScript(script);
+    if (!parsed) return { ok: false, message: copy.cardNoContent };
+    const kinds: RecordKind[] = ["measure", "med", "alarm", "card"];
+    const rawKind = norm(args.kind) as RecordKind;
+    const kind = kinds.includes(rawKind) ? rawKind : "measure";
+
+    if (deps.saveRecord) {
+      await deps.saveRecord({
+        id: `rec-card-${deps.now}`,
+        kind,
+        title: parsed.title,
+        detail: parsed.data.headline?.slice(0, 30),
+        at: deps.now,
+        day: dayKey(deps.now),
+        source: "agent",
+      });
+    }
+    return {
+      ok: true,
+      cards: [cardFromScript(parsed, deps.now)],
+      message: clip(parsed.data.headline || parsed.title, 12),
+    };
   }
 
 
@@ -649,6 +777,10 @@ export function createToolRunner(deps: ToolRunnerDeps): ToolRunner {
         return createTask(args);
       case "complete_task":
         return completeTask(args);
+      case "log_medication":
+        return logMedication(args);
+      case "compose_card":
+        return composeCard(args);
       case "locate":
         return locate();
       case "sos":

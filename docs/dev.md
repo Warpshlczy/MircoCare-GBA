@@ -190,11 +190,11 @@ grep -rl "auragba" backend --include=*.py --include=*.txt --include=*.md | \
 
 | 类别 | 老人需求（真实场景） | 功能（长者感知到的是什么） | 端侧信号 → 派生特征 | 归属 | 验收断言 |
 |---|---|---|---|---|---|
-| **安全** | 跌倒起不来 | 三阶段检测 → 全屏 SOS → 通知家属 | 加速度/陀螺 → 冲击-静止-姿态 → `GaitWindow.fall` | B（既有）+ A（SOS 覆盖层） | 模拟跌落注入 → 8s 内出 SOS 覆盖层且 `post_sos` 有记录 |
+| **安全** | 跌倒起不来 | 三阶段检测（**只认重摔**）→ 全屏 SOS → 通知家属 | 加速度/陀螺 → 失重-重撞-长静止 → `GaitWindow.fall` | B（既有）+ A（SOS 覆盖层） | 模拟跌落注入 → 8s 内出 SOS 覆盖层且 `post_sos` 有记录；轻敲/桌面撞击不触发 |
 | 安全 | 走失 / 离家未归 | 围栏 → 主动询问「你喺边度呀」→ 家属通知 | GPS → `inCircle` + 离家时长 | B | 离家 >60min → `place` 卡 + 家属通知，断网降级为文字 |
 | 安全 | 一键求助（不会解锁） | 锁屏小组件 SOS 热区 + （前台时）长按数字人 1s | 点击事件（非语音） | B | 锁屏下点小组件 SOS 热区 → 直接发通知/拨号，不要求先解锁 |
 | 安全 | 诈骗电话/短信 | 来电与短信风险提示（**只提示不拦截**） | 通话状态（可选权限）→ 陌生号码频次 | B【缺】 | 未授予权限时功能静默关闭且不反复弹窗 |
-| **健康** | 忘记吃药 | 到点提醒 → 语音确认 → 确认延迟入模 | 提醒/确认时间差 → `task_confirm_delay_min` | B + C | 「我食咗药」→ `doneAt` 落库；30min 未确认 → 二次提醒并计 `task_timeout_rate` |
+| **健康** | 忘记吃药 | 到点提醒 → 语音/点按确认 → 确认延迟入模；**说「我食咗藥」即记录** | 提醒/确认时间差 → `task_confirm_delay_min`；`records` store 留存当日剂量 | B + C | 「我食咗药」→ `doneAt` + `records` 落库；30min 未确认 → 二次提醒并计 `task_timeout_rate` |
 | 健康 | 睡不好、夜间起夜 | 夜间静默 + 次日晨间问候（不问细节） | 屏幕解锁/充电时段 → 夜间觉醒次数、首末活动时间 | B【缺】 | 23:00–06:00 无主动开口（SOS 除外）；次日 08:00 后播报一次晨间问候 |
 | 健康 | 吃不下、喝水少 | 餐点主动提及 + 家属周报汇总 | 餐点时段交互次数、饮食类任务完成 | A + C【缺】 | 连续 2 天餐点时段无交互 → 周报标「进食关注」 |
 | 健康 | 如厕 / 失禁困扰 | **不采集、不询问**（尊严优先），仅由家属主动上报 | — | 产品边界 | 代码与 UI 中无相关字段：`grep -rn "incontinen\|toilet\|失禁" web/src backend` 只命中 §1.8 本条 |
@@ -276,7 +276,12 @@ grep -rl "auragba" backend --include=*.py --include=*.txt --include=*.md | \
 | `lib/audio.ts` | 增强 | `speak(text, locale, onViseme?, preset)`；`cancelSpeech()`；`listenOnce(locale, timeoutMs)` 返回 `{ text, confidence, durationMs }` |
 | `lib/proactive.ts` | 新增 | `planProactive(ctx)` 纯函数 + `dayKey` 复用 `checkin.ts` 的本地日历日判定 |
 | `lib/interview.ts` | 新增 | 题库 15 条 + `pickNext` / `shouldStop` / `careCue` 纯函数 |
-| `lib/signal.ts` | 增函数 | `snrDb(rmsDb[])`、`qualityOf({ speechRatio, snrDb, durationMs }, minMs)` |
+| `lib/signal.ts` | 增函数 | `snrDb(rmsDb[])`、`qualityOf({ speechRatio, snrDb, durationMs }, minMs)`；**跌倒阈值收紧**（见 §2.4 A7 第 5 项） |
+| `lib/recordStore.ts` | 新增 | `records` store 读写：`newRecord` / `addRecord` / `latestMedRecord` / `todayRecords`；只在浏览器侧（依赖 `indexedDB`） |
+| `lib/nfc.ts` | 删除 | 2026-10-25 取消 NFC 打卡（§2.4 A7 第 4 项），确认只剩「点大按钮 / 说吃了 / 稍后再提」 |
+| `lib/toolExec.ts`、`lib/toolrun.ts` | 扩充（共享契约，已提 issue） | 新增 `log_medication` / `compose_card` 的执行与本地规划；`set_alarm` 落 `alarm` 记录 |
+| `lib/db.ts` | 修改（共享契约，已提 issue） | `DB_VERSION` 5→6，新增 `records` store |
+| `lib/types.ts`、`lib/cards.ts` | 修改（共享契约，已提 issue） | `CardKind += "record"`、`RecordEntry` / `RecordKind`；`recordsCard` / `medRecordCard` / `tasksCard` / `parseCardScript`；删除 `MedItem.nfcTag` |
 | `lib/vad.ts` | 小改 | `recordScreening()` 在**裁剪前**的帧上算 SNR，结果带 `quality` / `snrDb`；`createVad` 契约不动 |
 | `lib/types.ts` | 加可选字段 | `ScreeningSession.quality?` / `snrDb?`（契约流程 §0.2：先改类型，C 已是 `extra="allow"`，issue #3 通知 C 收编） |
 | `lib/i18n.ts` | 改名 + 扩充 | 「灵犀」→「忆伴 / 小忆」；新增访谈收尾、重问、跳题、长按提示、唤醒词提示、显示档位、风险分层三档文案等 |
@@ -481,11 +486,11 @@ mv public/live2d/model.manifest.json /tmp/ && npm run build; mv /tmp/model.manif
 1. **唤起通路（五条，§2.7 ①）**：唤醒词（改名）/ 主按钮 / 长按数字人 1s / widget 点击（`onForeground("widget")` → `planForeground` 的 `listen`）/ 通知与闹钟（`onForeground` → `speak` / `refresh`）。锁屏 widget 的 SOS 热区：订阅 `memomate:sos` → **直接打开 SOS 覆盖层**，不等语音确认；`shouldRaiseSos` 做 10s 防抖（口袋误触不重复通知家属），事件带 `source: "widget"`。
 2. **忘记唤醒词兜底**：主按钮下方常驻一行提示「叫我『小憶』，或者撳『講嘢』」；连续 3 天无交互时沉默关怀文案带同样指引（调度器第 5 条）。
 3. **无障碍语义**：`main` 单一地标；数字人是 `<button>` + 动态 `aria-label`（「忆伴正在聆听，撳一下再講一次」）；状态行 `aria-live="polite"`；SOS 覆盖层既有 `assertive`；**禁止 `div onClick`**。
-4. **焦点顺序** = 数字人 → 主按钮 → SOS → 次要按钮 → 工具面板（第一版把「食药提醒/高对比/语言」放在数字人之前，已下移到主按钮之后，主操作区落在屏幕下半）；工具面板经语音打开时焦点移入，`Esc` 关闭并把焦点还给主按钮。
+4. **焦点顺序** = 数字人 → 主按钮 → SOS → 次要按钮 → 工具面板（第一版把「食药提醒/高对比/语言」放在数字人之前，已下移到主按钮之后，主操作区落在屏幕下半；**2026-10-25 起「吃药提醒」按钮整体删除**，吃药只由语音触发，见 §2.4 A7）；工具面板经语音打开时焦点移入，`Esc` 关闭并把焦点还给主按钮。
 5. **触控与反馈**：主按钮/SOS ≥120×80px；任何按钮按下 `navigator.vibrate(30)`（页面级一个 `pointerdown` 监听，不逐个加）；关键失败（麦克风被拒、网络断）用语音 + 字幕双通道，不显示错误码。
 6. **字幕**：数字人说的每一句同步显示在**数字人正下方**的字幕条（2 行截断、48px，大字档 64px，高对比黑底黄字）。放在脸旁边而不是屏幕最底部：听力差的长者读字幕时视线不用离开数字人，也不会被底部卡片流遮挡。
 7. **三档显示**：原「高对比」按钮改为循环「顯示：標準 → 高對比 → 大字」，按钮文字即当前档位；大字档在 `<html>` 上把根字号放大 1.25 倍，所有 rem 尺寸一次到位；选择存本机，重启保留；色觉安全（状态永远配文字）。
-8. **语音不可用的纯按钮通路**：STT 不支持或**连续 2 次没听到** → 自动展开工具面板，顶部是「常用三件事」：食药 / 今日安排 / 打畀屋企人（`tel:` 链接到健康卡紧急联系人，平台原生拨号，无新权限）。第一版的「打电话」与「找家人」对长者是同一件事，合并（§2.8 D-5）。
+8. **语音不可用的纯按钮通路**：STT 不支持或**连续 2 次没听到** → 自动展开工具面板，顶部是「常用三件事」：**今日記錄** / 今日安排 / 打畀屋企人（`tel:` 链接到健康卡紧急联系人，平台原生拨号，无新权限）。第一版的「打电话」与「找家人」对长者是同一件事，合并（§2.8 D-5）；「吃药」按钮已于 2026-10-25 删除（§2.4 A7）。
 9. **接桥（issue #1）**：`useAgentBridge({ locale, reminders, onCards: pushCards, onSpeak: speakLine, onConfirm: askYesNo, onSos })`；所有语音/文字输入先过 `agent.handleUtterance()`，返回 `false` 才走原 `runIntent`。`askYesNo` = 播报问题 + `listenOnce(8s)` + 是/否词表，**沉默或听不清一律判否**（不误执行）。`recentTurns` 由 B 在桥里攒（A 的 `historyRef` 已存在，B 需要时 A 加一个只读导出）。
 10. `repeat` 意图 = 重说上一句；`cancel` 意图 = 「好，唔做住」并回到空闲。
 
@@ -515,6 +520,21 @@ mv public/live2d/model.manifest.json /tmp/ && npm run build; mv /tmp/model.manif
 - 连续问 3 个不同问题 → 3 条回复措辞明显不同（C 侧 temperature 0.85 + 保留 assistant 轮次，见 C3）。
 - 断网说天气 → 「暂时拿不到实时天气」，不出现任何编造数值。
 - 构建门禁：`npm run build`、`node src/selfcheck.ts` 全绿。
+
+#### A7 · 2026-10-25 六项需求（A 端已落地，B/C 见 issue）
+
+| # | 需求 | A 端实现 | 验收 |
+|---|---|---|---|
+| 1 | 砍掉吃药按钮，改由语音记录 | 删除首页「吃药提醒」与工具面板「吃药」两个按钮及 `demoReminder()`/`scheduleReminder()`；「提醒我食藥」走 `create_task`，只有「我食咗藥」才写记录 | 首页与工具面板不再有吃药按钮；说「我食咗降壓藥」→ 记录卡片 + 播报，无需任何按钮 |
+| 2 | 吃药、闹钟等本机持久化 | `db.ts` v5→v6 新增 `records` store；新增 `lib/recordStore.ts`（`addRecord` / `todayRecords` / `latestMedRecord`）；吃药、设闹钟、`compose_card` 均落库；重启后回显「今日記錄」卡片，首页常驻一行「💊 今日已記錄 / 今日未記錄 · ✅ 仲有 N 件」 | 记录吃药 → 杀掉进程重开 → 记录仍在；`npm run selfcheck` 覆盖重复上报不写第二条 |
+| 3 | 丰富工具链 + Agent 自写卡片脚本 | `tools.ts` 12→**14** 个工具，新增 `log_medication`（记录吃药）、`compose_card`（纯文本 DSL：`title:` / `icon:` / `headline:` / `row: a = b` / `check: [x] text`）；`planLocal` 增加吃药上报、吃药提醒、测量自述、卡片请求；`compose_card` 的结果同样落 `records` | `parseCardScript` 自检覆盖；恶意 `<script>`/`<img>` 被剥离，卡片走结构化渲染，不进 iframe |
+| 4 | 取消 NFC；确认即划走；主动提醒待办 | 删除 `lib/nfc.ts`、`ReminderOverlay` 的「碰一碰」分支、`MedItem.nfcTag`、三条 NFC 文案；全屏提醒改为「点大按钮 / 说『食咗』/ 稍后再提」三键，语音用 `listenOnce` + `isYes` + 吃药词表；卡片清单项可点，点完真的 `completeTask`；每日 10:00 访谈前先 `dailyCheckIn()` 问药与未办件数 | 说「吃了」→ 提醒消失且写记录；点卡片清单项 → 任务 `done`、播报「幫你劃走咗」；到点后先问药再做访谈 |
+| 5 | 跌倒过于敏感 | `signal.ts` 阈值收紧：`accThreshold` 10→**28**、`freeFallG` 0.5→**0.35**、`restBandG` 2.5→**1.5**、`stillnessMs` 300→**1500**；无失重阶段时必须 `jump > 56 m/s²` 且 `gyro > 12` 才算撞击 | 自检新增「轻敲不触发」「无失重的桌面撞击不触发」；真实「失重→重撞→2s 静止」仍触发一次 |
+| 6 | 设计优化 | 首页减少一个按钮、增加常驻状态行；卡片清单项可勾（≥48px 触控、`aria-label`）；工具面板首项改为「今日記錄」；保留 ≥24px 字号 / 高对比 / 焦点顺序 | 三档显示下无溢出；Tab 顺序仍为 数字人 → 主按钮 → SOS → 次要 → 工具面板 |
+
+> 联动缺口（已提 issue）：C 侧 `/agent/turn` 需接受 `log_medication` / `compose_card` 与脚本卡契约；B 侧桌面小组件需展示记录卡、原生闹钟持久化对齐、后台跌倒采样使用同一阈值。
+>
+> 本轮触碰了共享契约文件（`types.ts` / `db.ts` / `cards.ts` / `tools.ts` / `toolrun.ts` / `toolExec.ts`）：按 §0.2 流程本应先 review 再实现，A 端为不阻塞演示先行落地，**已在 issue 中逐条列出差异**，B/C 确认后以本表为准。
 
 ### 2.5 第一部分接口契约（对其他两人的接缝）
 
@@ -645,7 +665,7 @@ done; echo "PASS: 运行时与模型齐备"
 | D-2 | npm 引入 `pixi.js` + `pixi-live2d-display`，动态 import | **运行时脚本注入**，清单 `runtime` 字段 | Cubism Core 本就只能脚本加载；统一后零依赖、零首屏体积，许可证边界集中在 `public/live2d/vendor/` |
 | D-3 | `visemeFromAnalyser(a)` | 删除 | Web Speech 与 Android `TextToSpeech` 都不给音频流（后者连 `onboundary` 也没有），没有可接的 AnalyserNode；Web 路径改用 `onboundary` 逐字校准，原生路径按时间线推进 |
 | D-4 | `?demo=1` 预置脚本替换 STT | 删除 | 工具面板已有文字输入，走同一条 `runIntent`；嘈杂展台直接打字，不需要第二套构型 |
-| D-5 | 「常用四件事」：吃药 / 打电话 / 今日安排 / 找家人 | 「常用三件事」：食药 / 今日安排 / 打畀屋企人 | 「打电话」和「找家人」对长者是同一个动作；`tel:` 链接是平台原生拨号，无需 B 的 `CALL_PHONE` 权限 |
+| D-5 | 「常用四件事」：吃药 / 打电话 / 今日安排 / 找家人 | 「常用三件事」：今日記錄 / 今日安排 / 打畀屋企人 | 「打电话」和「找家人」对长者是同一个动作；`tel:` 链接是平台原生拨号，无需 B 的 `CALL_PHONE` 权限；「吃药」不再是按钮，改为语音触发（§2.4 A7） |
 | D-6 | 数字人 `role="img"` 且可点击 | 外层 `<button>` | 可点击的 `img` 违反本节自己的「禁止非交互元素挂点击」，读屏也不会告诉长者「可以点」 |
 | D-7 | 「音量 ≤30% → 自动调高 TTS 一级」 | 推迟 M4，需 B 提供 `getMediaVolume()` | Web 读不到系统音量，`SpeechSynthesisUtterance.volume` 默认已是最大值 1.0；Android `TextToSpeech` 也没有音量 API（走 STREAM_MUSIC），「调高一级」两端都不存在，仍需 B 的原生 `AudioManager` 读数 |
 | D-8 | 访谈「连续 2 次拒答才停」 | 拒答一次即停 | 与同节验收矛盾；尊严优先 |
@@ -720,7 +740,7 @@ done; echo "PASS: 运行时与模型齐备"
 
 **步骤**
 
-1. 定义 12 个工具（见 §3.5 表），每个都写 `risk: "safe" | "confirm" | "forbidden"`。
+1. 定义 **14 个工具**（见 §3.5 表），每个都写 `risk: "safe" | "confirm" | "forbidden"`。
 2. `toolrun` 固定五步：**校验 → 风险确认 → 执行 → 记录 → 播报结果**。任何一步失败都要给出**长者能听懂的一句话**（不是 error code）。
 3. `dryRun` 模式：只返回「我将要做什么」，用于答辩演示与测试。
 4. 所有执行写 `agent_audit`（时间、工具名、参数摘要、结果、是否确认），本地保留 30 天。
@@ -824,19 +844,23 @@ done; echo "PASS: 运行时与模型齐备"
 | 工具 | 风险 | 权限 | 入参 | 出参 | 说明 |
 |---|---|---|---|---|---|
 | `create_task` | safe | 无 | `{text, dueAt?}` | `{taskId}` | 说啥记啥 |
-| `complete_task` | safe | 无 | `{taskId \| query}` | `{taskId, delayMin}` | 语音勾销 |
+| `complete_task` | safe | 无 | `{taskId \| query}` | `{taskId, delayMin}` | 语音勾销（非吃药） |
+| `log_medication` | safe | 无 | `{name?, note?}` | `{record, card}` | **新增**：老人报告已吃药 → 写 `records` + 勾掉对应药类任务 + 清提醒 + 记录卡；30min 内重复上报只提示不重写 |
+| `compose_card` | safe | 无 | `{script, kind?}` | `{card, record}` | **新增**：Agent 用纯文本 DSL 自建卡片（`title/icon/headline/row/check`），禁止 HTML/JS，结果同时落 `records` |
 | `defer_task` | safe | 无 | `{taskId \| query, minutes?}` | `{taskId, dueAt}` | 推迟提醒 |
-| `set_alarm` | safe | `SCHEDULE_EXACT_ALARM` | `{at, label}` | `{alarmId}` | 本地闹钟 |
-| `call_contact` | **confirm** | `CALL_PHONE` | `{name}` | `{number}` | 必须先复述姓名 |
+| `set_alarm` | safe | `SCHEDULE_EXACT_ALARM` | `{time, dayOffset?, label}` | `{alarmId, card}` | 本地闹钟；设备把 `HH:MM` 解析成日期，同时写一条 `alarm` 记录 |
+| `call_contact` | **confirm** | 无（`ACTION_DIAL` 预填） | `{name}` | `{number}` | 必须先复述姓名；号码只来自健康卡 |
 | `send_message` | **confirm** | 无（走系统分享） | `{name, text}` | `{ok}` | 只允许预设模板句 |
 | `locate` | safe | `ACCESS_FINE_LOCATION` | `{}` | `{lat,lng,accuracy}` | 前台取点 |
 | `navigate_home` | safe | 无 | `{}` | `{distanceM}` | 文本 + 静态图 |
 | `plan_route` | safe | 无 | `{destination?}` | `{card}` | 出行路线：给步骤卡 + 建「去 X」任务；离线本地规划器也能触发（见 §3.5 说明） |
-| `open_app` | confirm | 无障碍 | `{app}` | `{ok}` | 白名单 App |
-| `ui_tap_text` | confirm | 无障碍 | `{text}` | `{ok, bounds}` | 当前页面内点一次 |
+| `open_app` | **confirm** | 无（按包名启动） | `{app}` | `{ok}` | 白名单 App |
+| `ui_tap_text` | **confirm** | `ACCESSIBILITY` | `{text}` | `{ok, bounds}` | 当前页面内点一次 |
 | `sos` | safe（最高优先） | 无 | `{reason}` | `{}` | 立即升级 |
 
 > **离线规划器（勘误）**：`toolrun.ts#planLocal` 在没有模型/后端时也能把明确的出行请求变成真实动作：`帶我去街市` → `plan_route`、`點返屋企` → `navigate_home`、`我喺邊` → `locate`。它刻意**不**猜天气/App/联系人——猜错的代价（开错应用、打错电话）比不行动高。模型给出的计划优先；模型只回话不调工具时，本地计划仍然执行，避免「说了规划却没有下文」。
+>
+> **2026-10-25 扩充**：本地规划还认得吃药上报（`我食咗藥` → `log_medication`，带药名则原样带上；**问句/否定句一律不记**，`食咗藥未呀`、`我未食藥` 都返回空）、吃药提醒（`提醒我食藥` → `create_task`）、自述测量与制卡（`記低我血壓 128/82` → `compose_card`）。`runTurn` 的顺序也改了：本地工具计划**先于**本地卡片判定，否则 `LOCAL_CARD_INTENTS` 里的 `medication` 会把「我食咗藥」变成一张清单卡而不写记录。
 
 ```ts
 // lib/tools.ts

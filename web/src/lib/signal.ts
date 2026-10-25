@@ -23,6 +23,15 @@ function mean(xs: number[]): number {
 // deltas over accThreshold=10 / gyroThreshold=10. We extend it with the
 // free-fall phase + post-impact stillness the spec requires, which the naive
 // delta-only reference lacks (it false-fires on any sharp knock).
+//
+// TUNED FOR HEAVY FALLS ONLY (product requirement #5). The first version fired
+// on any sharp knock plus a 300 ms pause — sitting down hard, dropping the phone
+// on a table, or a door slam was enough. That is worse than no detector: a false
+// SOS pages the family and teaches everyone to ignore the alert. The thresholds
+// below now require a genuine airborne phase (|a| < 0.35 g) before a >28 m/s²
+// impact, or — with no free-fall at all — an impact over 56 m/s² together with
+// violent rotation, and then 1.5 s of real stillness. A stumble still recovers
+// and never fires.
 // ---------------------------------------------------------------------------
 
 export interface FallSample {
@@ -50,12 +59,14 @@ export interface FallResult {
 }
 
 export function createFallDetector(cfg: FallDetectorCfg = {}) {
-  const accThreshold = cfg.accThreshold ?? 10;
-  const gyroThreshold = cfg.gyroThreshold ?? 10;
-  const freeFallMag = (cfg.freeFallG ?? 0.5) * G;
+  const accThreshold = cfg.accThreshold ?? 28;
+  const gyroThreshold = cfg.gyroThreshold ?? 12;
+  const freeFallMag = (cfg.freeFallG ?? 0.35) * G;
   const windowMs = cfg.windowMs ?? 2000;
-  const restBand = cfg.restBandG ?? 2.5;
-  const stillnessMs = cfg.stillnessMs ?? 300;
+  const restBand = cfg.restBandG ?? 1.5;
+  const stillnessMs = cfg.stillnessMs ?? 1500;
+  /** Without a free-fall phase the impact must be far heavier than a threshold hit. */
+  const heavyImpact = accThreshold * 2;
 
   let phase: "idle" | "freefall" | "impact" = "idle";
   let freeFallAt: number | null = null;
@@ -88,11 +99,14 @@ export function createFallDetector(cfg: FallDetectorCfg = {}) {
         freeFallAt = null;
       }
 
-      // 2. impact spike (needs a big |a| jump; free-fall OR violent rotation)
+      // 2. impact spike (needs a big |a| jump AND either a preceding free-fall
+      //    or a genuinely violent impact). A knock with no airborne phase is a
+      //    dropped phone, not a person.
       if (prev !== null && (phase === "freefall" || phase === "idle")) {
         const jump = mag - prev;
         const violent = jump > accThreshold;
-        if (violent && (phase === "freefall" || gyro > gyroThreshold)) {
+        const knockHard = jump > heavyImpact && gyro > gyroThreshold;
+        if (violent && (phase === "freefall" || knockHard)) {
           phase = "impact";
           impactAt = s.t;
           fromFreeFall = freeFallAt !== null && s.t - freeFallAt <= windowMs;

@@ -9,7 +9,16 @@ import type { AgentCard, CardData, Intent } from "@/lib/types";
  *    `sandbox=""` (scripts, forms and navigation all disabled). This is the
  *    security boundary: untrusted agent HTML never gets script access.
  */
-export function CardRenderer({ card, onAction }: { card: AgentCard; onAction?: (intent: Intent) => void }) {
+export function CardRenderer({
+  card,
+  onAction,
+  onCheck,
+}: {
+  card: AgentCard;
+  onAction?: (intent: Intent) => void;
+  /** tapping an open checklist item completes it; done items stay display-only */
+  onCheck?: (itemId: string) => void;
+}) {
   return (
     <article
       aria-label={card.title}
@@ -28,7 +37,7 @@ export function CardRenderer({ card, onAction }: { card: AgentCard; onAction?: (
           className="mt-4 h-72 w-full rounded-2xl border-0 bg-white"
         />
       ) : card.data ? (
-        <CardBody data={card.data} />
+        <CardBody data={card.data} onCheck={onCheck} />
       ) : null}
 
       {card.actions?.length ? (
@@ -48,7 +57,7 @@ export function CardRenderer({ card, onAction }: { card: AgentCard; onAction?: (
   );
 }
 
-function CardBody({ data }: { data: CardData }) {
+function CardBody({ data, onCheck }: { data: CardData; onCheck?: (itemId: string) => void }) {
   return (
     <div className="mt-3">
       {data.image ? (
@@ -73,9 +82,23 @@ function CardBody({ data }: { data: CardData }) {
       {data.checklist?.length ? (
         <ul className="mt-3 flex flex-col gap-2">
           {data.checklist.map((it) => (
-            <li key={it.id} className="flex items-center gap-3 text-3xl font-semibold text-aura-deep hc:text-white">
-              <span aria-hidden className="text-4xl">{it.done ? "☑️" : "⬜"}</span>
-              <span className={it.done ? "line-through opacity-60" : ""}>{it.text}</span>
+            <li key={it.id}>
+              {it.done || !onCheck ? (
+                <div className="flex min-h-[48px] items-center gap-3 text-3xl font-semibold text-aura-deep hc:text-white">
+                  <span aria-hidden className="text-4xl">{it.done ? "☑️" : "⬜"}</span>
+                  <span className={it.done ? "line-through opacity-60" : ""}>{it.text}</span>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => onCheck(it.id)}
+                  aria-label={`${it.text}，做好咗`}
+                  className="flex min-h-[48px] w-full items-center gap-3 rounded-2xl px-2 py-2 text-left text-3xl font-semibold text-aura-deep hover:bg-aura-warm/30 focus:outline-none focus-visible:ring-4 focus-visible:ring-aura-warm hc:text-white"
+                >
+                  <span aria-hidden className="text-4xl">⬜</span>
+                  <span>{it.text}</span>
+                </button>
+              )}
             </li>
           ))}
         </ul>

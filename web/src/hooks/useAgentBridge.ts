@@ -36,9 +36,10 @@ import { distanceFromHomeM, startFenceWatch } from "@/lib/geofenceStore";
 import { bridge } from "@/lib/native";
 import { flushOutboxOnce, startOutboxAutoFlush } from "@/lib/outboxRunner";
 import { enqueue } from "@/lib/outboxStore";
+import { listRecords, saveRecord } from "@/lib/recordStore";
 import { listTasks, saveTask } from "@/lib/taskStore";
 import { createToolRunner } from "@/lib/toolExec";
-import type { AgentCard, Locale, ReminderItem, Task } from "@/lib/types";
+import type { AgentCard, Locale, RecordEntry, ReminderItem, Task } from "@/lib/types";
 
 /** How often to re-probe a backend that is not ready yet (ms). */
 const PROBE_INTERVAL_MS = 30_000;
@@ -48,6 +49,9 @@ const PROBE_INTERVAL_MS = 30_000;
  * store only for these — a `locate` must not trigger a disk read on every turn.
  */
 const MUTATING_TOOLS = new Set(["create_task", "complete_task", "defer_task", "plan_route"]);
+
+/** Tools that append a durable record; the bridge re-reads the store for these. */
+const RECORD_TOOLS = new Set(["log_medication", "compose_card", "set_alarm"]);
 
 export interface AgentBridgeDeps {
   locale: Locale;
@@ -60,6 +64,8 @@ export interface AgentBridgeDeps {
   onConfirm?: (question: string) => Promise<boolean>;
   /** A's SOS overlay. Called the instant an emergency tool runs, before any IO. */
   onSos?: () => void;
+  /** The senior just confirmed medication: clear the reminder, refresh A's summary. */
+  onMedTaken?: (name: string) => void;
 }
 
 export interface AgentBridge {
@@ -82,6 +88,8 @@ export function useAgentBridge(deps: AgentBridgeDeps): AgentBridge {
   ref.current = deps;
   const tasksRef = useRef(tasks);
   tasksRef.current = tasks;
+  /** today's records, mirrored so a turn can refuse a double dose log */
+  const recordsRef = useRef<RecordEntry[]>([]);
   const turnsRef = useRef<RecentTurn[]>([]);
   /**
    * 连续几轮我们其实没听懂。第二轮之后不再要求他重说，改为给出口
@@ -99,6 +107,11 @@ export function useAgentBridge(deps: AgentBridgeDeps): AgentBridge {
     void listTasks()
       .then((rows) => {
         if (alive) setTasks(rows);
+      })
+      .catch(() => {});
+    void listRecords()
+      .then((rows) => {
+        if (alive) recordsRef.current = rows;
       })
       .catch(() => {});
     return () => {
@@ -243,6 +256,14 @@ export function useAgentBridge(deps: AgentBridgeDeps): AgentBridge {
         openApp: bridge()
           ? async (key) => (await bridge()?.openApp(key)) ?? false
           : undefined,
+        // Durable records stay on this device. The snapshot lets a repeated
+        // "我食咗藥" answer "already recorded" instead of logging twice.
+        records: recordsRef.current,
+        saveRecord: async (entry) => {
+          await saveRecord(entry);
+          recordsRef.current = [...recordsRef.current.filter((r) => r.id !== entry.id), entry];
+        },
+        onMedTaken: d.onMedTaken,
       });
 
       const out = await runTurn(text, {
@@ -295,6 +316,13 @@ export function useAgentBridge(deps: AgentBridgeDeps): AgentBridge {
           setTasks(await listTasks());
         } catch {
           /* stale list is survivable; a thrown hook is not */
+        }
+      }
+      if (out.executed.some((e) => e.ok && RECORD_TOOLS.has(e.name))) {
+        try {
+          recordsRef.current = await listRecords();
+        } catch {
+          /* the in-memory append above is already correct */
         }
       }
       return true;

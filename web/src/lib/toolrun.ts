@@ -161,6 +161,16 @@ const SAY: Record<string, Record<Locale, string>> = {
     "zh-MO": "好，幫你勾咗。",
     "zh-CN": "好，帮你勾掉了。",
   },
+  log_medication: {
+    "zh-HK": "好，我幫你記低食藥。",
+    "zh-MO": "好，我幫你記低食藥。",
+    "zh-CN": "好，我帮您记下吃药。",
+  },
+  compose_card: {
+    "zh-HK": "好，我整好張卡。",
+    "zh-MO": "好，我整好張卡。",
+    "zh-CN": "好，我做好卡片。",
+  },
   set_alarm: {
     "zh-HK": "好，鬧鐘較好喇。",
     "zh-MO": "好，鬧鐘較好喇。",
@@ -289,6 +299,46 @@ export function routeDestination(utterance: string): string | null {
  * `open_app`/`call_contact` stay model-driven because guessing a contact or an
  * app from a keyword is how a wrong person gets dialled.
  */
+// --- medication, from the senior's own words --------------------------------
+
+const MED_WORD = /(藥|药)/;
+/** "I already took it" — note these are REPORT verbs, not reminder verbs. */
+const MED_TAKEN_VERB = /(食咗|食完|食過|食过|吃咗|吃完|吃过|吃了|服咗|服了|飲咗|饮了|已食|已吃)/;
+/** A question or a denial is not a report: "食咗藥未呀" must never log a dose. */
+const NOT_A_REPORT = /(未|冇|沒|没|嗎|吗|？|\?|幾時|几时|邊時|哪时|唔記得|不记得)/;
+
+/**
+ * `undefined` = not a medication report; `null` = taken, no name said;
+ * string = the medication name in the senior's own words.
+ */
+export function medTakenName(utterance: string): string | null | undefined {
+  const text = (utterance ?? "").trim();
+  if (!text || !MED_WORD.test(text) || !MED_TAKEN_VERB.test(text)) return undefined;
+  if (NOT_A_REPORT.test(text)) return undefined;
+  const rest = text.replace(/^.*?(?:食咗|食完|食過|食过|吃咗|吃完|吃过|吃了|服咗|服了|飲咗|饮了|已食|已吃)/, "");
+  const m = /([A-Za-z0-9\u4e00-\u9fff]{1,10}(?:藥|药|片|丸|膠囊|胶囊))/.exec(rest);
+  const name = (m?.[1] ?? "")
+    .replace(/^(我|你|佢|佢嘅|已經|已经|啱啱|刚刚|剛剛|今日|今朝|今晚)/g, "")
+    .trim();
+  return /^(藥|药|食藥|食药|嘅藥|嘅药)$/.test(name) || !name ? null : name;
+}
+
+/** "提醒我食藥" / "記得食藥" → a task. A question does not create one. */
+const MED_REMIND =
+  /((提醒我|提我|記得|记得|記住|记住|夠鐘|够钟|夠時間|够时间).{0,10}(食藥|食药|吃药|服藥|服药))|((食藥|食药|吃药).{0,6}(提醒|提我))/;
+
+const MEASURE_WORD = /(血壓|血压|血糖|體溫|体温|體重|体重|心跳|脉搏|脈搏)/;
+const RECORD_WORD = /(記|记|錄|录|寫|写|保存)/;
+const CARD_ASK = /(做張卡|做张卡|整張卡|整张卡|生成.{0,4}卡|寫張卡|写张卡|記低.{0,4}卡)/;
+
+/** Script the device can write itself when the model is unavailable. */
+function localCardScript(text: string): string {
+  const num = /(\d{2,3}\s*[/／]\s*\d{2,3}|\d{1,3}(?:\.\d)?)/.exec(text)?.[1]?.replace(/\s+/g, "");
+  return ["title: 健康記錄", "icon: 🩺", `headline: ${text}`, num ? `row: 數值 = ${num}` : ""]
+    .filter(Boolean)
+    .join("\n");
+}
+
 export function planLocal(utterance: string): ToolCall[] {
   const text = (utterance ?? "").trim();
   if (!text) return [];
@@ -296,6 +346,16 @@ export function planLocal(utterance: string): ToolCall[] {
   const destination = routeDestination(text);
   if (destination !== null) {
     return [{ name: "plan_route", args: destination ? { destination } : {} }];
+  }
+  const medName = medTakenName(text);
+  if (medName !== undefined) {
+    return [{ name: "log_medication", args: medName ? { name: medName } : {} }];
+  }
+  if (MED_REMIND.test(text)) {
+    return [{ name: "create_task", args: { text } }];
+  }
+  if ((MEASURE_WORD.test(text) && RECORD_WORD.test(text)) || CARD_ASK.test(text)) {
+    return [{ name: "compose_card", args: { script: localCardScript(text) } }];
   }
   if (/(我喺邊|我在哪|喺邊度|在边度|係邊度|where am i)/i.test(text)) {
     return [{ name: "locate", args: {} }];

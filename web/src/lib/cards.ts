@@ -5,7 +5,17 @@
 import { t } from "./i18n.ts";
 import { formatWhen } from "./datetime.ts";
 import { formatDistance } from "./geofence.ts";
-import type { AgentCard, Intent, Locale, ReminderItem, Task } from "./types";
+import type {
+  AgentCard,
+  CardChecklistItem,
+  CardData,
+  CardRow,
+  Intent,
+  Locale,
+  RecordEntry,
+  ReminderItem,
+  Task,
+} from "./types";
 
 export interface CardCtx {
   reminders: ReminderItem[];
@@ -284,4 +294,132 @@ export function agentPlanCard(steps: string[], locale: Locale, now: number): Age
       checklist: steps.map((text, i) => ({ id: `plan-${now}-${i}`, text, done: false })),
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// Records: what the senior already did, kept on the device.
+// ---------------------------------------------------------------------------
+
+function clockOf(at: number): string {
+  const d = new Date(at);
+  return `${`${d.getHours()}`.padStart(2, "0")}:${`${d.getMinutes()}`.padStart(2, "0")}`;
+}
+
+/** Today's durable records as one floatable card ("今日食藥 08:12"). */
+export function recordsCard(records: RecordEntry[], locale: Locale, now: number): AgentCard {
+  const rows = [...records].sort((a, b) => b.at - a.at).slice(0, 8);
+  return {
+    id: `records-${now}`,
+    kind: "record",
+    title: t(locale, "recordsTitle"),
+    createdAt: now,
+    data: rows.length
+      ? {
+          icon: "📝",
+          checklist: rows.map((r) => ({
+            id: r.id,
+            text: `${clockOf(r.at)} ${r.title}${r.detail ? ` · ${r.detail}` : ""}`,
+            done: true,
+          })),
+        }
+      : { icon: "📝", headline: t(locale, "recordsEmpty") },
+  };
+}
+
+/** The card a just-logged medication produces (also used by the voice tool). */
+export function medRecordCard(name: string, at: number, locale: Locale): AgentCard {
+  return {
+    id: `med-rec-${at}`,
+    kind: "record",
+    title: t(locale, "recordsTitle"),
+    createdAt: at,
+    data: {
+      icon: "💊",
+      headline: t(locale, "medLogged"),
+      checklist: [{ id: `med-rec-${at}`, text: `${clockOf(at)} ${name}`, done: true }],
+    },
+  };
+}
+
+/** Open chores as a tickable card; ticking one really completes it. */
+export function tasksCard(tasks: Task[], locale: Locale, now: number): AgentCard {
+  const open = tasks.filter((task) => !task.done).slice(0, 8);
+  return {
+    id: `tasks-${now}`,
+    kind: "task",
+    title: t(locale, "tasksTitle"),
+    createdAt: now,
+    data: open.length
+      ? { icon: "✅", checklist: open.map((task) => ({ id: task.id, text: task.text, done: false })) }
+      : { icon: "✅", headline: t(locale, "cardEmpty") },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Card scripts — the agent writes a tiny plain-text DSL, NOT HTML.
+//
+// The model gets ONE string field (the tool schema only supports flat scalar
+// properties), so it can compose a record/summary card without any HTML, JS or
+// URL ever reaching the renderer. Unknown lines are ignored; nothing is
+// interpreted as code. Pure and asserted in selfcheck.ts.
+// ---------------------------------------------------------------------------
+
+const SCRIPT_ROWS = 8;
+const SCRIPT_CHECKS = 12;
+
+function cleanLine(text: string): string {
+  return text.replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim().slice(0, 60);
+}
+
+export interface CardScript {
+  title: string;
+  data: CardData;
+}
+
+/** Parses `title: / icon: / headline: / row: a = b / check: [x] text`. */
+export function parseCardScript(script: string): CardScript | null {
+  const lines = (script ?? "").split(/\r?\n/);
+  let title = "";
+  let icon = "";
+  let headline = "";
+  const rows: CardRow[] = [];
+  const checklist: CardChecklistItem[] = [];
+
+  lines.forEach((raw, i) => {
+    const line = raw.trim();
+    if (!line) return;
+    const m = /^([a-z]+)\s*[:：]\s*(.+)$/i.exec(line);
+    if (!m) return;
+    const key = m[1].toLowerCase();
+    const value = cleanLine(m[2]);
+    if (!value) return;
+    if (key === "title" && !title) title = value;
+    else if (key === "icon" && !icon) icon = value.slice(0, 4);
+    else if (key === "headline" && !headline) headline = value;
+    else if (key === "row" && rows.length < SCRIPT_ROWS) {
+      const sep = /^(.+?)\s*[=＝]\s*(.+)$/.exec(value);
+      if (sep) rows.push({ label: cleanLine(sep[1]).slice(0, 12), value: cleanLine(sep[2]) });
+      else rows.push({ label: "", value });
+    } else if (key === "check" && checklist.length < SCRIPT_CHECKS) {
+      const box = /^\[(x|X|✓| )\]\s*(.*)$/.exec(value);
+      const done = !!box && box[1].toLowerCase() !== " ";
+      const text = box ? cleanLine(box[2]) : value;
+      if (text) checklist.push({ id: `script-${i}`, text, done });
+    }
+  });
+
+  if (!title && !icon && !headline && rows.length === 0 && checklist.length === 0) return null;
+  return {
+    title: title || t("zh-HK", "recordsTitle"),
+    data: {
+      icon: icon || undefined,
+      headline: headline || undefined,
+      rows: rows.length ? rows : undefined,
+      checklist: checklist.length ? checklist : undefined,
+    },
+  };
+}
+
+export function cardFromScript(script: CardScript, now: number, id = `script-card-${now}`): AgentCard {
+  return { id, kind: "record", title: script.title, createdAt: now, data: script.data };
 }

@@ -24,7 +24,15 @@ import {
   usesBackendStt,
 } from "@/lib/audio";
 import { parseIntent, isQuestion } from "@/lib/intent";
-import { localCardsFor, followupCard, photoCard, todoCardFromUtterance, weatherSpoken } from "@/lib/cards";
+import {
+  localCardsFor,
+  followupCard,
+  photoCard,
+  recordsCard,
+  tasksCard,
+  todoCardFromUtterance,
+  weatherSpoken,
+} from "@/lib/cards";
 import { latestNote, noteCard, noteFromUtterance, recallCard } from "@/lib/notes";
 import { nextDueAt } from "@/lib/datetime";
 import { assistantChat, createPairingCode, ensureSeniorSession, getAgentCards, getHealthCard, getMedicationPlan, postConversationMemory, postReminderEscalation } from "@/lib/api";
@@ -33,6 +41,8 @@ import { flush, track } from "@/lib/analytics";
 import { bridge, homeWidgetPayload, nativeAvailable, onForeground } from "@/lib/native";
 import { planForeground, shouldRaiseSos, SOS_EVENT } from "@/lib/foreground";
 import { dayKey } from "@/lib/tasks";
+import { addRecord, todayRecords } from "@/lib/recordStore";
+import { completeTask, listTasks } from "@/lib/taskStore";
 import { careForSenior, saveCareCounters } from "@/lib/careStore";
 import { setHome } from "@/lib/geofenceStore";
 import { recordInteractionForBehaviour } from "@/lib/behaviourStore";
@@ -65,6 +75,7 @@ import type {
   Intent,
   Locale,
   Note,
+  RecordEntry,
   ReminderItem,
   SosEvent,
 } from "@/lib/types";
@@ -81,18 +92,6 @@ const DEMO_CARD: HealthCard = {
   updatedAt: Date.now(),
 };
 
-const demoReminder = (): ReminderItem => ({
-  id: "demo-med",
-  kind: "med",
-  med: { id: "m1", name: "降压药 氨氯地平 5mg", dosage: "1 粒" },
-  title: "食药提醒",
-  dueAt: Date.now(),
-  status: "pending",
-  stage: "none",
-  createdAt: Date.now(),
-});
-
-/** One reminder per item in a backend-derived medication plan. */
 function reminderFromPlanItem(
   it: { name: string; dosage: string; schedule: string },
   now: number,
@@ -181,6 +180,10 @@ export default function Page() {
   const [text, setText] = useState("");
   const [cards, setCards] = useState<AgentCard[]>([]);
   const [pairingCode, setPairingCode] = useState<string | null>(null);
+  /** today's durable records, mirrored so the home screen can show one line */
+  const [todayLog, setTodayLog] = useState<RecordEntry[]>([]);
+  /** open chores, mirrored so a card tick updates the home screen at once */
+  const [openCount, setOpenCount] = useState(0);
 
   const reminder = useReminder([], {
     onEscalate: (item) => {
@@ -240,6 +243,16 @@ export default function Page() {
   const pushCards = useCallback((next: AgentCard[]) => {
     if (!next.length) return;
     setCards((prev) => [...next, ...prev].slice(0, MAX_CARDS));
+  }, []);
+
+  /** Re-read today's durable records (one indexed read; the volume is tiny). */
+  const refreshRecords = useCallback(async () => {
+    setTodayLog(await todayRecords(Date.now()).catch(() => []));
+  }, []);
+
+  const refreshTasks = useCallback(async () => {
+    const rows = await listTasks().catch(() => []);
+    setOpenCount(rows.filter((x) => !x.done).length);
   }, []);
 
   // --- conversation memory (local first; the POST never loses it) ---
@@ -429,6 +442,12 @@ export default function Page() {
     onSpeak: (line: string) => void speakLine(line),
     onConfirm: askYesNo,
     onSos: () => openSos("voice"),
+    // "我食咗藥" answered by voice must also clear today's reminder, not only
+    // write the record — otherwise the overlay keeps asking a dose already taken.
+    onMedTaken: (name: string) => {
+      reminder.takeMedication(name);
+      void refreshRecords();
+    },
   };
   const agent = useAgentBridge(agentDeps);
 
@@ -624,6 +643,8 @@ export default function Page() {
           return;
       }
       if (await agent.handleUtterance(said)) {
+        void refreshRecords();
+        void refreshTasks();
         if (stateRef.current === "thinking") settle(); // handled with cards only
         return;
       }
@@ -802,7 +823,9 @@ export default function Page() {
     if (act.kind === "interview") {
       // Marked at the START: a refused or failed interview still counts for today.
       saveProactive({ ...spoke, interviewAt: now });
-      void runInterview();
+      // Medication + open chores first: the senior answers one question, and the
+      // answer ("吃了") is routed through the agent so it becomes a real record.
+      void dailyCheckIn().then(() => runInterview());
       return;
     }
     saveProactive(spoke);
@@ -882,6 +905,16 @@ export default function Page() {
       // Opening the app starts a voice conversation by default.
       window.setTimeout(() => latest.current.proactive("open"), 1500);
     })();
+
+    // Records survive a restart: today's card comes back so the senior sees the
+    // dose was already logged instead of wondering whether it counted.
+    void todayRecords(Date.now())
+      .then((rows) => {
+        if (alive && rows.length) pushCards([recordsCard(rows, locale, Date.now())]);
+      })
+      .catch(() => {});
+    void refreshRecords();
+    void refreshTasks();
 
     return () => {
       alive = false;
@@ -995,13 +1028,88 @@ export default function Page() {
     void bridge()?.updateHomeWidget(widgetRef);
   }, [widgetRef]);
 
-  const scheduleDemoReminder = () => {
-    const item = demoReminder();
-    reminder.schedule(item);
-    // Build the card from the MERGED list: reminder.items is React state and has
-    // not updated yet, so a card built from it would miss the item added now.
-    const merged = [...reminder.items.filter((r) => r.id !== item.id), item];
-    pushCards(localCardsFor("tasks", locale, { reminders: merged, now: Date.now() }));
+  /**
+   * "今日記錄" — what the senior already did today, read back from IndexedDB.
+   * This is the durable counterpart of the floating record card: the button
+   * only reveals it, the data lives in the `records` store.
+   */
+  const showTodayRecords = async () => {
+    noteInteraction("button");
+    const rows = await todayRecords(Date.now()).catch(() => []);
+    pushCards([recordsCard(rows, locale, Date.now())]);
+    track("records_shown", locale, { count: rows.length });
+  };
+
+  /** "今日安排" — open chores as a tickable card, no reminder schema involved. */
+  const showOpenTasks = async () => {
+    noteInteraction("button");
+    const tasks = await listTasks().catch(() => []);
+    pushCards([tasksCard(tasks, locale, Date.now())]);
+  };
+
+  /**
+   * Ticking a card item is a real completion: the chore leaves the list, the
+   * medication reminder is cleared, and the senior hears it happened. Without
+   * this a checklist is decoration, and requirement #4 stays unmet.
+   */
+  const onCheckCard = async (itemId: string) => {
+    const done = await completeTask(itemId, Date.now()).catch(() => null);
+    if (!done) {
+      // Not a task: it may be a pending reminder on the medication card.
+      if (reminder.takeById(itemId)) {
+        await addRecord({
+          kind: "med",
+          title: "食藥",
+          at: Date.now(),
+          source: "reminder",
+        }).catch(() => undefined);
+        await speakLine(t(locale, "medDailyAck"));
+      }
+      return;
+    }
+    noteInteraction("button");
+    track("task_done_card", locale);
+    await addRecord({
+      kind: "card",
+      title: done.task.text,
+      at: Date.now(),
+      source: "reminder",
+    }).catch(() => undefined);
+    await speakLine(t(locale, "taskTicked"));
+    const open = (await listTasks().catch(() => [])).filter((x) => !x.done);
+    setOpenCount(open.length);
+    pushCards([tasksCard(open, locale, Date.now())]);
+  };
+
+  /**
+   * Daily check-in before the interview: ask about medication when today has no
+   * dose logged, then say how many chores are still open. The senior answers
+   * once; "吃了" is routed through the normal agent turn and really logs it.
+   */
+  const dailyCheckIn = async () => {
+    const [tasks, recs] = await Promise.all([
+      listTasks().catch(() => []),
+      todayRecords(Date.now()).catch(() => []),
+    ]);
+    const open = tasks.filter((x) => !x.done);
+    const medLogged = recs.some((r) => r.kind === "med");
+    if (open.length) pushCards([tasksCard(tasks, locale, Date.now())]);
+    if (!open.length && medLogged) return;
+
+    const ask = !medLogged
+      ? t(locale, "medAskDaily")
+      : t(locale, "tasksPending").replace("{n}", `${open.length}`);
+    stopWake();
+    if (!(await say(ask))) return;
+    go("listening");
+    const heard = await listenOnce(locale, ANSWER_TIMEOUT_MS);
+    go("thinking");
+    if (!heard?.text) {
+      settle();
+      return;
+    }
+    noteInteraction("voice");
+    await handleSaid(heard.text);
   };
 
   const closeTools = () => {
@@ -1033,6 +1141,10 @@ export default function Page() {
   const pressed = `${tap} bg-aura-accent text-white`;
   const quick =
     "flex min-h-[80px] items-center justify-center rounded-2xl bg-aura-accent px-3 py-4 text-center text-2xl font-extrabold text-white hc:bg-yellow-300 hc:text-black";
+
+  // The home-screen summary line is the in-app "record card": one glance tells
+  // the senior whether today's dose is logged and how many chores are open.
+  const medLoggedToday = todayLog.some((r) => r.kind === "med");
 
   return (
     <main className="flex min-h-[100dvh] flex-col items-center gap-6 bg-aura-bg px-5 pb-10 pt-[max(1rem,env(safe-area-inset-top))]">
@@ -1079,12 +1191,20 @@ export default function Page() {
           </button>
         </div>
         <p className="text-center text-2xl text-aura-deep hc:text-white">{t(locale, "wakeHint")}</p>
+        <div
+          aria-live="polite"
+          className="flex w-full items-center justify-between gap-3 rounded-2xl bg-white px-5 py-4 hc:border hc:border-white hc:bg-black"
+        >
+          <span className="text-2xl font-bold text-aura-deep hc:text-white">
+            {`💊 ${medLoggedToday ? t(locale, "medTodayDone") : t(locale, "medTodayNone")}`}
+          </span>
+          <span className="text-2xl font-bold text-aura-deep hc:text-white">
+            {`✅ ${t(locale, "tasksOpenCount").replace("{n}", `${openCount}`)}`}
+          </span>
+        </div>
       </div>
 
       <div className="flex w-full flex-wrap items-center justify-center gap-4">
-        <button onClick={scheduleDemoReminder} className={onTop}>
-          {t(locale, "reminderTitle")}
-        </button>
         <button
           onClick={() => {
             const next = DISPLAY_NEXT[display];
@@ -1121,17 +1241,14 @@ export default function Page() {
             <button
               onClick={() => {
                 noteInteraction("button");
-                void runIntent("medication", "");
+                void showTodayRecords();
               }}
               className={quick}
             >
-              {t(locale, "quickMed")}
+              {t(locale, "quickRecords")}
             </button>
             <button
-              onClick={() => {
-                noteInteraction("button");
-                void runIntent("tasks", "");
-              }}
+              onClick={() => void showOpenTasks()}
               className={quick}
             >
               {t(locale, "quickToday")}
@@ -1230,7 +1347,11 @@ export default function Page() {
       ) : null}
 
       {/* agent-driven card stream — the app's own "desktop" */}
-      <CardBoard cards={cards} onAction={(intent) => void runIntent(intent, "")} />
+      <CardBoard
+        cards={cards}
+        onAction={(intent) => void runIntent(intent, "")}
+        onCheck={(id) => void onCheckCard(id)}
+      />
 
       {gait.running ? (
         <p className="text-2xl text-aura-deep hc:text-white">
