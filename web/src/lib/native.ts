@@ -29,8 +29,16 @@ export interface HomeWidgetPayload {
   record?: { text: string; at: number };
 }
 
-/** Why the app was brought forward — decides what the assistant says first. */
-export type ForegroundReason = "widget" | "alarm" | "reminder" | "notification" | "boot";
+/**
+ * Why the app was brought forward — decides what the assistant says first.
+ *
+ * `wake` is the odd one: nothing was "brought forward", the page was already in
+ * front and the senior said the assistant's name WHILE it was talking. It exists
+ * so the background listener has a way to interrupt a live reply instead of
+ * relaunching the activity (which is what killed the listener before
+ * 2026-10-25 — see WakeNames.java).
+ */
+export type ForegroundReason = "widget" | "alarm" | "reminder" | "notification" | "boot" | "wake";
 
 export const FOREGROUND_REASONS: readonly ForegroundReason[] = [
   "widget",
@@ -38,6 +46,7 @@ export const FOREGROUND_REASONS: readonly ForegroundReason[] = [
   "reminder",
   "notification",
   "boot",
+  "wake",
 ] as const;
 
 /**

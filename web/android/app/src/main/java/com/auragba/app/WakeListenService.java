@@ -44,13 +44,28 @@ public class WakeListenService extends Service {
 
     public static final String ACTION_START = "com.auragba.app.WAKE_START";
     public static final String ACTION_STOP = "com.auragba.app.WAKE_STOP";
+    /**
+     * The page is about to read `EXTRA_TEXT` out loud. While that is true a name
+     * the assistant is SAYING cannot wake it (see WakeNames) — without this the
+     * service matched 「我係憶伴」 from the app's own greeting and called
+     * stopSelf(), killing background wake until the next app start.
+     */
+    public static final String ACTION_SPEAK_START = "com.auragba.app.SPEAK_START";
+    public static final String ACTION_SPEAK_STOP = "com.auragba.app.SPEAK_STOP";
+    public static final String EXTRA_TEXT = "text";
 
     private static final String TAG = "AuraWake";
     private static final String CHANNEL_ID = "memomate_wake";
     private static final int NOTIF_ID = 4711;
     private static final long RESTART_MS = 400;
+    /** A burst of ASR results for one utterance must not push twice. */
+    private static final long WAKE_COOLDOWN_MS = 1500;
 
-    /** The assistant's name in the forms a senior might say it.
+    /** True while this service is alive, so senders can skip a pointless start. */
+    private static volatile boolean RUNNING = false;
+
+    /**
+     * The assistant's name in the forms a senior might say it.
      *  MUST stay identical to `WAKE_NAMES` in web/src/hooks/useWakeWord.ts
      *  (docs/dev.md §1.3 items 3 and 4) — a divergence means the foreground and
      *  the background listener disagree about the senior's own assistant. */
@@ -67,15 +82,65 @@ public class WakeListenService extends Service {
 
     private SpeechRecognizer recognizer;
     private Intent intent;
-    private boolean running;
+    private volatile boolean running;
+    /** True between ACTION_SPEAK_START and ACTION_SPEAK_STOP. */
+    private volatile boolean speaking;
+    /** The line being read right now; its words are not wake words. */
+    private volatile String spokenText = "";
+    private long lastWakeAt;
+
+    /**
+     * Called by the TTS path (AuraNativePlugin) around every utterance.
+     *
+     * A no-op when the service is not running: starting a foreground service
+     * just to be told "someone is talking" would turn a wake-off device into a
+     * permanently notifying one.
+     */
+    static void notifySpeakStart(Context ctx, String text) {
+        if (!RUNNING) return;
+        try {
+            Intent i = new Intent(ctx, WakeListenService.class)
+                    .setAction(ACTION_SPEAK_START)
+                    .putExtra(EXTRA_TEXT, text == null ? "" : text);
+            ctx.startService(i);
+        } catch (Exception e) {
+            Log.w(TAG, "notifySpeakStart failed: " + e.getMessage());
+        }
+    }
+
+    static void notifySpeakEnd(Context ctx) {
+        if (!RUNNING) return;
+        try {
+            ctx.startService(new Intent(ctx, WakeListenService.class).setAction(ACTION_SPEAK_STOP));
+        } catch (Exception e) {
+            Log.w(TAG, "notifySpeakEnd failed: " + e.getMessage());
+        }
+    }
 
     @Override
     public int onStartCommand(Intent cmd, int flags, int startId) {
+        if (cmd != null && ACTION_SPEAK_START.equals(cmd.getAction())) {
+            // Never (re)start the microphone for a speak notification: if the
+            // service is already gone the caller's RUNNING check lost a race,
+            // and silently reopening the mic is worse than missing one line.
+            if (running) {
+                spokenText = cmd.getStringExtra(EXTRA_TEXT);
+                if (spokenText == null) spokenText = "";
+                speaking = true;
+            }
+            return START_STICKY;
+        }
+        if (cmd != null && ACTION_SPEAK_STOP.equals(cmd.getAction())) {
+            speaking = false;
+            spokenText = "";
+            return START_STICKY;
+        }
         if (cmd != null && ACTION_STOP.equals(cmd.getAction())) {
             stopSelf();
             return START_NOT_STICKY;
         }
         startForegroundWithNotification();
+        RUNNING = true;
         if (!running) {
             running = true;
             listen();
@@ -144,22 +209,42 @@ public class WakeListenService extends Service {
         if (bundle == null) return false;
         ArrayList<String> hits = bundle.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
         if (hits == null) return false;
+        // While the assistant is talking, a name IT is saying is not a wake
+        // word — otherwise 「我係憶伴」 wakes the assistant that just said it.
+        List<String> active = WakeNames.activeNames(NAMES, speaking ? spokenText : null);
         for (String hit : hits) {
-            if (hit == null) continue;
-            String norm = hit.replaceAll("\\s+", "").toLowerCase(Locale.ROOT);
-            for (String name : NAMES) {
-                if (norm.contains(name.toLowerCase(Locale.ROOT))) return true;
-            }
+            if (WakeNames.heard(hit, active)) return true;
         }
         return false;
     }
 
+    /**
+     * A name was heard.
+     *
+     * If the page is already in front, this must NOT relaunch the activity (that
+     * used to be the whole behaviour, and with `singleTask` it also killed this
+     * service): it pushes a `wake` reason instead, and the page stops its own
+     * reply and opens the mic. Listening continues — a barge-in that also
+     * switches the listener off is not a barge-in.
+     *
+     * Otherwise (phone locked, another app in front) the old behaviour stands:
+     * bring the app forward and stand down.
+     */
     private void onWake() {
-        running = false;
+        long now = System.currentTimeMillis();
+        if (now - lastWakeAt < WAKE_COOLDOWN_MS) return;
+        lastWakeAt = now;
         handler.removeCallbacks(restart);
+
+        if (MainActivity.pushReason("wake")) {
+            restartSoon(); // the recognizer session ended; arm the next one
+            return;
+        }
+
+        running = false;
         Intent open = new Intent(this, MainActivity.class);
         open.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
-        open.putExtra("aura_wake", true);
+        open.putExtra(MainActivity.EXTRA_REASON, "wake");
         startActivity(open);
         stopSelf();
     }
@@ -195,6 +280,9 @@ public class WakeListenService extends Service {
     @Override
     public void onDestroy() {
         running = false;
+        RUNNING = false;
+        speaking = false;
+        spokenText = "";
         handler.removeCallbacksAndMessages(null);
         if (recognizer != null) {
             recognizer.destroy();

@@ -8,6 +8,8 @@ import android.os.Bundle;
 import com.getcapacitor.BridgeActivity;
 import com.getcapacitor.JSObject;
 
+import java.lang.ref.WeakReference;
+
 /**
  * The WebView host. Two jobs beyond Capacitor's defaults:
  *
@@ -17,6 +19,13 @@ import com.getcapacitor.JSObject;
  * 2. Keep that reason in SharedPreferences as well, because `onCreate` can fire
  *    before the WebView has attached a listener. The plugin's
  *    `consumePendingReason()` drains it on startup.
+ *
+ * A third job was added for barge-in: a name heard WHILE the app is already in
+ * front must not relaunch the activity (that is what the wake service used to
+ * do), it must tell the live page to stop talking. {@link #pushReason(String)}
+ * is that path — it deliberately does NOT write the pending reason, because a
+ * cold start has already happened and re-delivering it would replay the
+ * interruption on the next launch.
  *
  * Declared `showWhenLocked` in the manifest so the widget's SOS hot zone works
  * without unlocking.
@@ -49,12 +58,43 @@ public class MainActivity extends BridgeActivity {
         return "record".equals(open) ? open : null;
     }
 
+    /**
+     * The live activity, for senders that are NOT an Intent (a service that
+     * wants to interrupt a reply the page is speaking right now).
+     *
+     * Weak on purpose: a leaked static Activity is a leaked WebView, and this
+     * one holds the microphone permission too.
+     */
+    private static WeakReference<MainActivity> LIVE = new WeakReference<>(null);
+
+    /**
+     * Tells the RUNNING page why something happened, without launching it and
+     * without writing the pending reason (there is no cold start to replay).
+     *
+     * @return false when there is no live WebView — the caller must then fall
+     *         back to launching the activity (the senior is on another app).
+     */
+    static boolean pushReason(String reason) {
+        MainActivity live = LIVE.get();
+        if (live == null) return false;
+        if (live.getBridge() == null) return false;
+        live.emit(reason, null, false, System.currentTimeMillis());
+        return true;
+    }
+
     @Override
     public void onCreate(Bundle savedInstanceState) {
         // Register custom plugins BEFORE super.onCreate().
         registerPlugin(AuraNativePlugin.class);
         super.onCreate(savedInstanceState);
+        LIVE = new WeakReference<>(this);
         deliver(getIntent());
+    }
+
+    @Override
+    public void onDestroy() {
+        if (LIVE.get() == this) LIVE.clear();
+        super.onDestroy();
     }
 
     @Override
@@ -82,7 +122,14 @@ public class MainActivity extends BridgeActivity {
                 .putString(KEY_OPEN, open)
                 .apply();
 
-        if (getBridge() == null) return; // WebView not ready; consumePendingReason() will deliver it
+        // No bridge yet: the reason is in prefs and consumePendingReason() will
+        // deliver it once the page has a listener.
+        emit(reason, open, sos, at);
+    }
+
+    /** The one place that talks to the WebView, so both paths cannot drift. */
+    private void emit(String reason, String open, boolean sos, long at) {
+        if (getBridge() == null) return;
 
         JSObject data = new JSObject();
         data.put("reason", reason);

@@ -1411,10 +1411,12 @@ assert.equal(magnitude(3, 4, 0), 5);
 
 // --- native seam contract (B / W3) -------------------------------------------
 {
-  // The five reasons MainActivity can deliver; each maps to its own greeting.
-  assert.equal(FOREGROUND_REASONS.length, 5);
+  // The six reasons the shell can deliver; `wake` was added 2026-10-25 so the
+  // background listener can interrupt a live reply instead of relaunching.
+  assert.equal(FOREGROUND_REASONS.length, 6);
   assert.ok(FOREGROUND_REASONS.includes("widget"));
   assert.ok(FOREGROUND_REASONS.includes("alarm"));
+  assert.ok(FOREGROUND_REASONS.includes("wake"));
 
   // Widget payload: the layout has exactly 3 item rows, so the payload must
   // never promise a 4th (the old 4 was silently dropped by HomeWidgetProvider).
@@ -2437,10 +2439,22 @@ assert.equal(magnitude(3, 4, 0), 5);
     assert.ok(["silent", "listen", "speak", "refresh"].includes(plan.kind), `no plan for ${reason}`);
     if (plan.kind === "silent") assert.equal(reason, "boot", "only boot may stay silent");
     if (plan.kind === "listen" || plan.kind === "speak") {
-      assert.ok(plan.say.length > 0);
+      // `wake` is the ONE listen-with-no-line plan: he interrupted the assistant
+      // to say something, so greeting him first would talk over the sentence he
+      // just cut off and delay the mic he asked for.
+      if (reason === "wake") assert.equal(plan.say, "", "barge-in must not greet first");
+      else assert.ok(plan.say.length > 0);
       assert.equal(mentionsDiagnosis(plan.say), false);
     }
   }
+
+  // A name heard while the assistant is talking means "stop and listen".
+  for (const loc of ["zh-HK", "zh-MO", "zh-CN"] as const) {
+    assert.deepEqual(planForeground("wake", loc), { kind: "listen", say: "" });
+  }
+  // It must NOT be the widget plan (which greets) nor silent (which ignores him).
+  assert.notDeepEqual(planForeground("wake", "zh-HK"), planForeground("widget", "zh-HK"));
+  assert.notEqual(planForeground("wake", "zh-HK").kind, "silent");
 
   // A reboot re-arms alarms; it must never start talking in an empty room.
   assert.equal(planForeground("boot", "zh-HK").kind, "silent");
