@@ -96,6 +96,21 @@ async function readPresence(): Promise<Presence | null> {
   return doc?.presence ?? null;
 }
 
+/**
+ * Metres from home, or null when there is no home point or no usable fix.
+ * Used by `navigate_home`; no accuracy gate here because a rough distance is
+ * still actionable ("about a kilometre"), unlike a fence alert.
+ */
+export async function distanceFromHomeM(): Promise<number | null> {
+  const home = await readHome();
+  if (!home) return null;
+  const api = bridge();
+  if (!api) return null;
+  const fix = await api.getLocation().catch(() => null);
+  if (!fix || typeof fix.lat !== "number" || typeof fix.lng !== "number") return null;
+  return haversineM({ lat: fix.lat, lng: fix.lng }, home.center);
+}
+
 export interface FenceSampleResult {
   /** empty when the sample was skipped (no home / no location source / bad fix) */
   events: GeofenceEvent[];

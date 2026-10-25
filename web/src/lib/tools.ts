@@ -104,6 +104,24 @@ export const TOOLS: readonly ToolDecl[] = [
     permissions: [],
   },
   {
+    name: "defer_task",
+    description:
+      "Push a task back when the senior says '等陣先' / '遲啲先' / '五分钟后'. Records the deferral " +
+      "(an executive-function signal for the family report) and moves the due time forward.",
+    schema: {
+      type: "object",
+      properties: {
+        taskId: { type: "string", description: "Exact task id when known." },
+        query: { type: "string", description: "Spoken words to match when the id is unknown." },
+        minutes: { type: "number", description: "How long to push it back. Default 10." },
+      },
+      required: [],
+      additionalProperties: false,
+    },
+    risk: "safe",
+    permissions: [],
+  },
+  {
     name: "set_alarm",
     description:
       "Set a local alarm at a clock time ('听日八点叫我'). Pass the time of day the senior said, NOT a computed timestamp.",
@@ -142,7 +160,8 @@ export const TOOLS: readonly ToolDecl[] = [
   {
     name: "navigate_home",
     description:
-      "Tell the senior how far they are from home and which direction. Text only — no map SDK.",
+      "Tell the senior how far they are from home. Distance only: there is no compass, and " +
+      "'head north-west' is useless to someone standing on a corner. Text only, no map SDK.",
     schema: {
       type: "object",
       properties: {},
@@ -155,8 +174,9 @@ export const TOOLS: readonly ToolDecl[] = [
   {
     name: "call_contact",
     description:
-      "Place a phone call to a named contact. MUST restate the contact's full name and get a yes " +
-      "before dialling; if the senior declines, cancel. Never auto-redial.",
+      "Open the dialler for a named contact stored in the health card. MUST restate the contact's " +
+      "full name and get a yes before dialling; if the senior declines, cancel. Never auto-redial. " +
+      "A name we do not have is refused, never guessed.",
     schema: {
       type: "object",
       properties: {
@@ -166,7 +186,9 @@ export const TOOLS: readonly ToolDecl[] = [
       additionalProperties: false,
     },
     risk: "confirm",
-    permissions: ["CALL_PHONE"],
+    // ACTION_DIAL fills the number in and leaves the call button to the senior.
+    // That needs no CALL_PHONE permission — the empty list is the honest one.
+    permissions: [],
   },
   {
     name: "send_message",
@@ -188,7 +210,7 @@ export const TOOLS: readonly ToolDecl[] = [
   {
     name: "open_app",
     description:
-      "Open one whitelisted app (微信/电话/相机/设置). Requires the accessibility service; refuse any other app.",
+      "Open one whitelisted app (微信/电话/相机/设置) by launching it. Refuse any other app.",
     schema: {
       type: "object",
       properties: {
@@ -202,7 +224,9 @@ export const TOOLS: readonly ToolDecl[] = [
       additionalProperties: false,
     },
     risk: "confirm",
-    permissions: ["ACCESSIBILITY"],
+    // Launched by package name, not by clicking: no accessibility service, and
+    // nothing can be confirmed inside the app by mistake.
+    permissions: [],
   },
   {
     name: "ui_tap_text",

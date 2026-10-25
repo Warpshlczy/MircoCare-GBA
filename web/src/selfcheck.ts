@@ -21,6 +21,17 @@ import {
   G,
 } from "./lib/signal.ts";
 import { t, riskBandLabel } from "./lib/i18n.ts";
+import {
+  ppv,
+  npv,
+  lrPlus,
+  numberNeededToFlag,
+  wilsonInterval,
+  ppvBand,
+  explainRisk,
+  OPERATING_POINTS,
+  DEFAULT_OPERATING_POINT,
+} from "./lib/riskExplain.ts";
 import { parseIntent, isQuestion } from "./lib/intent.ts";
 import { localCardsFor, followupCard, todoCardFromUtterance, taskCard, placeCard, alarmCard, agentPlanCard } from "./lib/cards.ts";
 import {
@@ -55,6 +66,8 @@ import {
   confirmDelayMin,
   markDone,
   deferTask,
+  deferralCountForDay,
+  MAX_DEFERRALS_KEPT,
   latestOpenTask,
   dayKey,
   taskStatsForDay,
@@ -587,7 +600,7 @@ assert.equal(magnitude(3, 4, 0), 5);
 
 // --- agent tool registry (B contract, docs/dev.md §3.5) ----------------------
 {
-  assert.equal(TOOLS.length, 10, "exactly 10 tools are declared");
+  assert.equal(TOOLS.length, 11, "exactly 11 tools are declared");
   const names = TOOLS.map((x) => x.name);
   assert.equal(new Set(names).size, names.length, "tool names must be unique");
 
@@ -608,7 +621,7 @@ assert.equal(magnitude(3, 4, 0), 5);
     "send_message",
     "ui_tap_text",
   ]);
-  assert.equal(TOOLS.filter((x) => x.risk === "safe").length, 6);
+  assert.equal(TOOLS.filter((x) => x.risk === "safe").length, 7);
 
   // "forbidden" is an utterance-level refusal in agent.ts, never a callable tool.
   assert.equal(names.some((n) => n.includes("transfer") || n.includes("pay")), false);
@@ -625,9 +638,13 @@ assert.equal(magnitude(3, 4, 0), 5);
   assert.deepEqual(requiredPermissions().sort(), [
     "ACCESSIBILITY",
     "ACCESS_FINE_LOCATION",
-    "CALL_PHONE",
     "SCHEDULE_EXACT_ALARM",
   ]);
+  // Dialling must NOT need CALL_PHONE: we open the dialler and leave the call
+  // button to the senior (ACTION_DIAL), so the permission would be a lie.
+  assert.deepEqual(toolByName("call_contact")?.permissions, []);
+  // Opening an app is a launch, not a click, so it must not need accessibility.
+  assert.deepEqual(toolByName("open_app")?.permissions, []);
 }
 
 // --- geofence: distance, hysteresis, alert policy (B / W1) -------------------
@@ -851,7 +868,21 @@ assert.equal(magnitude(3, 4, 0), 5);
   assert.equal(second.elapsedMin, 13);
   assert.equal(second.task, first.task, "an already-done task is not rewritten");
 
-  assert.equal(deferTask(deferTask(t)).deferredCount, 2);
+  // Deferring records a timestamp (the day rollup needs it) and moves dueAt,
+  // otherwise "延后" would count but the reminder would never come back.
+  const d1 = deferTask(t, t.dueAt! + 60_000, 10 * 60_000);
+  const d2 = deferTask(d1, t.dueAt! + 120_000, 10 * 60_000);
+  assert.equal(d2.deferredCount, 2);
+  assert.equal(d2.deferredAt?.length, 2);
+  assert.equal(d2.dueAt, t.dueAt! + 120_000 + 10 * 60_000, "the reminder must actually come back");
+  // Day-granular: yesterday's deferrals are NOT today's (the old sum was cumulative).
+  assert.equal(deferralCountForDay(d2, dayKey(t.dueAt!)), 2);
+  assert.equal(deferralCountForDay(d2, dayKey(t.dueAt! + 86_400_000)), 0);
+  // The stamp list is capped so one task cannot grow the record forever.
+  let capped = t;
+  for (let i = 0; i < MAX_DEFERRALS_KEPT + 5; i++) capped = deferTask(capped, t.dueAt! + i * 1000, 1000);
+  assert.equal(capped.deferredAt?.length, MAX_DEFERRALS_KEPT);
+  assert.equal(capped.deferredCount, MAX_DEFERRALS_KEPT + 5, "the counter still tells the whole story");
 
   const a = newTask({ text: "a", now: 1 });
   const b = newTask({ text: "b", now: 2 });
@@ -1971,6 +2002,246 @@ assert.equal(magnitude(3, 4, 0), 5);
     say: "",
   });
   assert.equal(badTime.ok, false, "a non-HH:MM time must not reach the scheduler");
+}
+
+// --- 风险解释层（解析性质断言，不依赖任何数据集，因此永远不会因换数据而失效）---
+{
+  // π=0 / π=1 的极限
+  assert.equal(ppv(0.877, 0.297, 0), 0, "no prevalence -> no positive predictive value");
+  assert.equal(ppv(1, 1, 0.2), 1, "a perfect test is certain at any prevalence");
+  // 完美无信息检验（抛硬币）：PPV 应等于患病率
+  const coin = ppv(0.5, 0.5, 0.2);
+  assert.ok(Math.abs(coin - 0.2) < 1e-9, "an uninformative test leaves PPV at the base rate");
+  // PPV 对患病率单调递增（这是"0.863 敏感度"必须配患病率的原因）
+  let prev = -1;
+  for (const pi of [0.01, 0.05, 0.1, 0.2, 0.4, 0.656]) {
+    const v = ppv(0.877, 0.297, pi);
+    assert.ok(v > prev, `PPV must rise with prevalence (pi=${pi})`);
+    prev = v;
+  }
+  // NPV 对患病率单调递减
+  let prevNpv = 2;
+  for (const pi of [0.01, 0.2, 0.5, 0.9]) {
+    const v = npv(0.877, 0.297, pi);
+    assert.ok(v < prevNpv, `NPV must fall with prevalence (pi=${pi})`);
+    prevNpv = v;
+  }
+  // 似然比与患病率无关（这是它能跨人群迁移的原因）
+  assert.equal(lrPlus(0.877, 0.297), lrPlus(0.877, 0.297));
+  assert.ok(lrPlus(0.877, 0.297) > 1, "a screening test must have LR+ > 1");
+  // NNF = 1/PPV
+  assert.ok(
+    Math.abs(numberNeededToFlag(0.877, 0.297, 0.2) - 1 / ppv(0.877, 0.297, 0.2)) < 1e-12,
+    "number-needed-to-flag is exactly 1/PPV",
+  );
+  // Wilson 区间包含点估计且落在 [0,1]
+  const [wLo, wHi] = wilsonInterval(50, 100);
+  assert.ok(wLo < 0.5 && wHi > 0.5 && wLo >= 0 && wHi <= 1, "Wilson interval must bracket the point estimate");
+  // PPV 区间必须包住点估计
+  const band = ppvBand(0.877, 212, 0.297, 111, 0.2);
+  assert.ok(band.lo <= band.point && band.point <= band.hi, "PPV band must bracket the point estimate");
+  assert.ok(band.lo >= 0 && band.hi <= 1, "PPV band stays a probability");
+
+  // 文案层：不配置患病率时，绝不能出现任何数字（这一层必须"永不返修"）
+  for (const loc of ["zh-CN", "zh-HK", "zh-MO"] as const) {
+    const only = explainRisk(loc, {});
+    assert.equal(only.hasNumbers, false, "no prevalence configured -> no numbers");
+    assert.ok(!/\d/.test(only.qualitative), "the qualitative line must contain no digits at all");
+    const withPi = explainRisk(loc, { prevalence: 0.2 });
+    assert.equal(withPi.hasNumbers, true, "a configured prevalence may show numbers");
+    assert.ok(withPi.detail && withPi.detail.length > 0);
+  }
+  // 数据层：默认 operating point 必须存在，且明确标记为未外部验证
+  const point = OPERATING_POINTS[DEFAULT_OPERATING_POINT];
+  assert.ok(point, "the default operating point must exist");
+  assert.equal(point.provenance, "internal-cv", "current operating point is internal only");
+  assert.equal(point.upperBound, true, "its numbers are an upper bound, not a validated estimate");
+}
+
+
+// --- call_contact / navigate_home / defer_task / open_app (B, P0) ------------
+{
+  const NOW = new Date(2026, 9, 25, 10, 0, 0).getTime();
+  const saved: Task[] = [];
+  const events: TaskEvent[] = [];
+  const dialled: string[] = [];
+  const opened: string[] = [];
+
+  const deps = (extra: Record<string, unknown> = {}) => ({
+    locale: "zh-HK" as const,
+    now: NOW,
+    tasks: [] as Task[],
+    saveTask: async (t: Task) => {
+      saved.push(t);
+    },
+    recordEvent: async (e: TaskEvent) => {
+      events.push(e);
+    },
+    ...extra,
+  });
+
+  // --- dialling: the number comes from the card, the name is only a key -----
+  const oneContact = { contacts: async () => [{ name: "陳小明", phone: "+85261234567" }] };
+
+  // A name we do not have must NOT dial. This is the whole point of the rule.
+  const stranger = await createToolRunner(deps({ ...oneContact, dial: async (p: string) => { dialled.push(p); return true; } })).run({
+    name: "call_contact",
+    risk: "confirm",
+    args: { name: "陳大文" },
+    say: "",
+  });
+  assert.equal(stranger.ok, false, "an unknown name must be refused");
+  assert.equal(dialled.length, 0, "and must not touch the dialler");
+  assert.equal((stranger.message ?? "").includes("陳大文"), true, "the senior hears which name we do not have");
+
+  // Exact name -> dialled once.
+  const exact = await createToolRunner(deps({ ...oneContact, dial: async (p: string) => { dialled.push(p); return true; } })).run({
+    name: "call_contact",
+    risk: "confirm",
+    args: { name: "陳小明" },
+    say: "",
+  });
+  assert.equal(exact.ok, true);
+  assert.deepEqual(dialled, ["+85261234567"]);
+
+  // Nickname without the surname ("小明" for "陳小明") is accepted...
+  dialled.length = 0;
+  const nick = await createToolRunner(deps({ ...oneContact, dial: async (p: string) => { dialled.push(p); return true; } })).run({
+    name: "call_contact",
+    risk: "confirm",
+    args: { name: "小明" },
+    say: "",
+  });
+  assert.equal(nick.ok, true);
+  // ...but a single character is not: "明" could be anyone in the family.
+  dialled.length = 0;
+  const tooShort = await createToolRunner(deps({ ...oneContact, dial: async (p: string) => { dialled.push(p); return true; } })).run({
+    name: "call_contact",
+    risk: "confirm",
+    args: { name: "明" },
+    say: "",
+  });
+  assert.equal(tooShort.ok, false);
+  assert.equal(dialled.length, 0);
+
+  // No contact configured -> refusal, never a blank dial.
+  const none = await createToolRunner(deps({ contacts: async () => [], dial: async () => true })).run({
+    name: "call_contact",
+    risk: "confirm",
+    args: { name: "陳小明" },
+    say: "",
+  });
+  assert.equal(none.ok, false);
+
+  // The dialler refusing is reported as failure, and there is NO retry.
+  dialled.length = 0;
+  const refused = await createToolRunner(deps({ ...oneContact, dial: async (p: string) => { dialled.push(p); return false; } })).run({
+    name: "call_contact",
+    risk: "confirm",
+    args: { name: "陳小明" },
+    say: "",
+  });
+  assert.equal(refused.ok, false);
+  assert.equal(dialled.length, 1, "never auto-redial");
+
+  // canRun: without contacts+dial the orchestrator must not even ask.
+  assert.equal(createToolRunner(deps()).canRun("call_contact"), false);
+  assert.equal(createToolRunner(deps({ ...oneContact, dial: async () => true })).canRun("call_contact"), true);
+
+  // --- navigate_home: distance only, and no compass promises ----------------
+  const far = await createToolRunner(deps({ homeDistanceM: async () => 1240 })).run({
+    name: "navigate_home",
+    risk: "safe",
+    args: {},
+    say: "",
+  });
+  assert.equal(far.ok, true);
+  assert.equal((far.message ?? "").includes("1.2 公里"), true);
+  const near = await createToolRunner(deps({ homeDistanceM: async () => 30 })).run({
+    name: "navigate_home",
+    risk: "safe",
+    args: {},
+    say: "",
+  });
+  assert.equal(near.message, "你而家就喺屋企附近。", "30m does not deserve a number");
+  const noHome = await createToolRunner(deps({ homeDistanceM: async () => null })).run({
+    name: "navigate_home",
+    risk: "safe",
+    args: {},
+    say: "",
+  });
+  assert.equal(noHome.ok, false);
+  assert.equal((noHome.message ?? "").includes("屋企"), true);
+
+  // --- defer_task: counts, moves dueAt, and reports the event ---------------
+  const chore: Task = newTask({ text: "食降壓藥", now: NOW - 3600_000, dueAt: NOW, id: "task-d" });
+  await createToolRunner(deps({ tasks: [chore] })).run({
+    name: "defer_task",
+    risk: "safe",
+    args: { query: "食降壓藥", minutes: 5 },
+    say: "",
+  });
+  assert.equal(saved.length, 1);
+  assert.equal(saved[0].deferredCount, 1);
+  assert.equal(saved[0].dueAt, NOW + 5 * 60_000, "the reminder must actually come back");
+  assert.equal(events.length, 1);
+  assert.equal(events[0].state, "deferred");
+  assert.equal(events[0].taskId, "task-d");
+  assert.equal(JSON.stringify(events[0]).includes("降壓"), false, "the event never carries the task text");
+
+  // Default window is 10 minutes, and it is clamped to something sane.
+  saved.length = 0;
+  await createToolRunner(deps({ tasks: [chore] })).run({
+    name: "defer_task",
+    risk: "safe",
+    args: { taskId: "task-d" },
+    say: "",
+  });
+  assert.equal(saved[0].dueAt, NOW + 10 * 60_000);
+  saved.length = 0;
+  await createToolRunner(deps({ tasks: [chore] })).run({
+    name: "defer_task",
+    risk: "safe",
+    args: { taskId: "task-d", minutes: 9999 },
+    say: "",
+  });
+  assert.equal(saved[0].dueAt, NOW + 120 * 60_000, "two hours is the ceiling; a day is not a snooze");
+
+  // Nothing to defer -> says so, and writes nothing.
+  saved.length = 0;
+  const nothing = await createToolRunner(deps()).run({
+    name: "defer_task",
+    risk: "safe",
+    args: { query: "食藥" },
+    say: "",
+  });
+  assert.equal(nothing.ok, false);
+  assert.equal(saved.length, 0);
+
+  // --- open_app: whitelist only --------------------------------------------
+  const openedRes = await createToolRunner(deps({ openApp: async (k: string) => { opened.push(k); return k === "wechat"; } })).run({
+    name: "open_app",
+    risk: "confirm",
+    args: { app: "wechat" },
+    say: "",
+  });
+  assert.equal(openedRes.ok, true);
+  assert.deepEqual(opened, ["wechat"]);
+  const badApp = await createToolRunner(deps({ openApp: async (k: string) => { opened.push(k); return false; } })).run({
+    name: "open_app",
+    risk: "confirm",
+    args: { app: "bank" },
+    say: "",
+  });
+  assert.equal(badApp.ok, false, "an app outside the whitelist must not launch");
+
+  // --- the day rollup counts deferrals by timestamp, not cumulatively ------
+  const yesterday = newTask({ text: "覆診", now: NOW - 86_400_000, dueAt: NOW - 86_400_000, id: "task-y" });
+  const deferredYesterday = deferTask({ ...yesterday, dueAt: NOW }, NOW - 86_400_000, 0);
+  const stats = taskStatsForDay([deferredYesterday], dayKey(NOW));
+  assert.equal(stats.deferredCount, 0, "yesterday's deferral must not show up today");
+  const statsYesterday = taskStatsForDay([deferredYesterday], dayKey(NOW - 86_400_000));
+  assert.equal(statsYesterday.deferredCount, 1);
 }
 
 console.log("selfcheck: OK");

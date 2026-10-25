@@ -6,8 +6,10 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.location.Location;
 import android.location.LocationManager;
+import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.MediaStore;
 import android.provider.Settings;
 import android.speech.tts.TextToSpeech;
 import android.speech.tts.UtteranceProgressListener;
@@ -230,6 +232,68 @@ public class AuraNativePlugin extends Plugin {
     public void cancelOnce(PluginCall call) {
         AlarmScheduler.cancelOnce(getContext());
         call.resolve();
+    }
+
+    // --- dial / launch (no permission, no clicking on his behalf) -------------
+
+    /**
+     * Opens the dialler PREFILLED. It does not place the call: pressing the call
+     * button stays the senior's own act, which is why ACTION_DIAL (not
+     * ACTION_CALL) is used and CALL_PHONE is not requested.
+     */
+    @PluginMethod
+    public void dial(PluginCall call) {
+        String phone = call.getString("phone", "");
+        JSObject ret = new JSObject();
+        String cleaned = phone == null ? "" : phone.replaceAll("[\\s\\-()]", "");
+        if (cleaned.isEmpty()) {
+            ret.put("ok", false);
+            call.resolve(ret);
+            return;
+        }
+        try {
+            Intent i = new Intent(Intent.ACTION_DIAL, Uri.parse("tel:" + cleaned));
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            getContext().startActivity(i);
+            ret.put("ok", true);
+        } catch (Exception e) {
+            ret.put("ok", false);
+        }
+        call.resolve(ret);
+    }
+
+    /**
+     * Launches one whitelisted app by intent. Deliberately NOT via the
+     * accessibility service: clicking inside another app on the senior's behalf
+     * can confirm a payment or dismiss an alert, and this path cannot.
+     */
+    @PluginMethod
+    public void openApp(PluginCall call) {
+        String key = call.getString("app", "");
+        JSObject ret = new JSObject();
+        Intent i = null;
+        if ("wechat".equals(key)) {
+            i = getContext().getPackageManager().getLaunchIntentForPackage("com.tencent.mm");
+        } else if ("phone".equals(key)) {
+            i = new Intent(Intent.ACTION_DIAL);
+        } else if ("camera".equals(key)) {
+            i = new Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA);
+        } else if ("settings".equals(key)) {
+            i = new Intent(Settings.ACTION_SETTINGS);
+        }
+        if (i == null) {
+            ret.put("ok", false);
+            call.resolve(ret);
+            return;
+        }
+        try {
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            getContext().startActivity(i);
+            ret.put("ok", true);
+        } catch (Exception e) {
+            ret.put("ok", false);
+        }
+        call.resolve(ret);
     }
 
     // --- circadian rollup (screen/unlock/charging; no permission) --------------

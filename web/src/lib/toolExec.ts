@@ -27,12 +27,14 @@
 
 import {
   DUPLICATE_WINDOW_MS,
+  deferTask,
   latestOpenTask,
   markDone,
   newTask,
   taskEventFor,
   taskTextFromUtterance,
 } from "./tasks.ts";
+import { formatDistance } from "./geofence.ts";
 import type { ToolExecResult } from "./agent.ts";
 import type { PlannedStep } from "./toolrun.ts";
 import type { Locale, SosEvent, Task, TaskEvent } from "./types";
@@ -43,7 +45,17 @@ import type { Locale, SosEvent, Task, TaskEvent } from "./types";
  * does not exist yet; `canRun()` reports them as unrunnable so the orchestrator
  * never asks "shall I call 阿明?" and then admits it cannot.
  */
-const LOCAL_TOOLS = new Set(["sos", "create_task", "complete_task", "locate", "set_alarm"]);
+const LOCAL_TOOLS = new Set([
+  "sos",
+  "create_task",
+  "complete_task",
+  "defer_task",
+  "locate",
+  "navigate_home",
+  "call_contact",
+  "open_app",
+  "set_alarm",
+]);
 
 export interface ToolRunnerDeps {
   locale: Locale;
@@ -61,6 +73,18 @@ export interface ToolRunnerDeps {
   locate?: () => Promise<{ lat: number; lng: number; accuracy?: number } | null>;
   /** arm a one-shot alarm; resolve false when the OS refused (permission/slot) */
   setAlarm?: (atMs: number, label: string) => Promise<boolean>;
+  /**
+   * Contacts we are allowed to dial — in practice the health card's emergency
+   * contact. Empty array means "we know nobody", which is a refusal, not a
+   * licence to dial whatever the model named.
+   */
+  contacts?: () => Promise<{ name: string; phone: string }[]>;
+  /** open the dialler with the number prefilled; the senior still presses call */
+  dial?: (phone: string) => Promise<boolean>;
+  /** metres from home, or null when there is no home point / no fix yet */
+  homeDistanceM?: () => Promise<number | null>;
+  /** launch one whitelisted app ('wechat' | 'phone' | 'camera' | 'settings') */
+  openApp?: (key: string) => Promise<boolean>;
 }
 
 export interface ToolRunner {
@@ -99,6 +123,23 @@ interface Copy {
   alarmBadTime: string;
   /** native refused: no exact-alarm permission, or the OS rejected it */
   alarmFailed: string;
+  /** nobody in the health card we are allowed to dial */
+  noContact: string;
+  /** the senior named someone we do not have: refuse, never guess */
+  strangerContact: (name: string) => string;
+  /** the dialler refused to open */
+  dialFailed: string;
+  /** the dialler is open, prefilled — the senior still presses call */
+  called: (name: string) => string;
+  /** no home point configured yet */
+  noHome: string;
+  /** he is at home (or close enough that a distance would be silly) */
+  homeNear: string;
+  homeFar: (distance: string) => string;
+  deferDone: (minutes: number) => string;
+  deferNoMatch: string;
+  appOpened: (key: string) => string;
+  appFailed: string;
 }
 
 // Cantonese for HK/MO, plain Mandarin for the mainland. Short sentences, no
@@ -122,6 +163,17 @@ const COPY: Record<Locale, Copy> = {
     alarmSet: (w) => `好，${w}叫你。`,
     alarmBadTime: "我聽唔清幾點，你講多次，例如「朝早八點」。",
     alarmFailed: "我設唔到鬧鐘，你睇下手機有冇閂咗鬧鐘權限。",
+    noContact: "我部機未有屋企人嘅電話，你叫屋企人設定一次。",
+    strangerContact: (n) => `我冇${n}嘅電話，你叫屋企人幫你打。`,
+    dialFailed: "我開唔到撥號，你睇下手機。",
+    called: (n) => `好，撥咗${n}嘅電話，你按綠色個掣。`,
+    noHome: "我未知你屋企喺邊，你叫屋企人設定一次。",
+    homeNear: "你而家就喺屋企附近。",
+    homeFar: (d) => `你而家離屋企大約 ${d}。`,
+    deferDone: (m) => `好，我 ${m} 分鐘後再提你。`,
+    deferNoMatch: "我唔知你講邊件事，你話我知係邊件？",
+    appOpened: (k) => `好，幫你開咗${k}。`,
+    appFailed: "我開唔到，你睇下手機。",
   },
   "zh-MO": {
     taskSaved: (t) => `好，我記低咗：${t}`,
@@ -141,6 +193,17 @@ const COPY: Record<Locale, Copy> = {
     alarmSet: (w) => `好，${w}叫你。`,
     alarmBadTime: "我聽唔清幾點，你講多次，例如「朝早八點」。",
     alarmFailed: "我設唔到鬧鐘，你睇下手機有冇閂咗鬧鐘權限。",
+    noContact: "我部機未有屋企人嘅電話，你叫屋企人設定一次。",
+    strangerContact: (n) => `我冇${n}嘅電話，你叫屋企人幫你打。`,
+    dialFailed: "我開唔到撥號，你睇下手機。",
+    called: (n) => `好，撥咗${n}嘅電話，你按綠色個掣。`,
+    noHome: "我未知你屋企喺邊，你叫屋企人設定一次。",
+    homeNear: "你而家就喺屋企附近。",
+    homeFar: (d) => `你而家離屋企大約 ${d}。`,
+    deferDone: (m) => `好，我 ${m} 分鐘後再提你。`,
+    deferNoMatch: "我唔知你講邊件事，你話我知係邊件？",
+    appOpened: (k) => `好，幫你開咗${k}。`,
+    appFailed: "我開唔到，你睇下手機。",
   },
   "zh-CN": {
     taskSaved: (t) => `好，我记下了：${t}`,
@@ -160,6 +223,17 @@ const COPY: Record<Locale, Copy> = {
     alarmSet: (w) => `好，${w}叫你。`,
     alarmBadTime: "我没听清几点，你再说一次，比如说「早上八点」。",
     alarmFailed: "我设不了闹钟，你看看手机是不是关了闹钟权限。",
+    noContact: "我这里还没有家里人的电话，你让家里人设一次。",
+    strangerContact: (n) => `我没有${n}的电话，你让家里人帮你打。`,
+    dialFailed: "我打不开拨号，你看看手机。",
+    called: (n) => `好，拨了${n}的电话，你按绿色的按钮。`,
+    noHome: "我还不知道你家在哪，你让家里人设一次。",
+    homeNear: "你现在就在家附近。",
+    homeFar: (d) => `你现在离家大约 ${d}。`,
+    deferDone: (m) => `好，我 ${m} 分钟后再提醒你。`,
+    deferNoMatch: "我不知道你说的是哪一件，你告诉我是哪件？",
+    appOpened: (k) => `好，帮你打开了${k}。`,
+    appFailed: "我打不开，你看看手机。",
   },
 };
 
@@ -251,6 +325,9 @@ export function createToolRunner(deps: ToolRunnerDeps): ToolRunner {
     if (name === "locate") return typeof deps.locate === "function";
     if (name === "sos") return typeof deps.sendSos === "function" || typeof deps.raiseSos === "function";
     if (name === "set_alarm") return typeof deps.setAlarm === "function";
+    if (name === "call_contact") return typeof deps.contacts === "function" && typeof deps.dial === "function";
+    if (name === "navigate_home") return typeof deps.homeDistanceM === "function";
+    if (name === "open_app") return typeof deps.openApp === "function";
     return true; // create_task / complete_task need nothing but storage
   }
 
@@ -369,6 +446,99 @@ export function createToolRunner(deps: ToolRunnerDeps): ToolRunner {
     return { ok: true, message: copy.alarmSet(alarmWhenLabel(at, deps.now, deps.locale)) };
   }
 
+
+  /** Case/space-insensitive, so "陳小明" == "陈小明" == " 陳小明 ". */
+  function normName(v: string): string {
+    return v.replace(/\s+/g, "").trim();
+  }
+
+  /**
+   * Dialling is the one place a wrong guess reaches a real person.
+   *
+   * The name the MODEL said is only a lookup key: the number always comes from
+   * the health card, and a name that matches nothing there is refused. A model
+   * that hallucinates "打畀陳小明" must not be able to ring an arbitrary number.
+   */
+  async function callContact(args: Record<string, unknown>): Promise<ToolExecResult> {
+    const said = norm(args.name);
+    if (!said || !deps.contacts || !deps.dial) return { ok: false, message: copy.noContact };
+
+    const known = await deps.contacts().catch(() => []);
+    if (known.length === 0) return { ok: false, message: copy.noContact };
+
+    const q = normName(said);
+    const matches = known.filter((c) => {
+      const n = normName(c.name);
+      if (!q || !n) return false;
+      if (n === q) return true;
+      // Cantonese nicknames drop the surname: "小明" for "陳小明". One character
+      // is never enough ("明" could be anyone), so require two.
+      return q.length >= 2 && (n.includes(q) || q.includes(n));
+    });
+
+    if (matches.length !== 1) {
+      // Zero matches = a stranger. More than one = we would be picking for him.
+      return { ok: false, message: copy.strangerContact(said) };
+    }
+
+    try {
+      if (!(await deps.dial(matches[0].phone))) return { ok: false, message: copy.dialFailed };
+    } catch {
+      return { ok: false, message: copy.dialFailed };
+    }
+    // Deliberately no retry and no auto-redial: the dialler is open, the rest is
+    // the senior's own decision (ACTION_DIAL does not place the call).
+    return { ok: true, message: copy.called(matches[0].name) };
+  }
+
+  /**
+   * Distance only. A bearing ("north-west") cannot be turned into "turn left"
+   * without a compass, so we do not pretend: the number he can act on is how far.
+   */
+  async function navigateHome(): Promise<ToolExecResult> {
+    if (!deps.homeDistanceM) return { ok: false, message: copy.noHome };
+    const distance = await deps.homeDistanceM().catch(() => null);
+    if (distance === null) return { ok: false, message: copy.noHome };
+    if (distance < 100) return { ok: true, message: copy.homeNear };
+    return { ok: true, message: copy.homeFar(formatDistance(distance)) };
+  }
+
+  async function deferTaskExec(args: Record<string, unknown>): Promise<ToolExecResult> {
+    const query = norm(args.query);
+    const id = norm(args.taskId);
+    let target: Task | null = null;
+
+    if (id) {
+      target = deps.tasks.find((t) => t.id === id && !t.done) ?? null;
+      if (!target) return { ok: false, message: copy.noMatch };
+    } else if (query) {
+      target = matchTask(deps.tasks, query, deps.now);
+      if (!target || target.done) {
+        return { ok: false, message: deps.tasks.some((t) => !t.done) ? copy.deferNoMatch : copy.noOpenTask };
+      }
+    } else {
+      target = latestOpenTask(deps.tasks);
+      if (!target) return { ok: false, message: copy.noOpenTask };
+    }
+
+    const raw = typeof args.minutes === "number" && Number.isFinite(args.minutes) ? args.minutes : 10;
+    const minutes = Math.max(1, Math.min(120, Math.round(raw)));
+    const updated = deferTask(target, deps.now, minutes * 60_000);
+
+    await deps.saveTask(updated);
+    if (deps.recordEvent) {
+      await deps.recordEvent(taskEventFor(updated, "deferred", deps.now, "voice"));
+    }
+    return { ok: true, message: copy.deferDone(minutes) };
+  }
+
+  async function openApp(args: Record<string, unknown>): Promise<ToolExecResult> {
+    const key = typeof args.app === "string" ? args.app : "";
+    if (!deps.openApp) return { ok: false, message: copy.appFailed };
+    const ok = await deps.openApp(key).catch(() => false);
+    return ok ? { ok: true, message: copy.appOpened(key) } : { ok: false, message: copy.appFailed };
+  }
+
   async function run(step: PlannedStep): Promise<ToolExecResult> {
     const args = step.args ?? {};
     switch (step.name) {
@@ -382,6 +552,14 @@ export function createToolRunner(deps: ToolRunnerDeps): ToolRunner {
         return sos();
       case "set_alarm":
         return setAlarm(args);
+      case "defer_task":
+        return deferTaskExec(args);
+      case "navigate_home":
+        return navigateHome();
+      case "call_contact":
+        return callContact(args);
+      case "open_app":
+        return openApp(args);
       default:
         // Reached only if the orchestrator ignored canRun().
         return { ok: false, message: copy.notFound };

@@ -77,9 +77,29 @@ export function markDone(task: Task, at: number): DoneResult {
   return { task: done, alreadyDone: false, elapsedMin: null, delayMin: confirmDelayMin(task, at) };
 }
 
-/** The senior pushed it back — an executive-function signal, not a failure. */
-export function deferTask(task: Task): Task {
-  return { ...task, deferredCount: task.deferredCount + 1 };
+/** Keep at most this many deferral timestamps per task. */
+export const MAX_DEFERRALS_KEPT = 20;
+
+/**
+ * The senior pushed it back — an executive-function signal, not a failure.
+ *
+ * `at` is REQUIRED at the call site because the day rollup attributes deferrals
+ * by timestamp; a bare counter cannot answer "did he defer today?". The due date
+ * moves forward by `delayMs` so the reminder actually comes back.
+ */
+export function deferTask(task: Task, at: number, delayMs = 10 * 60 * 1000): Task {
+  const stamps = [...(task.deferredAt ?? []), at].slice(-MAX_DEFERRALS_KEPT);
+  return {
+    ...task,
+    deferredCount: task.deferredCount + 1,
+    deferredAt: stamps,
+    dueAt: task.dueAt === undefined ? undefined : at + delayMs,
+  };
+}
+
+/** Deferrals that happened on `day`. Unknown-timestamp deferrals count 0, not N. */
+export function deferralCountForDay(task: Task, day: string): number {
+  return (task.deferredAt ?? []).filter((at) => dayKey(at) === day).length;
 }
 
 /**
@@ -160,7 +180,10 @@ export function taskStatsForDay(tasks: Task[], day: string): DayStats {
   return {
     dueCount: due.length,
     doneCount: done.length,
-    deferredCount: due.reduce((sum, t) => sum + t.deferredCount, 0),
+    // Day-granular: the cumulative counter would report last week's deferrals
+    // again every day. Tasks recorded before `deferredAt` existed report 0 —
+    // "we cannot attribute this to today" is honest, "3 every day" is not.
+    deferredCount: due.reduce((sum, t) => sum + deferralCountForDay(t, day), 0),
     completionRate: due.length === 0 ? null : done.length / due.length,
     timeoutRate: due.length === 0 ? null : (due.length - done.length) / due.length,
     avgConfirmDelayMin:

@@ -81,6 +81,10 @@ export interface AuraNativeBridge {
   startCircadian(): Promise<boolean>;
   /** One day's rollup, or null when nothing was observed (NOT zeros). */
   getCircadian(day: string): Promise<CircadianDaily | null>;
+  /** Opens the dialler prefilled. The call itself stays the senior's choice. */
+  dial(phone: string): Promise<boolean>;
+  /** Launches one whitelisted app ('wechat' | 'phone' | 'camera' | 'settings'). */
+  openApp(key: string): Promise<boolean>;
   /** Foreground-only, last known fix. Resolves null when unavailable/denied. */
   getLocation(): Promise<NativeLocation | null>;
   /**
@@ -124,6 +128,8 @@ interface AuraNativePlugin {
   cancelOnce(): Promise<void>;
   circadianStart(): Promise<{ ok?: boolean }>;
   getCircadian(o: { day: string }): Promise<Partial<CircadianDaily> | void>;
+  dial(o: { phone: string }): Promise<{ ok?: boolean }>;
+  openApp(o: { app: string }): Promise<{ ok?: boolean }>;
   getLocation(): Promise<Partial<NativeLocation> | void>;
   speak(o: { text: string; locale: string; pitch: number; rate: number }): Promise<
     { ok?: boolean; stopped?: boolean; reason?: string } | void
@@ -161,6 +167,8 @@ function withDefaults(src: Partial<AuraNativeBridge>): AuraNativeBridge {
     cancelOnce: () => Promise.resolve(),
     startCircadian: () => Promise.resolve(false),
     getCircadian: () => Promise.resolve(null),
+    dial: () => Promise.resolve(false),
+    openApp: () => Promise.resolve(false),
     getLocation: () =>
       Promise.resolve(src.getLocation?.())
         .then((r) => (r && typeof r.lat === "number" ? (r as NativeLocation) : null))
@@ -208,6 +216,8 @@ export function bridge(): AuraNativeBridge | null {
     scheduleOnce: (atMs, label) => p.scheduleOnce({ at: atMs, label }).then((r) => !!r?.ok),
     cancelOnce: () => p.cancelOnce(),
     startCircadian: () => p.circadianStart().then((r) => !!r?.ok),
+    dial: (phone) => p.dial({ phone }).then((r) => !!r?.ok),
+    openApp: (key) => p.openApp({ app: key }).then((r) => !!r?.ok),
     getCircadian: async (day) => {
       const r = await p.getCircadian({ day });
       // Empty object = nothing observed that day; the caller must omit the row.

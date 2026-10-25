@@ -31,7 +31,8 @@ import type { RecentTurn } from "@/lib/agent";
 import { getHealth, postAgentTurn } from "@/lib/api";
 import { flushClosedDay } from "@/lib/behaviourStore";
 import { pruneCareHistory, markCareDayOpened, MEASURED_DWELL_MS } from "@/lib/careStore";
-import { startFenceWatch } from "@/lib/geofenceStore";
+import { emergencyContacts } from "@/lib/contactStore";
+import { distanceFromHomeM, startFenceWatch } from "@/lib/geofenceStore";
 import { bridge } from "@/lib/native";
 import { flushOutboxOnce, startOutboxAutoFlush } from "@/lib/outboxRunner";
 import { enqueue } from "@/lib/outboxStore";
@@ -220,6 +221,16 @@ export function useAgentBridge(deps: AgentBridgeDeps): AgentBridge {
         // which is true on the web, and honest on a phone with the permission off.
         setAlarm: bridge()
           ? async (atMs, label) => (await bridge()?.scheduleOnce(atMs, label)) ?? false
+          : undefined,
+        // The number always comes from the health card (cached for offline);
+        // the model's name is only a lookup key.
+        contacts: emergencyContacts,
+        dial: bridge()
+          ? async (phone) => (await bridge()?.dial(phone)) ?? false
+          : undefined,
+        homeDistanceM: bridge() ? distanceFromHomeM : undefined,
+        openApp: bridge()
+          ? async (key) => (await bridge()?.openApp(key)) ?? false
           : undefined,
       });
 

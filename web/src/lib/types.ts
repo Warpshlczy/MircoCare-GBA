@@ -325,6 +325,13 @@ export interface Task {
   source: "voice" | "reminder" | "followup" | "agent";
   /** how many times the senior pushed it back — an executive-function signal */
   deferredCount: number;
+  /**
+   * When each deferral happened. `deferredCount` alone is cumulative, so a task
+   * deferred 3 times last week would report 3 "today" every day after — the
+   * daily rollup needs the timestamps to attribute them to the right day.
+   * Capped at the most recent 20 to keep the record small.
+   */
+  deferredAt?: number[];
   createdAt: number;
   /** set when the senior re-confirms within 30min of a previous confirmation */
   duplicateOf?: string;
