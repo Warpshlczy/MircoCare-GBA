@@ -122,6 +122,7 @@ import {
   appendTurn,
   isLlmReady,
   composeReply,
+  outOfScopeRequest,
   CONFUSED_ESCALATE_AFTER,
   MAX_RECENT_TURNS,
 } from "./lib/agent.ts";
@@ -1059,6 +1060,49 @@ assert.equal(magnitude(3, 4, 0), 5);
     tasks: [],
     ...extra,
   });
+
+  // --- capability boundary: say "can't", never file a todo --------------
+  {
+    // Requests the device genuinely has no tool for.
+    for (const text of [
+      "你能帮我做个pdf吗",
+      "幫我印份文件出嚟",
+      "帮我发封邮件畀个仔",
+      "帮我挂个号",
+      "帮我网购一箱水",
+      "帮我写代码",
+    ]) {
+      assert.equal(outOfScopeRequest(text), true, `out of scope: ${text}`);
+    }
+    // Everything the app CAN do must never be caught by this rule.
+    for (const text of [
+      "帮我记住听日覆诊",
+      "提醒我食藥",
+      "帮我打电话畀阿明",
+      "帶我去打印店", // a ROUTE to a print shop is a supported ask
+      "帶我去街市",
+      "我食咗藥",
+      "帮我做张卡记低血压",
+      "我喺邊",
+    ]) {
+      assert.equal(outOfScopeRequest(text), false, `must stay supported: ${text}`);
+    }
+
+    const reply = await runTurn("你能帮我做个pdf吗", baseDeps());
+    assert.equal(reply.handled, true, "a capability question is answered, not handed back to the todo path");
+    assert.equal(reply.executed.length, 0, "no tool ran");
+    assert.equal(reply.cards.length, 0, "no todo card is created");
+    assert.ok(reply.reply.length > 0, "he hears an answer");
+    assert.equal(
+      /記低|記住|记住|记下/.test(reply.reply),
+      false,
+      `must not claim it was recorded: ${reply.reply}`
+    );
+
+    // The route case still plans a real action even though it mentions 打印.
+    const route = await runTurn("帶我去打印店", baseDeps({ canRun: () => true }));
+    assert.deepEqual(route.steps.map((s) => s.name), ["plan_route"], "a route to a print shop is still planned");
+  }
 
   // refusal short-circuits even when a backend is available
   let reachedBackend = false;

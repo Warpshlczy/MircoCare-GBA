@@ -546,10 +546,11 @@ mv public/live2d/model.manifest.json /tmp/ && npm run build; mv /tmp/model.manif
 | 6 | 工具面板无屏幕入口（#1 P0） | 主屏常驻「常用」按钮 → `openTools()` | 失语长者不发声也能打开打给家人/健康卡/拍照/筛查 |
 | 7 | 字幕 2 行只装 13–16 字（#1 P0） | `.caption` 改 4 行 / 38px / 全宽（大字档 5 行 / 48px） | 34 字长句完整可见 |
 | 8 | SOS 计数口径（#1 P0） | `bumpCare("sos")` 从 `openSos()` 移到 `SosOverlay` 的 `onEscalated`（后端 202 之后） | 倒计时中取消 → 计数不增 |
+| 9 | 能力边界：没有工具的请求被当成待办 | `agent.ts#outOfScopeRequest`（显式白名单：文件/邮件/打印/挂号/网购/视频通话/编程）在本地规划之后、模型之前短路，直接说「做唔到，叫屋企人幫你」，**handled:true 且不建待办**；`planLocal` 已认领的句子不受影响（「帶我去打印店」仍是路线） | 「你能帮我做个pdf吗」→ 一句实话、无卡片、无待办；「帶我去打印店」→ 仍出路线卡 |
 
 > **T3-Y 承接句暂缓**：它会改变轮次语义（主句后追加一句并自动开麦），与本次「叫名字才打断/接手」的模型冲突，且必须真机验证节奏。等分段播放真机验收通过后再决定是否启用；T3-Z（`replyFollowup` 契约字段）继续不动。
 >
-> **`spokenSegments()` 落地位置**：B 在 #6 承诺的 `7052e1a` 不在仓库（本地与远端都查不到），A 按同一契约在 `lib/speech.ts` 实现并补断言；B 恢复后请核对该函数是否与其分支一致。
+> **`spokenSegments()` 落地位置**：B 的 `38a8763` 已合入 main，A 侧临时实现已丢弃，统一使用 `lib/speech.ts` 中 B 的版本（`spokenSegments(text, opts)`）；`audio.ts` 只调用不带 opts 的默认形态。
 
 > 联动缺口（已提 issue）：C 侧 `/agent/turn` 需接受 `log_medication` / `compose_card` 与脚本卡契约；B 侧桌面小组件需展示记录卡、原生闹钟持久化对齐、后台跌倒采样使用同一阈值。
 >

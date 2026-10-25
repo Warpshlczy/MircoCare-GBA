@@ -142,7 +142,10 @@ export interface TurnOutcome {
  * should never hear the same line twice in a row (issue #2). These are only
  * used when the model cannot answer at all.
  */
-const COPY: Record<Locale, { refusedFallback: string[]; notWired: string[]; unknownTool: string[]; failed: string[]; nothing: string[] }> = {
+const COPY: Record<
+  Locale,
+  { refusedFallback: string[]; notWired: string[]; unknownTool: string[]; outOfScope: string[]; failed: string[]; nothing: string[] }
+> = {
   "zh-HK": {
     refusedFallback: [
       "呢個我做唔到，要你自己或者屋企人做。",
@@ -158,6 +161,12 @@ const COPY: Record<Locale, { refusedFallback: string[]; notWired: string[]; unkn
       "呢樣我未識做，你講第二樣啦。",
       "呢樣嘢我未學識，對唔住。",
       "呢樣我未識搞，你叫屋企人幫你啦。",
+    ],
+    // 能力边界：设备上真的没有这个工具。说"做不到"，并给一个人，不建待办。
+    outOfScope: [
+      "呢樣我真係做唔到，你叫屋企人幫你。",
+      "我未識做呢樣，要屋企人幫手。",
+      "呢件事超出我能力，你同屋企人講。",
     ],
     failed: [
       "有啲做唔到，你試多次或者叫屋企人幫手。",
@@ -186,6 +195,11 @@ const COPY: Record<Locale, { refusedFallback: string[]; notWired: string[]; unkn
       "呢樣嘢我未學識，對唔住。",
       "呢樣我未識搞，你叫屋企人幫你啦。",
     ],
+    outOfScope: [
+      "呢樣我真係做唔到，你叫屋企人幫你。",
+      "我未識做呢樣，要屋企人幫手。",
+      "呢件事超出我能力，你同屋企人講。",
+    ],
     failed: [
       "有啲做唔到，你試多次或者叫屋企人幫手。",
       "今次差少少，再講一次好嗎？",
@@ -213,6 +227,11 @@ const COPY: Record<Locale, { refusedFallback: string[]; notWired: string[]; unkn
       "这个我还没学会，对不起。",
       "这个我不会弄，您让家里人帮您吧。",
     ],
+    outOfScope: [
+      "这个我真的做不了，您让家里人帮您。",
+      "这个我不会做，得家里人帮忙。",
+      "这件事超出我的能力，您跟家里人说。",
+    ],
     failed: [
       "有些没做成，你再试一次或者让家里人帮忙。",
       "这次差一点，再说一次好吗？",
@@ -227,6 +246,45 @@ const COPY: Record<Locale, { refusedFallback: string[]; notWired: string[]; unkn
 };
 
 const pick = (pool: string[]): string => pool[Math.floor(Math.random() * pool.length)];
+
+/**
+ * Requests this device has NO tool for.
+ *
+ * Why this exists: the offline fallback turns "any utterance" into a todo, so
+ * 「你能帮我做个 PDF 吗」used to answer 「好，幫你記低咗」 — a capability QUESTION
+ * was silently turned into a promise nothing would ever fulfil. The senior
+ * cannot tell the difference, and the family report gains a chore that does not
+ * exist.
+ *
+ * The rule is an explicit allow-list of things we genuinely cannot do, never a
+ * "unknown verb" guess: a false negative (we miss one) costs nothing, while a
+ * false positive tells him "I can't" about something the app actually does.
+ * Supported asks (call someone, set an alarm, remember a chore, plan a route)
+ * are matched by `planLocal` first and never reach this check.
+ */
+const OUT_OF_SCOPE: readonly RegExp[] = [
+  // Documents / files we cannot read, write or export.
+  /(?:做|整|寫|写|印|生成|製作|制作|導出|导出|下載|下载).{0,8}(?:pdf|word|excel|ppt|文檔|文档|文件|檔案|档案|表格|簡報|简报|幻灯片|圖片|图片)/i,
+  // Mail is a free-text channel; we only share whitelisted templates.
+  /(?:發|发|寫|写|回|寄).{0,6}(?:郵件|邮件|電郵|电邮|email|e-mail)/i,
+  // Hardware we do not drive.
+  /(?:打印|列印|掃描|扫描|傳真|传真)/,
+  // Bookings / commerce / clinical appointments: a wrong action is irreversible.
+  /(?:掛號|挂号|掛.{0,2}號|挂.{0,2}号)/,
+  /(?:網購|网购|落單|下单|購物|购物)/,
+  // Video calls and programming are outside an elder-care assistant.
+  /(?:視頻通話|视频通话|視像通話|视像通话)/,
+  /(?:寫程式|写程序|寫代碼|写代码|編程|编程)/,
+];
+
+/** Non-null = this request is outside the product's capability set. */
+export function outOfScopeRequest(utterance: string): boolean {
+  const text = utterance ?? "";
+  // A supported local action claims the turn first: 「帶我去打印店」 mentions 打印
+  // but is a ROUTE request, and answering "I can't print" would be a regression.
+  if (planLocal(text).length > 0) return false;
+  return OUT_OF_SCOPE.some((re) => re.test(text));
+}
 
 /**
  * 连续第几次"没听懂"之后不再要求他重说，而是给他一个人。
@@ -294,6 +352,14 @@ export async function runTurn(utterance: string, deps: AgentDeps): Promise<TurnO
   // record, not render the medication checklist card. Only when no tool can
   // act do we fall back to the local card for the same utterance.
   const localCalls = planLocal(text).filter((c) => (deps.canRun ? deps.canRun(c.name) : true));
+
+  // 2b. Capability boundary: what the device cannot do is said out loud and is
+  // NEVER filed as a todo (see OUT_OF_SCOPE). Checked only when no local tool
+  // claimed the turn, so 「帶我去打印店」 still plans a route.
+  if (localCalls.length === 0 && outOfScopeRequest(text)) {
+    return { ...emptyOutcome(), handled: true, reply: pick(COPY[deps.locale].outOfScope) };
+  }
+
   const intent = parseIntent(text);
   if (localCalls.length === 0 && LOCAL_CARD_INTENTS.has(intent)) {
     const cards = localCardsFor(intent, deps.locale, { reminders: deps.reminders, now: deps.now });
