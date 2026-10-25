@@ -2705,6 +2705,29 @@ assert.equal(magnitude(3, 4, 0), 5);
     "declined 之后不许再说话"
   );
 
+  // ③½ 模型乱来（工具名不存在 / 参数坏）→ "未識做"。事情根本没发生，所以绝不
+  // 复述规划器的假成功；也不能落进 nothing 池——那是在要求长者重说，等于把
+  // 机器的错记到他头上（与 confusedRef 的注释是同一条原则）。
+  const bogusReply = composeReply({
+    ...base,
+    skipped: [{ name: "send_sms", reason: "invalid" }],
+    plannerReply: "好，我幫你記住咗。",
+  });
+  assert.ok(bogusReply.length > 0, "invalid 必须有话说，不能沉默");
+  assert.notEqual(bogusReply, "好，我幫你記住咗。", "事情没发生，不许复述规划器的假成功");
+
+  // 两个池必须不相交：各抽 40 次，invalid 的答案不允许出现在 nothing 的采样里。
+  const nothingLines = new Set<string>();
+  const unknownLines = new Set<string>();
+  for (let i = 0; i < 40; i += 1) {
+    nothingLines.add(composeReply(base));
+    unknownLines.add(composeReply({ ...base, skipped: [{ name: "send_sms", reason: "invalid" }] }));
+  }
+  assert.ok(unknownLines.size >= 3, `unknownTool 池覆盖不足：${[...unknownLines].join(" / ")}`);
+  for (const line of unknownLines) {
+    assert.ok(!nothingLines.has(line), `invalid 落进了 nothing 池（那是在要求长者重说）：${line}`);
+  }
+
   // ④ 规划器只是聊天 → 用它的句子，但要压成一句
   assert.equal(composeReply({ ...base, plannerReply: rambling }), "你今日聽得幾好，不過我見你講嘢少咗少少。");
 
@@ -2718,6 +2741,7 @@ assert.equal(magnitude(3, 4, 0), 5);
       const lines = [
         composeReply({ ...base, locale, executed: [{ name: "x", ok: false }], hadSteps: true }),
         composeReply({ ...base, locale, skipped: [{ name: "send_message", reason: "no_executor" }], hadSteps: true }),
+        composeReply({ ...base, locale, skipped: [{ name: "send_sms", reason: "invalid" }] }),
         composeReply({ ...base, locale }),
       ];
       for (const line of lines) {
@@ -2730,7 +2754,7 @@ assert.equal(magnitude(3, 4, 0), 5);
         );
       }
     }
-    assert.ok(seen.size >= 6, `${locale} 的随机池覆盖不足（只抽到 ${seen.size} 条），断言可能空转`);
+    assert.ok(seen.size >= 8, `${locale} 的随机池覆盖不足（只抽到 ${seen.size} 条），断言可能空转`);
   }
 
   // 工具朗读行：回读长者原话之后仍在预算内（这是最容易失控的一类）
@@ -2950,6 +2974,81 @@ assert.equal(magnitude(3, 4, 0), 5);
   // 段间静音与每段上限是常量：audio.ts 与断言必须引用同一个数，不能各写一份。
   assert.equal(SEGMENT_GAP_MS, 250);
   assert.equal(SEGMENT_MAX, 14, "one segment must fit one caption line (13–14 字)");
+}
+
+// --- governance API pipe (C's issue #2/#3 batch; the UI belongs to A) --------
+{
+  // api.ts cannot be imported here either (extensionless ./types import);
+  // the source text is the assertion surface, same as the audio.ts seam above.
+  const api = readFileSync(new URL("./lib/api.ts", import.meta.url), "utf8");
+  const types = readFileSync(new URL("./lib/types.ts", import.meta.url), "utf8");
+
+  for (const call of [
+    '"/caregiver/health-card", { method: "PUT"',
+    '"/caregiver/health-card", { method: "DELETE"',
+    '`/caregiver/pairing/${encodeURIComponent(seniorDeviceId)}`, { method: "DELETE"',
+    '"/auth/me", { method: "DELETE"',
+    '"/reports/weekly/me.pdf"',
+    '"/caregiver/reports/weekly.pdf"',
+  ]) {
+    assert.ok(api.includes(call), `api.ts must call ${call}`);
+  }
+  for (const fn of [
+    "export async function updateHealthCard(",
+    "export async function deleteHealthCard(",
+    "export async function revokePairing(",
+    "export async function deleteAccount(",
+    "export async function fetchWeeklyPdf(",
+    "export function weeklyPdfPath(",
+  ]) {
+    assert.ok(api.includes(fn), `api.ts must export ${fn.slice(7)}`);
+  }
+  assert.ok(
+    api.includes("deployPrevalence?: number | null;"),
+    "HealthResponse carries deployPrevalence (null = no PPV numbers, issue #3 §4)"
+  );
+
+  // The PDF must bypass request(): that helper JSON.parses the body and would
+  // explode on binary. The scope→path mapping is a pure function so the two
+  // report surfaces can be pinned down here.
+  const pdf = /export async function fetchWeeklyPdf\([\s\S]*?\n\}/.exec(api);
+  assert.ok(pdf, "fetchWeeklyPdf exists");
+  assert.ok(pdf[0].includes("res.blob()"), "the PDF is read as a Blob, not parsed as JSON");
+  assert.ok(!pdf[0].includes("request<"), "the PDF must not go through the JSON request() helper");
+  const map = /export function weeklyPdfPath\([\s\S]*?\n\}/.exec(api);
+  assert.ok(
+    map && map[0].includes('"/reports/weekly/me.pdf"') && map[0].includes('"/caregiver/reports/weekly.pdf"'),
+    "both report scopes (senior self-read + caregiver) are mapped"
+  );
+
+  // PATCH semantics: the family edits one row at a time, so nothing may be
+  // required — and contacts keep their own endpoint (whole-table replace).
+  // The body is captured up to the interface's own closing brace; nested
+  // object types are stripped before the field split, or `phone: string`
+  // would masquerade as a required field of its own.
+  const hcu = /export interface HealthCardUpdate \{([\s\S]*?)\n\}/.exec(types);
+  assert.ok(hcu, "types.ts must declare HealthCardUpdate");
+  assert.ok(
+    /emergencyContact\?:\s*\{\s*name: string;\s*phone: string;?\s*\}/.test(types),
+    "emergencyContact keeps the {name, phone} shape (the `?` variant lives in HealthCardUpdate)"
+  );
+  const fields = hcu[1]
+    .replace(/\{[^}]*\}/g, "") // drop inline object types, keep the top-level fields
+    .split(";")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  assert.ok(fields.length >= 7, `HealthCardUpdate fields: ${fields.length}`);
+  for (const f of fields) {
+    assert.ok(/^[A-Za-z]+\?:/.test(f), `every HealthCardUpdate field must be optional: ${f}`);
+  }
+  assert.ok(!hcu[1].includes("contacts"), "contacts never ride the health-card update (own endpoint)");
+
+  // The outbox comment used to promise server-side gait dedup that did not
+  // exist yet; C is landing the marker (issue #2 B1). Keep it honest.
+  assert.ok(
+    !/backend already does for/.test(types),
+    "the stale 'backend already does for gait' claim must stay out of types.ts"
+  );
 }
 
 console.log("selfcheck: OK");

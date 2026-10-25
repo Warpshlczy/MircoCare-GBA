@@ -181,6 +181,23 @@ export interface HealthCard {
   updatedAt: number;
 }
 
+/**
+ * PATCH-style update for the family health card (PUT /caregiver/health-card).
+ * Every field is optional — the family edits one row at a time and the server
+ * merges. `contacts` is deliberately absent: the dial list has its own
+ * endpoint (POST /caregiver/contacts, whole-table replace), and `emergencyContact`
+ * is never overwritten by a contacts write.
+ */
+export interface HealthCardUpdate {
+  name?: string;
+  age?: number;
+  bloodType?: string;
+  allergies?: string[];
+  chronicConditions?: string[];
+  medications?: string[];
+  emergencyContact?: { name: string; phone: string };
+}
+
 export interface GaitMonitorState {
   running: boolean;
   lastWindow: GaitWindow | null;
@@ -406,8 +423,12 @@ export type OutboxKind =
 
 /**
  * One entry in the offline replay queue. Replay is at-least-once, so every
- * consumer must de-duplicate by `payload.id` (the backend already does for
- * gait/screening/telemetry).
+ * consumer must de-duplicate by `payload.id`. Server-side idempotency today:
+ * screening / telemetry / taskEvent / geofence (by `id`) and behaviour (by
+ * day). Landing: `conversation` (C, issue #3 A5), `gait` + `reminders/escalate`
+ * (C, issue #2 B1/B2) — until those ship, the two are posted directly
+ * (at-most-once, never queued). `sos` has NO server-side marker, which is why
+ * the queue-side dedup in outboxStore is load-bearing for it.
  */
 export interface OutboxItem {
   id: string;
