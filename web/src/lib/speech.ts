@@ -123,3 +123,70 @@ export function fitUtterance(text: string, hard = SPEECH_HARD_LIMIT): string {
   // clip 允许省略号占一个字，所以留一格给它，保证返回长度 ≤ hard
   return clip(one, hard - 1);
 }
+
+// ---------------------------------------------------------------------------
+// Segmentation for playback (issue #6 · T2)
+//
+// `speak()` used to synthesize the whole line in one go. A 24-character line is
+// 5–6 seconds of continuous audio; by the time the senior hears the end, the
+// beginning is gone. Splitting at punctuation gives the engine (and the ear) a
+// breath, WITHOUT changing a single character of the content — `join("")` is
+// the original text. This is a playback concern, not a content one: the caption
+// still shows the whole line once.
+// ---------------------------------------------------------------------------
+
+/** Silence between two synthesized segments (ms). */
+export const SEGMENT_GAP_MS = 250;
+/** One segment ≈ one caption line, so a segment can be heard in one breath. */
+export const SEGMENT_MAX = 14;
+/** More than this and it sounds like a shopping list, not speech. */
+export const MAX_SEGMENTS = 5;
+
+const SOFT_BREAK = "，、：,:, ";
+
+/** Split one over-long sentence at a soft break, or evenly when it has none. */
+function softSplit(sentence: string, max: number): string[] {
+  const chars = [...sentence];
+  if (chars.length <= max) return [sentence];
+  let cut = -1;
+  for (let i = Math.min(max, chars.length - 1); i >= Math.ceil(max / 3); i -= 1) {
+    if (SOFT_BREAK.includes(chars[i])) {
+      cut = i;
+      break;
+    }
+  }
+  if (cut === -1) {
+    // No usable pause: even slices. (14/14/3 leaves a 3-character stump that
+    // sounds like the engine stalled; 11/11/11 does not.)
+    const parts = Math.ceil(chars.length / max);
+    const size = Math.ceil(chars.length / parts);
+    const out: string[] = [];
+    for (let i = 0; i < chars.length; i += size) out.push(chars.slice(i, i + size).join(""));
+    return out;
+  }
+  return [chars.slice(0, cut + 1).join(""), ...softSplit(chars.slice(cut + 1).join(""), max)];
+}
+
+/**
+ * A line → the segments to synthesize, in order. PURE.
+ *
+ * Invariant: `segments.join("")` equals the input ignoring whitespace. Missing a
+ * character is missing a fact for someone who cannot read the caption.
+ */
+export function spokenSegments(text: string): string[] {
+  const pieces: string[] = [];
+  for (const sentence of splitSentences(text)) pieces.push(...softSplit(sentence, SEGMENT_MAX));
+
+  // A fragment of nothing but punctuation makes the engine silent for 250 ms.
+  const merged: string[] = [];
+  for (const piece of pieces) {
+    const meaningful = piece.replace(/[。！？!?；;，、：:,\s]/g, "");
+    if (!meaningful && merged.length > 0) merged[merged.length - 1] += piece;
+    else if (meaningful || merged.length === 0) merged.push(piece);
+  }
+
+  if (merged.length <= MAX_SEGMENTS) return merged;
+  const head = merged.slice(0, MAX_SEGMENTS - 1);
+  head.push(merged.slice(MAX_SEGMENTS - 1).join(""));
+  return head;
+}

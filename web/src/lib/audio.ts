@@ -5,6 +5,8 @@ import { FRAMES_PER_CHAR, VISEME_FRAME_MS, visemeFromText } from "./viseme";
 import { bridge, nativeAvailable } from "./native";
 import type { VoicePreset, VoiceProfile } from "./native";
 import { transcribeAudio } from "./api";
+import { SEGMENT_GAP_MS, spokenSegments } from "./speech";
+import { track } from "./analytics";
 import type { Locale } from "./types";
 
 // --- minimal SpeechRecognition typings (not in TS DOM lib yet) ---
@@ -107,7 +109,29 @@ function frameMsFor(rate: number): number {
  * frequently voice-less, and it cannot promise a Cantonese voice. When the
  * native engine reports "no engine/voice", we fall back to Web Speech with the
  * same BOY_VOICE, so the PWA demo keeps working.
+ *
+ * PLAYBACK RULES (issue #6):
+ *
+ * 1. **One speaker at a time.** A new `speak()` preempts the previous one and
+ *    resolves it (barge-in). Every older callback sees a stale generation and is
+ *    dropped — before this, a cancelled line could still fire `finish()` and
+ *    flip the app back to idle under a newer turn.
+ * 2. **Never lose a sentence to the cancel race.** Chromium may drop an
+ *    utterance spoken in the same task as `cancel()`; we only cancel when
+ *    something is actually playing and speak one macrotask later.
+ * 3. **One breath at a time.** The line is split by `spokenSegments()` and
+ *    played segment by segment with `SEGMENT_GAP_MS` of silence. The content is
+ *    unchanged (`join("")` == original); the caption still shows the whole line.
+ * 4. **A stopped line is not a failure.** `stopped` (barge-in) must never fall
+ *    back to the other engine — that would talk over the senior.
  */
+/** Bumped on every `speak()` / `cancelSpeech()`; stale callbacks are dropped. */
+let speakGen = 0;
+/** True between "a line started" and "that line finished". */
+let speakingNow = false;
+/** Resolver of the live line, so a preemption resolves it instead of hanging. */
+let activeFinish: (() => void) | null = null;
+
 export function speak(
   text: string,
   locale: string,
@@ -115,6 +139,20 @@ export function speak(
   preset: VoicePreset = "warm"
 ): Promise<void> {
   if (typeof window === "undefined") return Promise.resolve();
+
+  // 1. One speaker at a time: resolve the previous line (barge-in semantics)
+  //    before this one starts, so its awaiting caller never hangs.
+  const my = ++speakGen;
+  const previous = activeFinish;
+  activeFinish = null;
+  previous?.();
+  if (speakingNow || window.speechSynthesis?.speaking || window.speechSynthesis?.pending) {
+    window.speechSynthesis?.cancel();
+    void bridge()?.stopSpeak().catch(() => {});
+  }
+  speakingNow = true;
+
+  const segments = spokenSegments(text);
   return new Promise((resolve) => {
     const voice = PRESET_VOICE[preset] ?? BOY_VOICE;
     const frames = visemeFromText(text);
@@ -122,8 +160,11 @@ export function speak(
     let frame = 0;
     let timer: ReturnType<typeof setInterval> | null = null;
     let guard: ReturnType<typeof setTimeout> | null = null;
+    let gap: number | null = null;
     let done = false;
+    let index = 0;
 
+    const alive = () => !done && speakGen === my;
     const startMouth = () => {
       if (!onViseme || !frames.length || timer !== null) return;
       onViseme(frames[frame++ % frames.length]);
@@ -139,18 +180,26 @@ export function speak(
       done = true;
       stopMouth();
       if (guard !== null) clearTimeout(guard);
+      if (gap !== null) window.clearTimeout(gap);
+      if (activeFinish === finish) activeFinish = null;
+      if (speakGen === my) speakingNow = false;
       resolve();
     };
-    // Some Android engines never fire `onend` for long utterances; without this
-    // guard the assistant would stay "speaking" and the senior would be locked out.
-    guard = setTimeout(finish, frames.length * frameMs * 2 + 4000);
+    activeFinish = finish;
 
-    const webSpeak = () => {
-      if (!window.speechSynthesis) {
-        finish();
+    // Some Android engines never fire `onend` for long utterances; without this
+    // guard the assistant would stay "speaking" and the senior would be locked
+    // out. Segment count and gaps are part of the budget now.
+    const budget = frames.length * frameMs * 2 + 4000 + segments.length * (SEGMENT_GAP_MS + 900);
+    guard = setTimeout(finish, budget);
+
+    const webSpeak = (segment: string, next: () => void) => {
+      const synth = window.speechSynthesis;
+      if (!synth) {
+        next();
         return;
       }
-      const u = new SpeechSynthesisUtterance(text);
+      const u = new SpeechSynthesisUtterance(segment);
       u.lang = locale;
       u.rate = voice.rate;
       u.pitch = voice.pitch;
@@ -160,43 +209,83 @@ export function speak(
       u.onboundary = (e) => {
         frame = e.charIndex * FRAMES_PER_CHAR;
       };
-      u.onend = finish;
-      u.onerror = finish;
-      window.speechSynthesis.cancel();
-      window.speechSynthesis.speak(u);
+      u.onend = () => {
+        if (alive()) next();
+      };
+      u.onerror = () => {
+        if (alive()) next();
+      };
+      // 2. Chromium may drop an utterance spoken in the same task as cancel(),
+      //    which is the "whole sentence silent, no error" failure. Only cancel
+      //    when something is really playing, then speak on the next macrotask.
+      if (synth.speaking || synth.pending) {
+        synth.cancel();
+        window.setTimeout(() => {
+          if (alive()) synth.speak(u);
+        }, 120);
+      } else {
+        synth.speak(u);
+      }
     };
 
-    const native = bridge();
-    if (!native) {
-      webSpeak();
-      return;
-    }
-    // The native call resolves only when the utterance finishes (or is stopped),
-    // so the mouth timeline runs while we wait.
-    startMouth();
-    void native
-      .speak(text, locale, voice)
-      .then((r) => {
-        if (done) return;
-        if (r.ok || r.stopped) {
+    const playNext = () => {
+      if (!alive()) return;
+      if (index >= segments.length) {
+        finish();
+        return;
+      }
+      const segment = segments[index++];
+      const afterSegment = () => {
+        if (!alive()) return;
+        if (index >= segments.length) {
           finish();
           return;
         }
-        stopMouth();
-        frame = 0;
-        webSpeak();
-      })
-      .catch(() => {
-        if (done) return;
-        stopMouth();
-        frame = 0;
-        webSpeak();
-      });
+        gap = window.setTimeout(playNext, SEGMENT_GAP_MS);
+      };
+
+      const native = bridge();
+      if (!native) {
+        webSpeak(segment, afterSegment);
+        return;
+      }
+      // The native call resolves only when the utterance finishes (or is
+      // stopped), so the mouth timeline runs while we wait.
+      startMouth();
+      void native
+        .speak(segment, locale, voice)
+        .then((r) => {
+          if (!alive()) return;
+          if (r.ok || r.stopped) {
+            afterSegment();
+            return;
+          }
+          // 4. Consume `reason` (issue #6): the engine gave up, and the value is
+          //    the only clue in the field. Coarse only — no text, no ids.
+          track("tts_fallback", locale as Locale, { reason: r.reason ?? "unknown" });
+          stopMouth();
+          frame = 0;
+          webSpeak(segment, afterSegment);
+        })
+        .catch(() => {
+          if (!alive()) return;
+          stopMouth();
+          frame = 0;
+          webSpeak(segment, afterSegment);
+        });
+    };
+
+    playNext();
   });
 }
 
 /** Stops whatever is being said. The pending `speak()` promise resolves. */
 export function cancelSpeech(): void {
+  speakGen += 1;
+  speakingNow = false;
+  const finish = activeFinish;
+  activeFinish = null;
+  finish?.();
   if (typeof window !== "undefined") window.speechSynthesis?.cancel();
   void bridge()?.stopSpeak().catch(() => {});
 }
@@ -664,8 +753,24 @@ export function startWakeWord(
       }
     }, 300);
   };
-  rec.onerror = () => {
-    stopped = true;
+  rec.onerror = (e) => {
+    // Only a denied/unavailable microphone is fatal. "no-speech", "aborted" and
+    // "network" are routine on Android — before this, ONE of them killed the
+    // wake word for the rest of the session, which is why the senior sometimes
+    // called the name and nothing happened.
+    const err = ((e as SpeechRecognitionErrorLike | undefined)?.error ?? "").toLowerCase();
+    if (VOICE_UNAVAILABLE.has(err)) {
+      stopped = true;
+      return;
+    }
+    setTimeout(() => {
+      if (stopped) return;
+      try {
+        rec.start();
+      } catch {
+        stopped = true;
+      }
+    }, 400);
   };
 
   try {

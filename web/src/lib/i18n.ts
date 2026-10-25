@@ -63,6 +63,7 @@ export type MsgKey =
   | "toolsOpened"
   | "langOther"
   | "wakeGreeting"
+  | "wakeAck"
   | "openGreeting"
   | "cancel"
   | "followupTitle"
@@ -188,6 +189,7 @@ const zhHK: Dict = {
   toolsOpened: "好，啲掣開咗，你想用邊個就撳。",
   langOther: "普通話",
   wakeGreeting: "阿婆／阿伯，我喺度。今日身體點呀？有冇邊度唔舒服？",
+  wakeAck: "我喺度，你講。",
   openGreeting: "阿婆／阿伯，我係憶伴。今日身體點呀？有冇邊度唔舒服？",
   cancel: "取消",
   followupTitle: "覆診提醒",
@@ -312,6 +314,7 @@ const zhCN: Dict = {
   toolsOpened: "好，按钮打开了，您想用哪个就点。",
   langOther: "粤语",
   wakeGreeting: "奶奶／爷爷，我在呢。今天身体怎么样？有没有哪里不舒服？",
+  wakeAck: "我在，您说。",
   openGreeting: "奶奶／爷爷，我是忆伴。今天身体怎么样？有没有哪里不舒服？",
   cancel: "取消",
   followupTitle: "复诊提醒",

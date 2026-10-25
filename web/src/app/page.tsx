@@ -12,7 +12,7 @@ import { ScreeningOverlay } from "@/components/ScreeningOverlay";
 import { FollowupSheet } from "@/components/FollowupSheet";
 import { useReminder } from "@/hooks/useReminder";
 import { useGaitMonitor, flushGaitUploads } from "@/hooks/useGaitMonitor";
-import { useWakeWord } from "@/hooks/useWakeWord";
+import { useWakeWord, SPEAK_WAKE_NAMES } from "@/hooks/useWakeWord";
 import { useAgentBridge } from "@/hooks/useAgentBridge";
 import {
   cancelSpeech,
@@ -276,7 +276,19 @@ export default function Page() {
   });
 
   const wake = useWakeWord(locale, wakeOn, () => {
-    if (!blockedRef.current) void latest.current.onTalk(t(locale, "wakeGreeting"));
+    // Calling the name is an explicit request (requirement 1 & 3): answer it and
+    // start listening — including when it interrupts a sentence half-spoken.
+    // Only screens that own the microphone/screen (SOS, reminder, camera,
+    // screening, follow-up form) keep priority over it.
+    if (sosOpen || cameraOpen || screeningOpen || followupOpen || reminder.due) return;
+    if (sheetCard) {
+      cancelSpeech();
+      setSheetCard(null);
+    }
+    if (interviewing.current) interviewAbort.current = true;
+    // A short acknowledgement, not the long greeting: he called the name to
+    // interrupt, so the listening window must open in about a second.
+    void latest.current.onTalk(t(locale, "wakeAck"));
   });
   const { activity: wakeActivity, sleep: wakeSleep, stopListening: stopWake } = wake;
 
@@ -300,8 +312,15 @@ export default function Page() {
   };
 
   /** say() and then go back to idle. B's bridge speaks through this. */
+  const speechRef = useRef<Promise<boolean> | null>(null);
   const speakLine = async (line: string) => {
-    if (await say(line)) settle();
+    const run = say(line);
+    speechRef.current = run;
+    if (await run) settle();
+  };
+  /** Resolves when nothing is being said — the interview must not talk over it. */
+  const speechIdle = async () => {
+    await speechRef.current?.catch(() => false);
   };
 
   /** Barge-in: stop talking, stop the interview, keep the mic for the senior. */
@@ -355,7 +374,9 @@ export default function Page() {
 
   const openSos = (reason: SosEvent["reason"], source: SosEvent["source"] = "app") => {
     interrupt();
-    bumpCare("sos");
+    // The care counter is bumped by SosOverlay once the backend ACCEPTS the
+    // event (issue #1 §2.1): a screen the senior cancels during the countdown
+    // is not an SOS and must not enter the weekly report.
     setSosReason(reason);
     setSosSource(source);
     setSosOpen(true);
@@ -825,7 +846,12 @@ export default function Page() {
       saveProactive({ ...spoke, interviewAt: now });
       // Medication + open chores first: the senior answers one question, and the
       // answer ("吃了") is routed through the agent so it becomes a real record.
-      void dailyCheckIn().then(() => runInterview());
+      // `speechIdle()` keeps the interview from starting on top of the answer he
+      // just heard — a reply cut in half by the next question is not "complete".
+      void dailyCheckIn().then(async () => {
+        await speechIdle();
+        await runInterview();
+      });
       return;
     }
     saveProactive(spoke);
@@ -923,6 +949,21 @@ export default function Page() {
   }, []);
 
   useEffect(() => () => clearMeter(), [clearMeter]);
+
+  /**
+   * Requirement #1/#3: while the digital human is talking, the senior must be
+   * able to stop him by calling his name again.
+   *
+   * The wake listener is normally stopped at the start of a turn (the mic goes
+   * to the answer recognizer), so a long reply used to be uninterruptible. Here
+   * it is re-armed for the duration of `speaking`, with the narrower name set:
+   * 「忆伴」 is excluded because the reply itself contains it, and a recognizer
+   * that hears the speaker would wake itself in a loop.
+   */
+  useEffect(() => {
+    if (state !== "speaking" || blockedRef.current) return;
+    wakeSleep(SPEAK_WAKE_NAMES);
+  }, [state, wakeSleep]);
 
   // Coming back to the foreground (e.g. the senior unlocks the phone) asks the
   // planner; the cooldown keeps trivial app switches from re-greeting.
@@ -1205,6 +1246,13 @@ export default function Page() {
       </div>
 
       <div className="flex w-full flex-wrap items-center justify-center gap-4">
+        {/* Issue #1 §2.1: the tools panel (call family, health card, camera,
+            screening, typing, pairing) used to be reachable ONLY by voice, so a
+            senior who cannot speak had no way to open the buttons for people
+            who cannot speak. One always-visible entry, same size as the rest. */}
+        <button onClick={openTools} className={onTop}>
+          {t(locale, "quickTitle")}
+        </button>
         <button
           onClick={() => {
             const next = DISPLAY_NEXT[display];
@@ -1382,6 +1430,7 @@ export default function Page() {
         locale={locale}
         reason={sosReason}
         source={sosSource}
+        onEscalated={() => bumpCare("sos")}
         onClose={() => {
           setSosOpen(false);
           settle(); // re-arm the wake listener and clear the "confirming" state

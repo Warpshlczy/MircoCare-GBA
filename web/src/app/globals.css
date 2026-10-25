@@ -42,19 +42,23 @@ ol + p {
   min-width: 60px;
 }
 
-/* Captions: everything the assistant says, 2 lines max, high contrast. */
+/* Captions: everything the assistant says, up to 4 lines (issue #1 §2.2).
+   The longest spoken line is 34 characters (`SPEECH_HARD_LIMIT`); at 38px on a
+   375px handset that is ~8 characters per line, so 2 lines could only ever show
+   half a sentence. The senior must be able to READ what he HEARS. */
 .caption {
-  max-width: 28rem;
+  width: 100%;
+  max-width: 100%;
   border-radius: 1rem;
   background: #fff;
   padding: 0.5rem 1rem;
   text-align: center;
-  font-size: 48px;
-  line-height: 1.3;
+  font-size: 38px;
+  line-height: 1.25;
   font-weight: 700;
   color: theme("colors.aura.deep");
   display: -webkit-box;
-  -webkit-line-clamp: 2;
+  -webkit-line-clamp: 4;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
@@ -70,7 +74,8 @@ html.lg {
   font-size: 125%;
 }
 .lg .caption {
-  font-size: 64px;
+  font-size: 48px;
+  -webkit-line-clamp: 5;
 }
 
 /* Recording indicator: visible to family in the room; the senior never has to look. */

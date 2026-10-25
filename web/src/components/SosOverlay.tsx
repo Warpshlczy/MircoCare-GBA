@@ -15,6 +15,9 @@ interface Props {
   reason?: SosEvent["reason"];
   /** where the button was reached from — `widget` = lock-screen hot zone */
   source?: SosEvent["source"];
+  /** Fired only after the backend ACCEPTED the event (issue #1: the care
+   *  counter must not count an SOS the senior cancelled during the countdown). */
+  onEscalated?: () => void;
 }
 
 /** Mainland China uses 120; Hong Kong and Macao use 999. */
@@ -33,7 +36,7 @@ type Phase = "confirm" | "sending" | "sent" | "failed";
  * outbox still needs a real push/SMS provider. On failure it offers a retry and
  * a direct emergency-number dial link.
  */
-export function SosOverlay({ open, locale, onClose, reason = "button", source = "app" }: Props) {
+export function SosOverlay({ open, locale, onClose, reason = "button", source = "app", onEscalated }: Props) {
   const [seconds, setSeconds] = useState(15);
   const [phase, setPhase] = useState<Phase>("confirm");
   const [ack, setAck] = useState<SosAck | null>(null);
@@ -58,6 +61,7 @@ export function SosOverlay({ open, locale, onClose, reason = "button", source = 
       const res = await postSos(event);
       setAck(res);
       setPhase("sent");
+      onEscalated?.();
       navigator.vibrate?.(600); // long haptic = the request was accepted
       void speak(t(locale, res?.notified?.length ? "sosNotified" : "sosNoFamily"), locale, undefined, "urgent");
     } catch {
@@ -65,7 +69,7 @@ export function SosOverlay({ open, locale, onClose, reason = "button", source = 
       navigator.vibrate?.([500, 150, 500]);
       void speak(t(locale, "sosFailed"), locale, undefined, "urgent");
     }
-  }, [locale, reason, source]);
+  }, [locale, reason, source, onEscalated]);
 
   const retry = useCallback(() => {
     escalating.current = false;

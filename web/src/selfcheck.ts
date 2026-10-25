@@ -132,6 +132,10 @@ import {
   overBudget,
   clip,
   fitUtterance,
+  spokenSegments,
+  SEGMENT_GAP_MS,
+  SEGMENT_MAX,
+  MAX_SEGMENTS,
   SPEECH_BUDGET,
   SPEECH_HARD_LIMIT,
 } from "./lib/speech.ts";
@@ -549,7 +553,13 @@ assert.equal(magnitude(3, 4, 0), 5);
   assert.ok(pitch > 1 && pitch <= 2, `pitch=${pitch}`);
   assert.ok(rate > 0.5 && rate <= 1.2, `rate=${rate}`);
 
-  assert.ok(audio.includes(".speak(text, locale, voice)"), "native TTS is asked BEFORE Web Speech");
+  assert.ok(audio.includes(".speak(segment, locale, voice)"), "native TTS is asked BEFORE Web Speech");
+  // Issue #6 · T2: the line is synthesized segment by segment, and the Chromium
+  // cancel-before-speak race is avoided (this was "whole sentence silent").
+  assert.ok(audio.includes("spokenSegments("), "audio.ts plays one segment at a time");
+  assert.ok(audio.includes("SEGMENT_GAP_MS"), "segments are separated by a breath");
+  assert.ok(audio.includes("tx.tts_fallback") || audio.includes('"tts_fallback"'), "the engine reason is recorded, not dropped");
+  assert.ok(audio.includes("speakGen"), "a stale line can never finish under a newer one");
   // The four tones must exist on the web path too, or a barge-in line would
   // change character depending on which engine spoke it.
   for (const preset of ["warm", "gentle", "cheerful", "urgent"]) {
@@ -662,6 +672,10 @@ assert.equal(magnitude(3, 4, 0), 5);
   }
   const wake = readFileSync(new URL("./hooks/useWakeWord.ts", import.meta.url), "utf8");
   assert.ok(wake.includes('"小忆"') && wake.includes('"小憶"') && wake.includes('"阿忆"'), "new wake words");
+  // Barge-in must not self-wake: the spoken greeting contains 「忆伴」.
+  const speakNames = wake.slice(wake.indexOf("SPEAK_WAKE_NAMES"));
+  assert.ok(!speakNames.includes('"忆伴"') && !speakNames.includes('"憶伴"'), "speak-time names must exclude 忆伴");
+  assert.ok(speakNames.includes('"小忆"'), "the senior can still interrupt by name");
   const sayable = readFileSync(new URL("./lib/i18n.ts", import.meta.url), "utf8") + readFileSync(new URL("./lib/interview.ts", import.meta.url), "utf8");
   for (const w of ["傻", "蠢", "笨", "又唔記得", "又忘了", "你問過", "你问过", "痴呆", "失智", "阿尔茨海默", "阿茲海默"]) {
     assert.ok(!sayable.includes(w), `no blaming / diagnostic word "${w}" in anything the assistant says`);
@@ -2653,6 +2667,37 @@ assert.equal(magnitude(3, 4, 0), 5);
     spokenLength(fitUtterance(oneBreathless)) <= SPEECH_HARD_LIMIT,
     "一句到底的长句必须在运行时被截到兜底线以内"
   );
+
+  // spokenSegments：分句只改变断点，不改变内容（issue #6 T2）
+  {
+    const two = spokenSegments("我仲未接到屋企人。你打 999。");
+    assert.deepEqual(two, ["我仲未接到屋企人。", "你打 999。"]);
+    assert.equal(two.join(""), "我仲未接到屋企人。你打 999。");
+
+    for (const sample of [
+      "體溫 36.8 度",
+      "聽日要去診所覆診，記得帶藥單同身份證",
+      "我見你今朝到而家都未同我講過一句說話所以我唔係好知你今日身體點樣不如你話我知邊度唔舒服",
+      "好。",
+      "",
+    ]) {
+      const segs = spokenSegments(sample);
+      assert.equal(
+        segs.join("").replace(/\s+/g, ""),
+        sample.replace(/\s+/g, ""),
+        `分段不能丢字：${sample} → ${JSON.stringify(segs)}`
+      );
+      for (const s of segs) assert.ok(s.length > 0, "no empty segment");
+      assert.ok(segs.length <= MAX_SEGMENTS, `段数封顶：${segs.length}`);
+    }
+    // 每个短句自带句读时，不在逗号处乱切
+    assert.deepEqual(spokenSegments("好。"), ["好。"]);
+    // 超长无标点句按软停顿或均分，不产生 1–2 字的碎片
+    const long = spokenSegments("我見你今朝到而家都未同我講過一句說話所以我唔係好知你今日身體點樣");
+    for (const s of long) assert.ok(s.length >= 3, `不要碎片：${JSON.stringify(long)}`);
+    assert.ok(SEGMENT_GAP_MS >= 100 && SEGMENT_GAP_MS <= 400, "段间停顿要有呼吸感");
+    assert.ok(SEGMENT_MAX <= 16, "一段约等于字幕一行");
+  }
 
   // composeReply 的优先级：每一档对应一个长者真的会遇到的场景
   const base = {
