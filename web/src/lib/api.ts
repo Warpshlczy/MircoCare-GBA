@@ -196,6 +196,17 @@ export interface CaregiverOverview {
     samples: number;
   } | null;
   screeningSessions?: { id?: string; at?: number; durationMs?: number; speechRatio?: number }[];
+  /**
+   * Today's COARSE record counts reported by the senior device (issue #7).
+   * Only `{day, kind, count, lastAt}` — never a medication name or a note.
+   * A missing kind means "not reported", never zero.
+   */
+  recordsToday?: {
+    day?: string;
+    kinds?: Partial<
+      Record<"med" | "alarm" | "measure" | "card", { count?: number; lastAt?: number }>
+    >;
+  };
   activityTrend: { endedAt?: number; steps?: number; cadence?: number; fall?: boolean }[];
   alerts: { id?: string; at?: number; reason?: string; status?: string }[];
   notifications: { id?: string; kind?: string; status?: string; createdAt?: number }[];

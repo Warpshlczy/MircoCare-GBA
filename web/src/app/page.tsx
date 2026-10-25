@@ -39,7 +39,7 @@ import { assistantChat, createPairingCode, ensureSeniorSession, getAgentCards, g
 import { all, get, put } from "@/lib/db";
 import { flush, track } from "@/lib/analytics";
 import { bridge, homeWidgetPayload, nativeAvailable, onForeground } from "@/lib/native";
-import { planForeground, shouldRaiseSos, SOS_EVENT } from "@/lib/foreground";
+import { planForeground, planOpen, shouldRaiseSos, SOS_EVENT } from "@/lib/foreground";
 import { dayKey } from "@/lib/tasks";
 import { addRecord, todayRecords } from "@/lib/recordStore";
 import { completeTask, listTasks } from "@/lib/taskStore";
@@ -273,6 +273,8 @@ export default function Page() {
     openSos: (_reason: SosEvent["reason"], _source?: SosEvent["source"]) => {},
     say: (_line: string) => {},
     refresh: () => {},
+    /** widget 「今日記錄」 row: show the card, no mic, no speech */
+    showRecords: () => {},
   });
 
   const wake = useWakeWord(locale, wakeOn, () => {
@@ -865,7 +867,7 @@ export default function Page() {
       .catch(() => converse(fallback + hint));
   };
 
-  latest.current = { onTalk, proactive, openSos, say: (line) => void speakLine(line), refresh };
+  latest.current = { onTalk, proactive, openSos, say: (line) => void speakLine(line), refresh, showRecords: () => void showTodayRecords() };
 
   const submitText = async (e: FormEvent) => {
     e.preventDefault();
@@ -996,11 +998,15 @@ export default function Page() {
   // table (lib/foreground.ts) — A only executes the planned kind.
   useEffect(
     () =>
-      onForeground(({ reason }) => {
-        const plan = planForeground(reason, locale);
+      onForeground((e) => {
+        // `planOpen` first: tapping the widget's record row is a request to SEE
+        // today's records. Falling back to the reason ("widget" → listen) would
+        // answer "did I take my pill?" by opening the microphone.
+        const plan = planOpen(e.open) ?? planForeground(e.reason, locale);
         if (plan.kind === "silent") return; // boot only re-arms alarms
         if (plan.kind === "listen") void latest.current.onTalk(plan.say);
         else if (plan.kind === "speak") latest.current.say(plan.say);
+        else if (plan.kind === "records") latest.current.showRecords();
         else latest.current.refresh();
       }),
     [locale]
@@ -1061,9 +1067,11 @@ export default function Page() {
   }, [gait.lastWindow, locale]);
 
   // keep a home-screen widget payload ready for the native shell (no-op on web)
+  // `todayLog` feeds the 「今日記錄」 row (issue #8): the widget must answer
+  // "did I take my pill?" without opening the app.
   const widgetRef = useMemo(
-    () => homeWidgetPayload(cards, reminder.items, Date.now(), t(locale, "appName")),
-    [cards, reminder.items, locale]
+    () => homeWidgetPayload(cards, reminder.items, Date.now(), t(locale, "appName"), todayLog),
+    [cards, reminder.items, locale, todayLog]
   );
   useEffect(() => {
     void bridge()?.updateHomeWidget(widgetRef);

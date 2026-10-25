@@ -32,6 +32,8 @@
 | `backend/**` | **C** | A/B 只按 `api.ts` 契约提需求 |
 
 > 契约变更流程：**先改 `web/src/lib/types.ts` → 三人 review → C 改 `backend/auragba/contract.py` 对齐 → 各自实现**。禁止先写实现后补类型。
+>
+> **跨仓枚举同步（issue #2）**：`CardKind` / `Intent` 在 `types.ts` 与 `contract.py` 必须同一次提交里一起改。`web/src/selfcheck.ts` 已加文本级比对（解析两侧 `Literal` / 联合类型逐值比较），任何一侧单独漂移都会让 `scripts/preflight.sh` 变红——这类差异只会在演示现场以 500 的形式出现。
 
 ---
 
@@ -547,6 +549,9 @@ mv public/live2d/model.manifest.json /tmp/ && npm run build; mv /tmp/model.manif
 | 7 | 字幕 2 行只装 13–16 字（#1 P0） | `.caption` 改 4 行 / 38px / 全宽（大字档 5 行 / 48px） | 34 字长句完整可见 |
 | 8 | SOS 计数口径（#1 P0） | `bumpCare("sos")` 从 `openSos()` 移到 `SosOverlay` 的 `onEscalated`（后端 202 之后） | 倒计时中取消 → 计数不增 |
 | 9 | 能力边界：没有工具的请求被当成待办 | `agent.ts#outOfScopeRequest`（显式白名单：文件/邮件/打印/挂号/网购/视频通话/编程）在本地规划之后、模型之前短路，直接说「做唔到，叫屋企人幫你」，**handled:true 且不建待办**；`planLocal` 已认领的句子不受影响（「帶我去打印店」仍是路线） | 「你能帮我做个pdf吗」→ 一句实话、无卡片、无待办；「帶我去打印店」→ 仍出路线卡 |
+| 10 | 吃药上报被 mock 规划器改成建任务（#7） | `runTurn`：本地计划含 `log_medication` 且模型没选它时，**以本地计划为准**；模型选了 `log_medication` 则保留其 `name/note` | selfcheck：mock 返回 `create_task` → 实际执行 `log_medication`；模型给药名时药名保留 |
+| 11 | 小组件「今日記錄」行与深链（#8） | `homeWidgetPayload(..., todayLog)` 第 5 参；`onForeground` 先 `planOpen(e.open)` 再 `planForeground(reason)`，`kind === "records"` → 直接展示记录卡（不开麦） | 点 widget 记录行 → 只出「今日記錄」卡；不阻塞原有 widget 点击听话 |
+| 12 | 家属端今日记录与删号（#2/#7） | 家属端展示 `recordsToday.kinds.med`（缺省显示「暂无上报」，不写 0）；新增「删除账号」：`flushOutboxOnce → wipeLocalData → deleteAccount` | 删号后本机 11 个 store 清空、`deviceId` 保留；未上报时不显示 0 |
 
 > **T3-Y 承接句暂缓**：它会改变轮次语义（主句后追加一句并自动开麦），与本次「叫名字才打断/接手」的模型冲突，且必须真机验证节奏。等分段播放真机验收通过后再决定是否启用；T3-Z（`replyFollowup` 契约字段）继续不动。
 >

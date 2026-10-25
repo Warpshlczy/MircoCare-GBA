@@ -385,8 +385,19 @@ export async function runTurn(utterance: string, deps: AgentDeps): Promise<TurnO
 
   const modelCalls = res?.calls ?? [];
   const modelCards = res?.cards ?? [];
-  // `localCalls` was computed above (only tools this build can actually run).
-  const calls = modelCalls.length > 0 || modelCards.length > 0 ? modelCalls : localCalls;
+  // A medication REPORT is deterministic: "我食咗藥" must write a record.
+  // The backend mock (and any planner that has not learned the tool yet) still
+  // answers `create_task`, which would turn a taken dose into a chore and never
+  // reach `records`. The device plan wins unless the model itself chose
+  // `log_medication` — then the model's richer args (name/note) are kept.
+  const medReport = localCalls.some((c) => c.name === "log_medication");
+  const modelLoggedMed = modelCalls.some((c) => c.name === "log_medication");
+  const calls =
+    medReport && !modelLoggedMed
+      ? localCalls
+      : modelCalls.length > 0 || modelCards.length > 0
+        ? modelCalls
+        : localCalls;
 
   if (!res && calls.length === 0) {
     // No answer from the model AND nothing this device can plan: not ours.

@@ -1143,6 +1143,37 @@ assert.equal(magnitude(3, 4, 0), 5);
     // The route case still plans a real action even though it mentions 打印.
     const route = await runTurn("帶我去打印店", baseDeps({ canRun: () => true }));
     assert.deepEqual(route.steps.map((s) => s.name), ["plan_route"], "a route to a print shop is still planned");
+
+    // A mock planner that has not learned `log_medication` answers create_task.
+    // A taken dose must still become a RECORD, not a chore (issue #7).
+    const mocked = await runTurn(
+      "我食咗藥",
+      baseDeps({
+        requestTurn: async () => ({
+          reply: "",
+          calls: [{ name: "create_task", args: { text: "我食咗藥" } }],
+          cards: [],
+        }),
+      })
+    );
+    assert.deepEqual(
+      mocked.steps.map((s) => s.name),
+      ["log_medication"],
+      "the device plan wins for a medication report"
+    );
+    // But when the model DOES pick log_medication, its richer args survive.
+    const richer = await runTurn(
+      "我食咗藥",
+      baseDeps({
+        requestTurn: async () => ({
+          reply: "",
+          calls: [{ name: "log_medication", args: { name: "降壓藥" } }],
+          cards: [],
+        }),
+      })
+    );
+    assert.equal(richer.steps[0]?.name, "log_medication");
+    assert.equal(richer.steps[0]?.args.name, "降壓藥");
   }
 
   // refusal short-circuits even when a backend is available
