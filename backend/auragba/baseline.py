@@ -18,11 +18,15 @@ features, no hierarchical shrinkage. Upgrade once cohorts exist.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Literal
 
 import numpy as np
 
 from .changepoint import detect
 from .config import settings
+
+MetricDirection = Literal["high", "low", "normal"]
+MetricFlag = Literal["normal", "watch", "elevated"]
 
 # Which biomarkers are tracked, and how to read the sign of a deviation.
 # (+1 = a HIGHER value is the concern, -1 = a LOWER value is the concern.)
@@ -61,8 +65,8 @@ class MetricZ:
     median: float  # robust centre actually used for Z
     scale: float  # robust scale (1.4826 * MAD) actually used for Z
     z: float
-    direction: str
-    flag: str
+    direction: MetricDirection
+    flag: MetricFlag
     trend: float = 0.0  # slope in feature units per week (0 when too short)
     changepoint_at: int | None = None
     sustained: bool = False  # >= 3 same-direction deviations, not one spike
@@ -77,7 +81,7 @@ class BaselineOutcome:
     changepoints: list[dict] = field(default_factory=list)  # {feature, at, direction}
 
 
-def _flag(z: float, concern_sign: int) -> str:
+def _flag(z: float, concern_sign: int) -> MetricFlag:
     """Flag only deviations in the concerning direction; a big protective swing
     is not a risk signal."""
     if concern_sign > 0 and z >= _ELEVATED_Z or concern_sign < 0 and z <= -_ELEVATED_Z:
@@ -91,7 +95,7 @@ def _trend_per_week(at_ms: list[int | None], values: list[float]) -> float:
     """Least-squares slope per week; 0.0 when the span is shorter than a week."""
     if len(values) < 3 or any(t is None for t in at_ms):
         return 0.0
-    stamps = np.asarray([float(t) for t in at_ms], dtype=float)
+    stamps = np.asarray([float(t) for t in at_ms if t is not None], dtype=float)
     weeks = (stamps - stamps.min()) / 604_800_000.0
     if float(weeks.max()) < _MIN_TREND_SPAN_DAYS / 7.0:
         return 0.0
@@ -117,8 +121,16 @@ def compute_baseline(
     times = at_ms if at_ms is not None and len(at_ms) == total else None
 
     if times and z_window_days:
-        cutoff = max(times) - z_window_days * 86_400_000
-        ref_idx = {i for i, t in enumerate(times) if t >= cutoff}
+        # A missing timestamp is "unknown", not "now": `max()` on a list that
+        # contains None raises TypeError, so only known stamps can set the cutoff.
+        known = [t for t in times if t is not None]
+        if known:
+            cutoff = max(known) - z_window_days * 86_400_000
+            ref_idx = {
+                i for i, t in enumerate(times) if t is not None and t >= cutoff
+            }
+        else:
+            ref_idx = set()
     else:
         ref_idx = set(range(total))
 
@@ -156,7 +168,11 @@ def compute_baseline(
 
         values = [v for _, _, v in pairs]
         stamps = [t for _, t, _ in pairs]
-        change = detect(values, at=stamps) if all(t is not None for t in stamps) else detect(values)
+        change = (
+            detect(values, at=[t for t in stamps if t is not None])
+            if all(t is not None for t in stamps)
+            else detect(values)
+        )
         if change is not None:
             points.append({"feature": name, "at": change.at, "direction": change.direction})
 
@@ -167,6 +183,9 @@ def compute_baseline(
             same_direction = sum(1 for hz in historic_z if hz <= -_WATCH_Z)
         sustained = same_direction + (1 if abs(z) >= _WATCH_Z else 0) >= 3
 
+        direction: MetricDirection = (
+            "normal" if abs(z) < _WATCH_Z else ("high" if z > 0 else "low")
+        )
         rows.append(
             MetricZ(
                 name=name,
@@ -176,7 +195,7 @@ def compute_baseline(
                 median=median,
                 scale=scale,
                 z=z,
-                direction="normal" if abs(z) < _WATCH_Z else ("high" if z > 0 else "low"),
+                direction=direction,
                 flag=_flag(z, concern_sign),
                 trend=_trend_per_week(stamps, values),
                 changepoint_at=change.at if change is not None else None,

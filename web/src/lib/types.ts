@@ -267,6 +267,14 @@ export interface RecordEntry {
   /** short detail shown on the card; never a raw audio transcript */
   detail?: string;
   at: number;
+  /**
+   * The moment this record is ABOUT, when that differs from `at`. Only
+   * `kind:"alarm"` sets it: `at` is when he asked, `dueAt` is when it rings.
+   * Without it a restart cannot reconcile the OS alarm against the record
+   * (see native.ts#reconcileOnceAlarm) — the app would re-arm nothing and the
+   * pill alarm would be silently lost.
+   */
+  dueAt?: number;
   /** local calendar day, `YYYY-MM-DD` — lets the app re-show today after a restart */
   day: string;
   source: "voice" | "reminder" | "agent";
@@ -418,8 +426,14 @@ export type OutboxKind =
   | "behaviour"
   | "taskEvent"
   | "conversation"
-  /** geofence exit/enter — no backend route yet (issue #2), enqueue only in W4 */
-  | "geofence";
+  /** geofence exit/enter — idempotent server-side by `id` (issue #2) */
+  | "geofence"
+  /**
+   * Coarse `{day,kind,count,lastAt}` aggregate of on-device records. The only
+   * thing about `records` that ever leaves the phone (issue #7); idempotent
+   * server-side by (device, day, kind).
+   */
+  | "recordSummary";
 
 /**
  * One entry in the offline replay queue. Replay is at-least-once, so every

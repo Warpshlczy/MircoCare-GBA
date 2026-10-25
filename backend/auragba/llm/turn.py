@@ -107,7 +107,7 @@ def _valid_args(args: Any, schema: dict[str, Any]) -> bool:
     if schema.get("additionalProperties") is False:
         if any(key not in properties for key in args):
             return False
-    expected_types = {"string": str, "number": (int, float), "boolean": bool}
+    expected_types: dict[str, Any] = {"string": str, "number": (int, float), "boolean": bool}
     for key, value in args.items():
         spec = properties.get(key)
         if not isinstance(spec, dict):
@@ -115,7 +115,7 @@ def _valid_args(args: Any, schema: dict[str, Any]) -> bool:
         expected = spec.get("type")
         if expected == "number" and isinstance(value, bool):
             return False
-        wanted = expected_types.get(expected)
+        wanted = expected_types.get(expected) if isinstance(expected, str) else None
         if wanted is not None and not isinstance(value, wanted):
             return False
     return True

@@ -538,6 +538,8 @@ export function createToolRunner(deps: ToolRunnerDeps): ToolRunner {
     }
     const when = alarmWhenLabel(at, deps.now, deps.locale);
     // The alarm is a record too: a restart must still show "聽日八點 覆診".
+    // `dueAt` is what makes that record actionable — on the next cold start the
+    // bridge compares it with the OS scheduler and re-arms a lost alarm.
     if (deps.saveRecord) {
       await deps.saveRecord({
         id: `rec-alarm-${at}`,
@@ -545,6 +547,7 @@ export function createToolRunner(deps: ToolRunnerDeps): ToolRunner {
         title: label,
         detail: when,
         at: deps.now,
+        dueAt: at,
         day: dayKey(deps.now),
         source: "voice",
       });

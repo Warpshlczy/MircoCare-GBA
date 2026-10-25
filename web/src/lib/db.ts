@@ -80,3 +80,29 @@ export function get<T>(store: Store, key: string): Promise<T | undefined> {
 export function del(store: Store, key: string): Promise<void> {
   return tx(store, "readwrite", (s) => s.delete(key) as unknown as IDBRequest<void>);
 }
+
+/**
+ * Account deletion (C's `DELETE /auth/me`, issue #3 ②): every local store goes,
+ * because the server-side account is gone and this data has nowhere to sync.
+ *
+ * `localStorage["auragba.deviceId"]` is deliberately NOT touched here — dev.md
+ * §1.3 froze it, and a new deviceId means a new behavioural baseline plus a
+ * re-pair for the family. Pure device preferences (locale, theme) may stay.
+ *
+ * One transaction over all stores, so "cleared" is a fact by the time this
+ * resolves — there is no half-wiped state for the next screen to read.
+ *
+ * ORDER MATTERS (caller's job): drain `outbox` FIRST, then call the API.
+ * After the account is deleted the old token 401s, so anything still queued
+ * would only replay into an auth error and back off forever.
+ */
+export async function wipeLocalData(): Promise<void> {
+  const db = await openDb();
+  await new Promise<void>((resolve, reject) => {
+    const t = db.transaction(STORES, "readwrite");
+    for (const s of STORES) t.objectStore(s).clear();
+    t.oncomplete = () => resolve();
+    t.onerror = () => reject(t.error);
+    t.onabort = () => reject(t.error ?? new Error("wipeLocalData: transaction aborted"));
+  });
+}

@@ -33,7 +33,7 @@ import { flushClosedDay } from "@/lib/behaviourStore";
 import { pruneCareHistory, markCareDayOpened, MEASURED_DWELL_MS } from "@/lib/careStore";
 import { emergencyContacts } from "@/lib/contactStore";
 import { distanceFromHomeM, startFenceWatch } from "@/lib/geofenceStore";
-import { bridge } from "@/lib/native";
+import { bridge, armedOnceFromRecords, reconcileOnceAlarm } from "@/lib/native";
 import { flushOutboxOnce, startOutboxAutoFlush } from "@/lib/outboxRunner";
 import { enqueue } from "@/lib/outboxStore";
 import { listRecords, saveRecord } from "@/lib/recordStore";
@@ -195,6 +195,33 @@ export function useAgentBridge(deps: AgentBridgeDeps): AgentBridge {
       }
       // Care counters older than the median window cannot affect a result.
       void pruneCareHistory().catch(() => {});
+    })();
+
+    // Alarms: does the OS still hold what `records` believes?
+    //
+    // The record is written first and the OS call second, so a process death in
+    // between leaves a record with no armed alarm — "聽日八點叫我食藥" would
+    // never ring, and nothing on screen would say so. `reconcileOnceAlarm`
+    // re-arms in that direction only; it never cancels an alarm that has no
+    // record, because a pruned row is not evidence that he changed his mind.
+    void (async () => {
+      const b = bridge();
+      if (!b) return;
+      try {
+        const now = Date.now();
+        const [armed, rows] = await Promise.all([
+          b.getScheduledAlarms(),
+          listRecords().catch(() => [] as RecordEntry[]),
+        ]);
+        const plan = reconcileOnceAlarm(armedOnceFromRecords(rows, now), armed.once, now);
+        if (plan.action === "arm" && typeof plan.at === "number") {
+          await b.scheduleOnce(plan.at, plan.label);
+        } else if (plan.action === "cancel") {
+          await b.cancelOnce();
+        }
+      } catch {
+        /* a broken bridge must never block the senior from talking */
+      }
     })();
 
     return () => {

@@ -17,6 +17,7 @@ Upgrade: `pip install opensmile`, then `extract_features` prefers it automatical
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import cast
 
 import numpy as np
 
@@ -239,7 +240,13 @@ def _analyse_vector(x: np.ndarray, sr: int) -> dict[str, object]:
     # formants on voiced frames (decimated for speed)
     formants: list[list[float]] = []
     order = min(22, max(8, sr // 1000 + 4))
-    for i in voiced[:: max(1, len(voiced) // 40)] if voiced.size else []:
+    # `voiced` already holds FRAME INDICES, not a boolean mask: slicing keeps
+    # exactly those indices. `np.where(voiced)[0]` would return positions inside
+    # this array (and silently drop frame 0), so it is NOT equivalent.
+    sampled: list[int] = (
+        voiced[:: max(1, len(voiced) // 40)].tolist() if voiced.size else []
+    )
+    for i in sampled:
         fs = _formants(_lpc(frames[i], order), sr)
         if len(fs) >= 2:
             formants.append(fs)
@@ -270,10 +277,10 @@ def _build_vector(a: dict[str, object], sr: int) -> tuple[dict[str, float], dict
     f0: np.ndarray = a["f0"]                   # type: ignore[assignment]
     voiced: np.ndarray = a["voiced"]           # type: ignore[assignment]
     formants: list[list[float]] = a["formants"]  # type: ignore[assignment]
-    n_frames = int(a["n_frames"])              # type: ignore[arg-type]
-    hop_s = int(a["hop"]) / sr                 # type: ignore[arg-type]
-    threshold = float(a["threshold"])          # type: ignore[arg-type]
-    syllables = int(a["syllables"])            # type: ignore[arg-type]
+    n_frames = cast(int, a["n_frames"])
+    hop_s = cast(int, a["hop"]) / sr
+    threshold = cast(float, a["threshold"])
+    syllables = cast(int, a["syllables"])
 
     total_s = n_frames * hop_s
     voiced_s = len(voiced) * hop_s
@@ -290,8 +297,9 @@ def _build_vector(a: dict[str, object], sr: int) -> tuple[dict[str, float], dict
     else:
         shimmer = 0.0
     hnr = 0.0
-    if a["periodicity"].size:  # type: ignore[union-attr]
-        p = np.clip(np.asarray(a["periodicity"]), 0.0, 0.999)  # type: ignore[arg-type]
+    periodicity = cast(np.ndarray, a["periodicity"])
+    if periodicity.size:
+        p = np.clip(np.asarray(periodicity), 0.0, 0.999)
         hnr = float(np.mean(10.0 * np.log10(p / (1 - p) + 1e-9)))
 
     f = {name: 0.0 for name in FUNCTIONAL_NAMES}
@@ -429,7 +437,8 @@ def _extract_opensmile(audio: AudioData) -> AcousticFeatures:
     try:
         analysis = _analyse_vector(audio.samples.astype(np.float64), audio.sample_rate)
         _, np_summary = _build_vector(analysis, audio.sample_rate)
-        voiced_ratio = float(len(analysis["voiced"])) / max(int(analysis["n_frames"]), 1)  # type: ignore[arg-type]
+        voiced = cast(np.ndarray, analysis["voiced"])
+        voiced_ratio = float(voiced.size) / max(cast(int, analysis["n_frames"]), 1)
     except Exception:  # pragma: no cover
         np_summary, voiced_ratio = {}, 1.0
     summary = dict(np_summary)
@@ -472,8 +481,8 @@ def extract_features(audio: AudioData) -> AcousticFeatures:
     try:
         analysis = _analyse_vector(audio.samples.astype(np.float64), audio.sample_rate)
         vector, summary = _build_vector(analysis, audio.sample_rate)
-        voiced = analysis["voiced"]
-        ratio = float(len(voiced)) / max(int(analysis["n_frames"]), 1)  # type: ignore[arg-type]
+        voiced = cast(np.ndarray, analysis["voiced"])
+        ratio = float(voiced.size) / max(cast(int, analysis["n_frames"]), 1)
         return AcousticFeatures(vector=vector, summary=summary, backend="numpy", speech_ratio=ratio)
     except Exception:
         return AcousticFeatures(vector={n: 0.0 for n in FUNCTIONAL_NAMES}, summary={}, backend="numpy-error")

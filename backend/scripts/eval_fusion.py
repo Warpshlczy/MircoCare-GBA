@@ -95,7 +95,7 @@ def main():
         auc = roc_auc_score(y, w * res.acoustic.values + (1 - w) * res.semantic.values)
         sweep[f"{w:.1f}"] = round(auc, 3)
         print(f"  {w:.1f}:{1-w:.1f}  AUC={auc:.3f}")
-    best_w = max(sweep, key=sweep.get)
+    best_w = max(sweep, key=lambda key: sweep[key])
     print(f"最优权重: 声学 {best_w} / 语义 {round(1-float(best_w),1)}")
 
     metrics = {

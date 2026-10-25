@@ -5,7 +5,7 @@ import type {
   AgentIntentRequest, AgentTurnRequest, AgentTurnResponse, TelemetryEvent,
   ConversationTurn, MedicationPlan, MedicationPlanRequest, ReminderKind,
   BehaviourDaily, CircadianDaily, DigitalSkillDaily, TaskEvent, GeofenceEvent, Contact,
-  HealthCardUpdate,
+  HealthCardUpdate, RecordKind,
 } from "./types";
 
 export interface AssistantMessage { role: "system" | "user" | "assistant"; content: string; }
@@ -386,6 +386,24 @@ export async function postBehaviourDaily(body: {
 /** One task transition. 204, keyed by `event.id` server-side (safe to replay). */
 export async function postTaskEvent(event: TaskEvent): Promise<void> {
   await request<void>("/task/events", { method: "POST", body: JSON.stringify(event) });
+}
+
+/**
+ * Coarse daily record aggregate (issue #7, C's `POST /records/summary`).
+ *
+ * Four fields, no health text: the readable records (药名/备注/转写) never leave
+ * the phone. Keyed server-side by (device, day, kind), so an outbox replay
+ * replaces the aggregate instead of doubling it.
+ */
+export interface RecordSummaryBody {
+  day: string;
+  kind: RecordKind;
+  count: number;
+  lastAt?: number;
+}
+
+export async function postRecordSummary(body: RecordSummaryBody): Promise<void> {
+  await request<void>("/records/summary", { method: "POST", body: JSON.stringify(body) });
 }
 
 /**

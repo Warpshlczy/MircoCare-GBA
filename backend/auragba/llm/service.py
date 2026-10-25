@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from typing import Any
+from typing import Any, Literal, cast
 
 from ..config import settings
 from ..contract import (
@@ -248,4 +248,7 @@ def _validate_medication(payload: dict[str, Any], source: str, locale: str) -> M
     basis = payload.get("basis")
     if basis not in ("history", "profile", "utterance", "mixed"):
         basis = "mixed"
-    return MedicationPlan(items=items, basis=basis)
+    return MedicationPlan(
+        items=items,
+        basis=cast(Literal["history", "profile", "utterance", "mixed"], basis),
+    )

@@ -23,13 +23,14 @@ import {
   postConversationMemory,
   postGaitWindow,
   postGeofenceEvent,
+  postRecordSummary,
   postReminderEscalation,
   postScreeningSession,
   postSos,
   postTaskEvent,
   postTelemetry,
 } from "./api.ts";
-import type { ReminderEscalation } from "./api.ts";
+import type { RecordSummaryBody, ReminderEscalation } from "./api.ts";
 import { drain } from "./outboxStore.ts";
 import type { DrainResult } from "./outboxStore.ts";
 import type {
@@ -62,6 +63,7 @@ export interface OutboxTransport {
   telemetry: (events: TelemetryEvent[]) => Promise<void>;
   reminder: (e: ReminderEscalation) => Promise<void>;
   conversation: (t: ConversationTurn) => Promise<void>;
+  recordSummary: (b: RecordSummaryBody) => Promise<void>;
 }
 
 export const defaultTransport: OutboxTransport = {
@@ -74,6 +76,7 @@ export const defaultTransport: OutboxTransport = {
   telemetry: postTelemetry,
   reminder: postReminderEscalation,
   conversation: postConversationMemory,
+  recordSummary: postRecordSummary as (b: RecordSummaryBody) => Promise<void>,
 };
 
 /**
@@ -128,6 +131,9 @@ export function makeSender(transport: OutboxTransport = defaultTransport) {
         return;
       case "conversation":
         await transport.conversation(item.payload as ConversationTurn);
+        return;
+      case "recordSummary":
+        await transport.recordSummary(item.payload as RecordSummaryBody);
         return;
       default: {
         const unknown: string = item.kind;

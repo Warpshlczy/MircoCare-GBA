@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+# The self-check deliberately submits invalid payloads (to assert rejection) and
+# swaps collaborators (to simulate failures). Type checkers flag those by design;
+# the assertions below are the real contract. Keep the suppression local to this
+# harness instead of weakening the production package's checks.
+# mypy: disable-error-code="arg-type,assignment,attr-defined,misc,list-item,call-overload,call-arg,union-attr,return-value,type-var,operator,index,has-type,no-redef,func-returns-value"
 """Runnable self-check — `python3 selfcheck.py` (no test framework, no fixtures).
 
 The single check left behind by the ponytail rule: it fails loudly if the
@@ -262,6 +267,28 @@ _bad_args = from_llm_message(
     _llm_req, _llm_schemas,
 )
 assert _bad_args.calls == [], "malformed args discard the plan"
+
+# A JSON-Schema property may declare a LIST of types (e.g. nullable union). The
+# old check passed that list to dict.get(), which raises "unhashable type"; the
+# fix must neither crash nor reject a valid call.
+_flex_tool = AgentTool(
+    name="flex_note", description="",
+    schema={
+        "type": "object",
+        "properties": {"note": {"type": ["string", "null"]}},
+        "required": ["note"],
+        "additionalProperties": False,
+    },
+)
+_flex_req = _turn("记低", tools=[_flex_tool])
+_flex = from_llm_message(
+    {"content": "好",
+     "tool_calls": [{"function": {"name": "flex_note", "arguments": "{\"note\":\"ok\"}"}}]},
+    _flex_req, {"flex_note": _flex_tool.normalized()[2]},
+)
+assert [c.name for c in _flex.calls] == ["flex_note"], (
+    "a list-valued schema type must not crash the validator"
+)
 
 _confirm_msg = from_llm_message(
     {"content": "系咪打畀阿明？",
@@ -709,6 +736,15 @@ assert out4.sufficient and math.isfinite(out4.rows[0].z) and out4.rows[0].z > 2.
 rising = [{"pause_ratio": 0.30 + 0.01 * i} for i in range(12)]
 out5 = bl.compute_baseline(rising, {"pause_ratio": 0.42}, at_ms=_weekly(12), z_window_days=120)
 assert abs(out5.rows[0].trend - 0.01) < 1e-6, f"trend must be 0.01/week, got {out5.rows[0].trend}"
+
+# A missing timestamp means "unknown time": it must not crash max(), enter the
+# Z window, or invent a trend (regression for the None-safe cutoff).
+out_gap = bl.compute_baseline(
+    rising, {"pause_ratio": 0.42}, at_ms=[*_weekly(11), None], z_window_days=120
+)
+assert out_gap.sufficient and out_gap.rows[0].trend == 0.0, (
+    "a None timestamp must be excluded, not propagate or crash"
+)
 
 # A path only sends energy/envelope features; sample count alone must not turn
 # into a "stable" baseline with zero comparable biomarkers.
