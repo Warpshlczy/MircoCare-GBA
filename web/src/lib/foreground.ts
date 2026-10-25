@@ -5,13 +5,18 @@
 // Keeping the mapping here, away from page.tsx, means the rules are testable and
 // A only has to do:
 //
-//     onForeground(({ reason }) => {
-//       const plan = planForeground(reason, locale);
+//     onForeground((e) => {
+//       const plan = planOpen(e.open) ?? planForeground(e.reason, locale);
 //       if (plan.kind === "silent") return;
 //       if (plan.kind === "listen") startListening(plan.say);
 //       if (plan.kind === "speak") speakLine(plan.say);
 //       if (plan.kind === "refresh") refreshReminders();
+//       if (plan.kind === "records") showTodayRecords();
 //     });
+//
+// `planOpen` comes first because a tap on the widget's record row is a request
+// to SEE today's records — the reason ("widget") would otherwise open the mic,
+// which is the wrong answer to "did I take my pill?".
 //
 // Two rules worth stating out loud:
 //
@@ -22,7 +27,7 @@
 //
 // Tested in src/selfcheck.ts.
 
-import type { ForegroundReason } from "./native.ts";
+import type { ForegroundReason, WidgetOpenTarget } from "./native.ts";
 import type { Locale } from "./types";
 
 export type ForegroundPlan =
@@ -31,7 +36,13 @@ export type ForegroundPlan =
   | { kind: "listen"; say: string }
   | { kind: "speak"; say: string }
   /** pull fresh reminder / card state, say nothing */
-  | { kind: "refresh" };
+  | { kind: "refresh" }
+  /**
+   * The widget's record row was tapped: show the 今日記錄 card. No mic, no
+   * speech — he asked to SEE something, and a spoken "我喺度" would only delay
+   * the list he reached for.
+   */
+  | { kind: "records" };
 
 /** Window event the native SOS hot zone dispatches (MainActivity). */
 export const SOS_EVENT = "memomate:sos";
@@ -53,6 +64,20 @@ const COPY: Record<Locale, { widget: string; alarm: string }> = {
     alarm: "早上好，今天精神怎么样？有没有哪里不舒服？",
   },
 };
+
+/**
+ * The widget can name WHAT it wants opened (the closed set `WidgetOpenTarget`),
+ * separately from WHY the app came forward. Returns null when there is no
+ * target — the caller then falls back to `planForeground`.
+ *
+ * Kept apart from `planForeground` on purpose: the reason table stays a total
+ * function of the reason alone, and A's existing `planForeground(reason, locale)`
+ * call site keeps compiling untouched.
+ */
+export function planOpen(open: WidgetOpenTarget | undefined): ForegroundPlan | null {
+  if (open === "record") return { kind: "records" };
+  return null;
+}
 
 export function planForeground(reason: ForegroundReason, locale: Locale): ForegroundPlan {
   const copy = COPY[locale] ?? COPY["zh-HK"];

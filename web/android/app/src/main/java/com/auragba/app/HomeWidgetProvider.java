@@ -16,14 +16,20 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.util.ArrayList;
+import java.util.Calendar;
 import java.util.List;
 
 /**
- * 2x2 home-screen widget: name + up to 3 pending items + a dedicated SOS hot zone.
+ * 2x2 home-screen widget: name + today's last record + up to 3 pending items +
+ * a dedicated SOS hot zone.
  *
  * The payload comes from JS (`native.updateHomeWidget(homeWidgetPayload(...))`)
  * and is cached in SharedPreferences, because the widget must repaint after a
  * process death without waking the WebView.
+ *
+ * The record row is what tells a forgetful senior "you already took it". It is
+ * a separate click target from the body: tapping it opens the 今日記錄 card
+ * directly (MainActivity EXTRA_OPEN), so he does not have to ask for it aloud.
  *
  * SOS is a separate PendingIntent with its own action: it opens MainActivity with
  * ACTION_SOS, and MainActivity is declared showWhenLocked, so the senior can hit
@@ -34,10 +40,12 @@ public class HomeWidgetProvider extends AppWidgetProvider {
     static final String PREFS = "memomate_widget";
     static final String KEY_TITLE = "title";
     static final String KEY_ITEMS = "items";
+    static final String KEY_RECORD = "record";
     static final String KEY_UPDATED = "updatedAt";
 
     private static final int REQUEST_ROOT = 8810;
     private static final int REQUEST_SOS = 8811;
+    private static final int REQUEST_RECORD = 8812;
 
     private static final int[] ROW_IDS = {
             R.id.widget_item_1,
@@ -66,8 +74,42 @@ public class HomeWidgetProvider extends AppWidgetProvider {
 
         List<String> items = parseItems(p.getString(KEY_ITEMS, "[]"));
 
+        // The record row is a claim about TODAY ("you already took it"), so it
+        // expires with the day: a stale tick is what makes a forgetful senior
+        // take a second dose. Deciding that here — with no WebView alive — is
+        // the only reason the payload carries `at` next to `text`.
+        String recordText = null;
+        long recordAt = 0L;
+        String rawRecord = p.getString(KEY_RECORD, "");
+        if (rawRecord != null && !rawRecord.isEmpty()) {
+            try {
+                JSONObject o = new JSONObject(rawRecord);
+                recordText = o.optString("text", "");
+                recordAt = o.optLong("at", 0L);
+            } catch (JSONException ignored) {
+                // A malformed payload must not break the widget — show no row.
+            }
+        }
+        boolean recordFresh =
+                recordText != null && !recordText.isEmpty()
+                        && recordAt > 0L && sameLocalDay(recordAt, System.currentTimeMillis());
+
         RemoteViews rv = new RemoteViews(ctx.getPackageName(), R.layout.widget_home);
         rv.setTextViewText(R.id.widget_title, title);
+
+        if (!recordFresh) {
+            rv.setViewVisibility(R.id.widget_record, View.GONE);
+        } else {
+            rv.setViewVisibility(R.id.widget_record, View.VISIBLE);
+            rv.setTextViewText(R.id.widget_record, recordText);
+            // Deep link straight to 今日記錄: one tap, no speaking.
+            Intent rec = new Intent(ctx, MainActivity.class)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+                    .putExtra(MainActivity.EXTRA_REASON, "widget")
+                    .putExtra(MainActivity.EXTRA_OPEN, "record");
+            rv.setOnClickPendingIntent(
+                    R.id.widget_record, activityIntent(ctx, rec, REQUEST_RECORD));
+        }
 
         for (int i = 0; i < ROW_IDS.length; i++) {
             String text = i < items.size() ? items.get(i) : "";
@@ -99,6 +141,19 @@ public class HomeWidgetProvider extends AppWidgetProvider {
         int flags = PendingIntent.FLAG_UPDATE_CURRENT;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) flags |= PendingIntent.FLAG_IMMUTABLE;
         return PendingIntent.getActivity(ctx, requestCode, intent, flags);
+    }
+
+    /**
+     * Same local calendar day (the senior lives in HKT — device calendar wins).
+     * Used to expire the record row; see updateOne.
+     */
+    private static boolean sameLocalDay(long a, long b) {
+        Calendar x = Calendar.getInstance();
+        Calendar y = Calendar.getInstance();
+        x.setTimeInMillis(a);
+        y.setTimeInMillis(b);
+        return x.get(Calendar.YEAR) == y.get(Calendar.YEAR)
+                && x.get(Calendar.DAY_OF_YEAR) == y.get(Calendar.DAY_OF_YEAR);
     }
 
     /** `[{"text":"食药","done":false}, ...]` → display lines with a leading marker. */

@@ -184,6 +184,12 @@ public class AuraNativePlugin extends Plugin {
     public void updateHomeWidget(PluginCall call) {
         String title = call.getString("title", "");
         JSArray items = call.getArray("items", new JSArray());
+        // One "already done today" line, pre-formatted by JS (native.ts keeps the
+        // icon/time/clip rules pure and tested, so the widget adds no text of its own).
+        // The WHOLE object is stored, not just the text: the widget must survive a
+        // process death without the WebView, and `at` is what lets the provider
+        // hide the row once the day has turned (a stale "已食藥" is a double dose).
+        JSObject record = call.getObject("record");
         Long updatedAt = call.getLong("updatedAt", System.currentTimeMillis());
 
         SharedPreferences prefs =
@@ -191,6 +197,7 @@ public class AuraNativePlugin extends Plugin {
         prefs.edit()
                 .putString(HomeWidgetProvider.KEY_TITLE, title)
                 .putString(HomeWidgetProvider.KEY_ITEMS, items == null ? "[]" : items.toString())
+                .putString(HomeWidgetProvider.KEY_RECORD, record == null ? "" : record.toString())
                 .putLong(HomeWidgetProvider.KEY_UPDATED,
                         updatedAt == null ? System.currentTimeMillis() : updatedAt)
                 .apply();
@@ -278,6 +285,25 @@ public class AuraNativePlugin extends Plugin {
     public void cancelOnce(PluginCall call) {
         AlarmScheduler.cancelOnce(getContext());
         call.resolve();
+    }
+
+    /**
+     * What the OS actually holds. Not a capability — the reconcile patch.
+     *
+     * JS writes the alarm record first and arms the OS second, so a process
+     * death in between leaves a record with nothing armed, and the senior's
+     * "聽日八點" would silently never ring. Reading the scheduler back is the
+     * only way the app can notice; see native.ts#reconcileOnceAlarm.
+     */
+    @PluginMethod
+    public void getScheduledAlarms(PluginCall call) {
+        JSObject ret = new JSObject();
+        // Absent key = nothing armed; the JS mapper normalises absent to null.
+        JSObject daily = AlarmScheduler.readDaily(getContext());
+        if (daily != null) ret.put("daily", daily);
+        JSObject once = AlarmScheduler.readOnce(getContext());
+        if (once != null) ret.put("once", once);
+        call.resolve(ret);
     }
 
     // --- dial / launch (no permission, no clicking on his behalf) -------------

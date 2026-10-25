@@ -32,6 +32,10 @@ function mean(xs: number[]): number {
 // impact, or — with no free-fall at all — an impact over 56 m/s² together with
 // violent rotation, and then 1.5 s of real stillness. A stumble still recovers
 // and never fires.
+//
+// The stillness window also needs a floor of samples (10 over 1.5 s) and no
+// gap longer than 400 ms: a throttled sensor can otherwise skip from "impact"
+// straight to "still 1.5 s later" on two data points.
 // ---------------------------------------------------------------------------
 
 export interface FallSample {
@@ -51,6 +55,14 @@ export interface FallDetectorCfg {
   windowMs?: number; // free-fall -> impact must happen within this
   restBandG?: number; // |a|-G within this counts as "still"
   stillnessMs?: number; // sustained stillness after impact before we confirm
+  /**
+   * Evidence floor for that stillness. A quiet window is only "1.5 s of not
+   * moving" if we actually watched it: two samples 1.5 s apart prove nothing,
+   * and confirming on them pages the family for a phone left on a table.
+   */
+  minStillSamples?: number;
+  /** A longer gap means the sensor was throttled/stalled — that window is unobserved. */
+  maxGapMs?: number;
 }
 
 export interface FallResult {
@@ -65,6 +77,10 @@ export function createFallDetector(cfg: FallDetectorCfg = {}) {
   const windowMs = cfg.windowMs ?? 2000;
   const restBand = cfg.restBandG ?? 1.5;
   const stillnessMs = cfg.stillnessMs ?? 1500;
+  // 10 samples over 1.5 s ≈ 6.7 Hz — the floor Android's sensor batching gives
+  // a foreground WebView, so a real device passes and a stalled one does not.
+  const minStillSamples = cfg.minStillSamples ?? 10;
+  const maxGapMs = cfg.maxGapMs ?? 400;
   /** Without a free-fall phase the impact must be far heavier than a threshold hit. */
   const heavyImpact = accThreshold * 2;
 
@@ -73,7 +89,9 @@ export function createFallDetector(cfg: FallDetectorCfg = {}) {
   let impactAt: number | null = null;
   let fromFreeFall = false;
   let stillSince: number | null = null;
+  let stillSamples = 0;
   let lastMag: number | null = null;
+  let lastT: number | null = null;
 
   const reset = () => {
     phase = "idle";
@@ -81,6 +99,7 @@ export function createFallDetector(cfg: FallDetectorCfg = {}) {
     impactAt = null;
     fromFreeFall = false;
     stillSince = null;
+    stillSamples = 0;
   };
 
   return {
@@ -88,7 +107,9 @@ export function createFallDetector(cfg: FallDetectorCfg = {}) {
       const mag = magnitude(s.ax, s.ay, s.az);
       const gyro = magnitude(s.gx, s.gy, s.gz);
       const prev = lastMag;
+      const gapMs = lastT === null ? 0 : s.t - lastT;
       lastMag = mag;
+      lastT = s.t;
 
       // 1. free-fall entry
       if (phase === "idle" && mag < freeFallMag) {
@@ -115,12 +136,19 @@ export function createFallDetector(cfg: FallDetectorCfg = {}) {
 
       // 3. post-impact stillness confirms the fall (a stumble recovers, a fall doesn't)
       if (phase === "impact" && impactAt !== null) {
-        if (Math.abs(mag - G) < restBand && gyro < gyroThreshold / 2) {
+        // An unobserved gap cannot vouch for stillness: the phone may have been
+        // falling through it. Restart the evidence window rather than conclude.
+        if (gapMs > maxGapMs) {
+          stillSince = null;
+          stillSamples = 0;
+        } else if (Math.abs(mag - G) < restBand && gyro < gyroThreshold / 2) {
           if (stillSince === null) stillSince = s.t;
+          stillSamples++;
         } else {
           stillSince = null;
+          stillSamples = 0;
         }
-        if (stillSince !== null && s.t - stillSince >= stillnessMs) {
+        if (stillSince !== null && stillSamples >= minStillSamples && s.t - stillSince >= stillnessMs) {
           const reason: FallResult["reason"] = fromFreeFall ? "free-fall+impact" : "impact";
           reset();
           return { fall: true, reason };
