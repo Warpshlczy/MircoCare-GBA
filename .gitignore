@@ -22,6 +22,10 @@ logs/
 # restores them; the lexicons/tokens/FSTs stay in git.
 web/android/app/src/main/assets/tts/*/model.onnx
 
+# Original Live2D sample download (36 MB). web/public/live2d/README.md states
+# it is not committed; the trimmed runnable subset lives in web/public/live2d/.
+web/public/kei_zh-Hans/
+
 # Android / Capacitor build artifacts
 web/android/.gradle/
 web/android/build/
