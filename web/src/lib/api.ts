@@ -4,7 +4,7 @@ import type {
   GaitWindow, ScreeningSession, SosEvent, SosAck, HealthCard, Locale, AgentCard,
   AgentIntentRequest, AgentTurnRequest, AgentTurnResponse, TelemetryEvent,
   ConversationTurn, MedicationPlan, MedicationPlanRequest, ReminderKind,
-  BehaviourDaily, CircadianDaily, DigitalSkillDaily, TaskEvent, GeofenceEvent,
+  BehaviourDaily, CircadianDaily, DigitalSkillDaily, TaskEvent, GeofenceEvent, Contact,
 } from "./types";
 
 export interface AssistantMessage { role: "system" | "user" | "assistant"; content: string; }
@@ -202,6 +202,24 @@ export interface CaregiverOverview {
 export async function getCaregiverOverview(): Promise<CaregiverOverview> {
   return request("/caregiver/overview", { method: "GET" });
 }
+/**
+ * Replaces the callable contact list for the bound senior (family session only).
+ *
+ * Whole-table replace, not a patch: the caregiver screen owns the list, and a
+ * merge endpoint would let two tabs silently disagree about who is callable.
+ * Returns the normalised rows (phones without spaces/parentheses).
+ */
+export async function postCaregiverContacts(
+  contacts: Contact[],
+  seniorDeviceId?: string
+): Promise<Contact[]> {
+  const q = seniorDeviceId ? `?senior_device_id=${encodeURIComponent(seniorDeviceId)}` : "";
+  return request<Contact[]>(`/caregiver/contacts${q}`, {
+    method: "POST",
+    body: JSON.stringify({ contacts }),
+  });
+}
+
 export async function acknowledgeSos(sosId: string, seniorDeviceId: string): Promise<void> {
   await request(`/caregiver/sos/${encodeURIComponent(sosId)}/ack?senior_device_id=${encodeURIComponent(seniorDeviceId)}`, { method: "POST" });
 }
