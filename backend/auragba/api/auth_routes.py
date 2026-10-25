@@ -5,8 +5,9 @@ from __future__ import annotations
 import time
 import os
 
-from fastapi import APIRouter, Depends, Header, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Response
 
+from ..audit import audit_log
 from ..auth import (
     PAIRING_TTL_SECONDS,
     Principal,
@@ -16,6 +17,8 @@ from ..auth import (
     redeem_pairing_code,
     require_role,
 )
+from ..auth_store import auth_store
+from ..config import ENGINE_VERSION, FEATURE_SET_VERSION, FUSION_VERSION
 from ..contract import (
     FamilyRelation,
     PairingCodeResponse,
@@ -23,6 +26,8 @@ from ..contract import (
     RegisterRequest,
     RegisterResponse,
 )
+from ..privacy import input_digest
+from ..store import store
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -73,3 +78,26 @@ def pair(
 ) -> FamilyRelation:
     family = require_role(principal, "family")
     return FamilyRelation(**redeem_pairing_code(family, req.code))
+
+
+@router.delete("/me", status_code=204)
+def delete_me(principal: Principal = Depends(current_principal)) -> None:
+    """Erase this account, its pairings, and (for a senior) the device store.
+
+    The signed cookie/token becomes invalid as soon as the account row is gone;
+    the caller must register again to use the app. Audit records only digests.
+    """
+    deleted = auth_store.delete_account(principal.account_id)
+    if deleted is None:
+        raise HTTPException(status_code=404, detail="account not found")
+    if deleted["role"] == "senior" and deleted.get("deviceId"):
+        store.delete_device(str(deleted["deviceId"]))
+    audit_log.append(
+        kind="account_delete",
+        device_id=str(deleted.get("deviceId") or ""),
+        engine_version=ENGINE_VERSION,
+        feature_set_version=FEATURE_SET_VERSION,
+        fusion_version=FUSION_VERSION,
+        input_digest=input_digest(principal.account_id, "account-delete"),
+        output={"role": deleted["role"], "deviceErased": deleted["role"] == "senior"},
+    )

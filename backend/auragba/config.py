@@ -58,6 +58,9 @@ class Settings:
 
     privacy_mode: str = os.getenv("AURA_PRIVACY_MODE", "extract-and-burn")
     baseline_days: int = _env_int("AURA_BASELINE_DAYS", 14)
+    # Day keys must match the device's calendar day; a UTC server would otherwise
+    # look up a different `behaviour:<day>` key.
+    timezone: str = os.getenv("AURA_TIMEZONE", "Asia/Hong_Kong")
     # Trend slope and CUSUM need a longer window than the Z reference; the weekly
     # report speaks about "the last 4 weeks", so that is the default.
     trend_days: int = _env_int("AURA_TREND_DAYS", 28)
@@ -128,6 +131,9 @@ class Settings:
 
     # --- Notification provider seam (demo: webhook + log) -------------------
     notify_webhook: str = os.getenv("AURA_NOTIFY_WEBHOOK", "")
+    # C5 requires the community caregiver to be paged alongside the family.
+    # Empty = log-only demo recipient (no extra account/credential needed).
+    community_webhook: str = os.getenv("AURA_COMMUNITY_WEBHOOK", "")
 
     # --- Conversation memory at rest (C5) -----------------------------------
     # AES-GCM key material; the server refuses to start without ≥32 characters.
@@ -181,6 +187,12 @@ def validate_runtime(s: Settings = settings) -> None:
             "AURA_DEPLOY_PREVALENCE must be between 0 and 1 (e.g. 0.10); "
             "leave it empty to suppress all PPV numbers"
         )
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    try:
+        ZoneInfo(s.timezone)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise RuntimeError(f"AURA_TIMEZONE is not a valid IANA zone: {s.timezone}") from exc
 
 
 # Sampling rate the acoustic front-end works at (16 kHz mono, telephony-grade).

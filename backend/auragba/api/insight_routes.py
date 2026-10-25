@@ -140,14 +140,23 @@ def get_economics(dev: str = Depends(device_id)) -> dict:
     from ..economics import estimate as estimate_economics
 
     results = store.history(dev, "screening_results")
+    # Capture-only rows (A's `/screening/sessions`) have no riskIndex and reject
+    # rows are unusable; counting them as "a screening at risk 0" inflates the
+    # ledger with an estimate the engine never made.
+    usable = [
+        row for row in results
+        if row.get("riskIndex") is not None
+        and row.get("quality") != "reject"
+        and row.get("insufficientStreams") is not True
+    ]
     total_qaly = 0.0
     total_saved = 0.0
-    for r in results:
-        effect = estimate_economics(float(r.get("riskIndex", 0.0)), str(r.get("riskBand", "low")))
+    for r in usable:
+        effect = estimate_economics(float(r["riskIndex"]), str(r.get("riskBand", "low")))
         total_qaly += effect.qalyGained
         total_saved += effect.costSavedPerPatient
     return {
-        "screeningCount": len(results),
+        "screeningCount": len(usable),
         "qalyGained": round(total_qaly, 4),
         "costSavedPerPatient": round(total_saved, 2),
         "currency": "HKD",

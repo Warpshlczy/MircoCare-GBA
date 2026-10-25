@@ -179,6 +179,18 @@ class HealthCard(_Base):
     updatedAt: int
 
 
+class HealthCardUpdate(_Base):
+    """Family-editable health-card fields. `contacts` is a separate endpoint."""
+
+    name: str | None = Field(default=None, min_length=1, max_length=40)
+    age: int | None = Field(default=None, ge=0, le=120)
+    bloodType: str | None = Field(default=None, max_length=8)
+    allergies: list[str] | None = Field(default=None, max_length=20)
+    chronicConditions: list[str] | None = Field(default=None, max_length=20)
+    medications: list[str] | None = Field(default=None, max_length=30)
+    emergencyContact: EmergencyContact | None = None
+
+
 class TelemetryEvent(_Base):
     id: str
     name: str

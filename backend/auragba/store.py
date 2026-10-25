@@ -118,6 +118,28 @@ class Store:
                 (device_id, key, json.dumps(value, ensure_ascii=False)),
             )
 
+    def delete_doc(self, device_id: str, key: str) -> bool:
+        with self._lock, self._connect() as db:
+            cur = db.execute(
+                "DELETE FROM docs WHERE device_id = ? AND key = ?", (device_id, key)
+            )
+        return cur.rowcount > 0
+
+    def delete_device(self, device_id: str) -> int:
+        """Erase every record/document for one pseudonymous device (account delete)."""
+        with self._lock, self._connect() as db:
+            records = db.execute("DELETE FROM records WHERE device_id = ?", (device_id,)).rowcount
+            db.execute("DELETE FROM docs WHERE device_id = ?", (device_id,))
+        return records
+
+    def all_payloads(self, kind: str) -> list[dict[str, Any]]:
+        """Cross-device read used only by the k-anonymity export (no identifiers)."""
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT payload FROM records WHERE kind = ? ORDER BY at ASC", (kind,)
+            ).fetchall()
+        return [json.loads(row["payload"]) for row in rows]
+
     # --- retention / revocation helpers (C5) ------------------------------- #
     def delete_before(self, kind: str, before_ms: int, device_id: str | None = None) -> int:
         """Drop rows of `kind` older than the cutoff; returns the row count."""

@@ -25,6 +25,7 @@ from ..baseline import compute_baseline
 from ..config import settings
 from ..contract import Locale, ReportCount, ReportEvidence, ReportSection, WeeklyReport
 from ..store import Store
+from ..timeutil import day_key
 
 DAY_MS = 86_400_000
 WEEK_MS = 7 * DAY_MS
@@ -320,7 +321,7 @@ def _between(rows: list[dict[str, Any]], start: int, end: int) -> list[dict[str,
 
 
 def _day(ms: int) -> str:
-    return time.strftime("%Y-%m-%d", time.localtime(ms / 1000))
+    return day_key(ms)
 
 
 def _talk_section(
@@ -754,6 +755,75 @@ def render_html(report: WeeklyReport) -> str:
 <footer>{esc(report.disclaimer)}</footer>
 </body>
 </html>"""
+
+
+def render_pdf(report: WeeklyReport) -> bytes:
+    """Self-contained PDF (C4). No external assets; CJK via the built-in CID font."""
+    from io import BytesIO
+
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+    pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
+    t = _text(report.locale)
+    copy = t["html"]
+    esc = html.escape
+    cell = ParagraphStyle("cell", fontName="STSong-Light", fontSize=9, leading=12)
+    cell_bold = ParagraphStyle("cell_bold", parent=cell, fontSize=9, leading=12,
+                               textColor=colors.HexColor("#0e7490"))
+    body = ParagraphStyle("body", fontName="STSong-Light", fontSize=10, leading=14)
+    note = ParagraphStyle("note", fontName="STSong-Light", fontSize=8, leading=11,
+                          textColor=colors.HexColor("#4b5b66"))
+    h1 = ParagraphStyle("h1", fontName="STSong-Light", fontSize=18, leading=22,
+                        textColor=colors.HexColor("#0e7490"))
+    h2 = ParagraphStyle("h2", parent=h1, fontSize=12, leading=16)
+
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(
+        buffer, pagesize=A4, topMargin=16 * mm, bottomMargin=16 * mm,
+        leftMargin=16 * mm, rightMargin=16 * mm, title=copy["title"],
+    )
+    meta = copy["meta"].format(
+        start=_day(report.periodStart), end=_day(report.periodEnd), n=len(report.sections)
+    )
+    story: list[Any] = [
+        Paragraph(esc(copy["h1"]), h1),
+        Paragraph(esc(meta), note),
+        Spacer(1, 4 * mm),
+    ]
+    for section in report.sections:
+        story.append(Paragraph(esc(section.title), h2))
+        story.append(Paragraph(esc(section.summary), body))
+        if section.counts:
+            rows = [
+                [Paragraph(esc(c.label), cell_bold),
+                 Paragraph(esc(c.value + (f"（{c.delta}）" if c.delta else "")), cell)]
+                for c in section.counts
+            ]
+            table = Table(rows, colWidths=[52 * mm, 108 * mm])
+            table.setStyle(TableStyle([
+                ("LINEBELOW", (0, 0), (-1, -1), 0.25, colors.HexColor("#e2e8f0")),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ]))
+            story.append(table)
+        if section.evidence:
+            items = "；".join(
+                f"{e.feature} Z={e.z:.2f} 方向={e.direction} 样本={e.samples} 窗口={e.windowDays}天"
+                + ("（持续）" if e.sustained else "")
+                for e in section.evidence
+            )
+            story.append(Paragraph(esc(items), note))
+        if section.note:
+            story.append(Paragraph(esc(section.note), note))
+        story.append(Spacer(1, 4 * mm))
+    story.append(Paragraph(esc(report.disclaimer), note))
+    doc.build(story)
+    return buffer.getvalue()
 
 
 def _section_html(section: ReportSection, t: dict[str, Any]) -> str:

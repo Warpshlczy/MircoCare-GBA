@@ -7,10 +7,10 @@ device's derived data. A quota of 0 means unlimited (useful for local demos).
 from __future__ import annotations
 
 import threading
-import time
 
 from ..config import settings
 from ..store import store
+from ..timeutil import today_key
 from .errors import LLMQuotaExceeded
 
 _LOCK = threading.Lock()
@@ -23,7 +23,7 @@ def reserve(device_id: str) -> int:
     if quota <= 0:
         return 0
 
-    today = time.strftime("%Y-%m-%d", time.localtime())
+    today = today_key()
     with _LOCK:
         doc = store.get_doc(device_id, _USAGE_KEY) or {}
         count = int(doc.get("count", 0)) if doc.get("date") == today else 0
