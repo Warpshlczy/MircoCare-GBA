@@ -75,6 +75,7 @@ def root() -> dict:
             "POST /telemetry/events", "POST /conversation/turns",
             "DELETE /conversation/turns/{id}",
             "POST /behaviour/daily", "POST /task/events", "POST /geofence/events",
+            "POST /records/summary",
             "POST /medication/plan (configurable)", "POST /reminders/escalate",
         ],
         "auth": [
